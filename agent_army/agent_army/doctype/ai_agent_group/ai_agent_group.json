@@ -1,0 +1,30 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:group_key",
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["enabled", "group_key", "group_name", "description", "agent_filter_json", "routing_rules_json", "min_concurrency", "max_concurrency", "limits_json"],
+ "fields": [
+  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
+  {"fieldname": "group_key", "fieldtype": "Data", "in_list_view": 1, "label": "Group Key", "reqd": 1, "unique": 1},
+  {"fieldname": "group_name", "fieldtype": "Data", "in_list_view": 1, "label": "Group Name", "reqd": 1},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"},
+  {"description": "JSON filter or explicit agent list for this group.", "fieldname": "agent_filter_json", "fieldtype": "Code", "label": "Agent Filter JSON", "options": "JSON"},
+  {"fieldname": "routing_rules_json", "fieldtype": "Code", "label": "Routing Rules JSON", "options": "JSON"},
+  {"default": "1", "fieldname": "min_concurrency", "fieldtype": "Int", "label": "Min Concurrency"},
+  {"default": "50", "fieldname": "max_concurrency", "fieldtype": "Int", "label": "Max Concurrency"},
+  {"fieldname": "limits_json", "fieldtype": "Code", "label": "Limits JSON", "options": "JSON"}
+ ],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Agent Army",
+ "name": "AI Agent Group",
+ "naming_rule": "By fieldname",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Agent Army Manager", "write": 1}, {"read": 1, "role": "Agent Army Operator"}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "group_name",
+ "track_changes": 1
+}

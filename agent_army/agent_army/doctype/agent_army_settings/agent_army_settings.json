@@ -1,0 +1,29 @@
+{
+ "actions": [],
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["queues_section", "ingest_queue", "dispatch_queue", "whatsapp_queue", "voice_queue", "llm_queue", "callbacks_queue", "deadline_queue", "defaults_section", "default_timezone", "default_task_timeout_seconds", "dispatch_batch_size"],
+ "fields": [
+  {"fieldname": "queues_section", "fieldtype": "Section Break", "label": "Queues"},
+  {"default": "agent_ingest", "fieldname": "ingest_queue", "fieldtype": "Data", "label": "Ingest Queue"},
+  {"default": "agent_dispatch", "fieldname": "dispatch_queue", "fieldtype": "Data", "label": "Dispatch Queue"},
+  {"default": "agent_whatsapp", "fieldname": "whatsapp_queue", "fieldtype": "Data", "label": "WhatsApp Queue"},
+  {"default": "agent_voice", "fieldname": "voice_queue", "fieldtype": "Data", "label": "Voice Queue"},
+  {"default": "agent_llm", "fieldname": "llm_queue", "fieldtype": "Data", "label": "LLM Queue"},
+  {"default": "agent_callbacks", "fieldname": "callbacks_queue", "fieldtype": "Data", "label": "Callbacks Queue"},
+  {"default": "agent_deadline", "fieldname": "deadline_queue", "fieldtype": "Data", "label": "Deadline Queue"},
+  {"fieldname": "defaults_section", "fieldtype": "Section Break", "label": "Defaults"},
+  {"default": "Asia/Kolkata", "fieldname": "default_timezone", "fieldtype": "Data", "label": "Default Timezone"},
+  {"default": "900", "fieldname": "default_task_timeout_seconds", "fieldtype": "Int", "label": "Default Task Timeout Seconds"},
+  {"default": "500", "fieldname": "dispatch_batch_size", "fieldtype": "Int", "label": "Dispatch Batch Size"}
+ ],
+ "issingle": 1,
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Agent Army",
+ "name": "Agent Army Settings",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"read": 1, "role": "Agent Army Manager", "write": 1}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

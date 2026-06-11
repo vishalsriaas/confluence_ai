@@ -1,0 +1,31 @@
+{
+ "actions": [],
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["status", "task", "task_batch", "agent", "channel", "provider", "started_at", "ended_at", "duration_ms", "external_id", "error_message", "request_json", "response_json"],
+ "fields": [
+  {"default": "Started", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Started\nSucceeded\nFailed\nRetry Scheduled"},
+  {"fieldname": "task", "fieldtype": "Link", "in_list_view": 1, "label": "Task", "options": "AI Task", "reqd": 1},
+  {"fieldname": "task_batch", "fieldtype": "Link", "label": "Task Batch", "options": "AI Task Batch"},
+  {"fieldname": "agent", "fieldtype": "Link", "in_list_view": 1, "label": "Agent", "options": "AI Agent"},
+  {"fieldname": "channel", "fieldtype": "Data", "in_list_view": 1, "label": "Channel"},
+  {"fieldname": "provider", "fieldtype": "Data", "label": "Provider"},
+  {"fieldname": "started_at", "fieldtype": "Datetime", "label": "Started At"},
+  {"fieldname": "ended_at", "fieldtype": "Datetime", "label": "Ended At"},
+  {"default": "0", "fieldname": "duration_ms", "fieldtype": "Int", "label": "Duration MS"},
+  {"fieldname": "external_id", "fieldtype": "Data", "label": "External ID"},
+  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message"},
+  {"fieldname": "request_json", "fieldtype": "Code", "label": "Request JSON", "options": "JSON"},
+  {"fieldname": "response_json", "fieldtype": "Code", "label": "Response JSON", "options": "JSON"}
+ ],
+ "indexes": [["task", "status"], ["agent", "status"], ["channel", "status"]],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Agent Army",
+ "name": "AI Task Attempt",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Agent Army Manager", "write": 1}, {"read": 1, "role": "Agent Army Operator"}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

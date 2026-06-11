@@ -1,0 +1,28 @@
+{
+ "actions": [],
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["status", "provider", "operation", "agent", "task", "external_id", "latency_ms", "cost", "request_json", "response_json", "error_message"],
+ "fields": [
+  {"default": "Succeeded", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Succeeded\nFailed\nRate Limited\nTimeout"},
+  {"fieldname": "provider", "fieldtype": "Data", "in_list_view": 1, "label": "Provider"},
+  {"fieldname": "operation", "fieldtype": "Data", "label": "Operation"},
+  {"fieldname": "agent", "fieldtype": "Link", "label": "Agent", "options": "AI Agent"},
+  {"fieldname": "task", "fieldtype": "Link", "label": "Task", "options": "AI Task"},
+  {"fieldname": "external_id", "fieldtype": "Data", "label": "External ID"},
+  {"default": "0", "fieldname": "latency_ms", "fieldtype": "Int", "label": "Latency MS"},
+  {"fieldname": "cost", "fieldtype": "Currency", "label": "Cost"},
+  {"fieldname": "request_json", "fieldtype": "Code", "label": "Request JSON", "options": "JSON"},
+  {"fieldname": "response_json", "fieldtype": "Code", "label": "Response JSON", "options": "JSON"},
+  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message"}
+ ],
+ "indexes": [["provider", "status"], ["agent", "provider"], ["task", "provider"]],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Agent Army",
+ "name": "AI Provider Event",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Agent Army Manager", "write": 1}, {"read": 1, "role": "Agent Army Operator"}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
