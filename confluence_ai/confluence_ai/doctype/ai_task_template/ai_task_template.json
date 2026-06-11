@@ -1,0 +1,32 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:template_key",
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["enabled", "template_key", "template_name", "task_type", "description", "objective_prompt", "input_schema_json", "default_context_json", "default_channel", "default_priority", "default_timeout_seconds"],
+ "fields": [
+  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
+  {"fieldname": "template_key", "fieldtype": "Data", "in_list_view": 1, "label": "Template Key", "reqd": 1, "unique": 1},
+  {"fieldname": "template_name", "fieldtype": "Data", "in_list_view": 1, "label": "Template Name", "reqd": 1},
+  {"default": "Generic", "fieldname": "task_type", "fieldtype": "Data", "label": "Task Type"},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"},
+  {"fieldname": "objective_prompt", "fieldtype": "Long Text", "label": "Objective Prompt", "reqd": 1},
+  {"fieldname": "input_schema_json", "fieldtype": "Code", "label": "Input Schema JSON", "options": "JSON"},
+  {"fieldname": "default_context_json", "fieldtype": "Code", "label": "Default Context JSON", "options": "JSON"},
+  {"default": "WhatsApp", "fieldname": "default_channel", "fieldtype": "Select", "label": "Default Channel", "options": "WhatsApp\nVoice\nLLM\nMCP\nAPI"},
+  {"default": "Normal", "fieldname": "default_priority", "fieldtype": "Select", "label": "Default Priority", "options": "Low\nNormal\nHigh\nUrgent"},
+  {"default": "900", "fieldname": "default_timeout_seconds", "fieldtype": "Int", "label": "Default Timeout Seconds"}
+ ],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Task Template",
+ "naming_rule": "By fieldname",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}, {"read": 1, "role": "Confluence AI Operator"}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "template_name",
+ "track_changes": 1
+}

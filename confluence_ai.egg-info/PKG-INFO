@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: agent_army
+Version: 0.0.1
+Summary: Standalone Frappe AI agent orchestration platform
+Author-email: SRIAAS <webdevelopersriaas@gmail.com>
+License: MIT
+Requires-Python: >=3.10
+License-File: LICENSE
+License-File: LICENSE:Zone.Identifier
+Requires-Dist: requests
+Dynamic: license-file

@@ -1,0 +1,27 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:server_key",
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["enabled", "server_key", "server_name", "server_url", "transport_type", "bearer_token", "description"],
+ "fields": [
+  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
+  {"fieldname": "server_key", "fieldtype": "Data", "in_list_view": 1, "label": "Server Key", "reqd": 1, "unique": 1},
+  {"fieldname": "server_name", "fieldtype": "Data", "in_list_view": 1, "label": "Server Name", "reqd": 1},
+  {"fieldname": "server_url", "fieldtype": "Data", "label": "Server URL", "reqd": 1},
+  {"default": "HTTP", "fieldname": "transport_type", "fieldtype": "Select", "label": "Transport Type", "options": "HTTP\nSSE\nstdio"},
+  {"fieldname": "bearer_token", "fieldtype": "Password", "label": "Bearer Token"},
+  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"}
+ ],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI MCP Server",
+ "naming_rule": "By fieldname",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "server_name"
+}

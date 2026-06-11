@@ -1,0 +1,29 @@
+{
+ "actions": [],
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["status", "severity", "error_type", "source", "agent", "task", "task_batch", "queue_name", "message", "traceback", "payload_json", "resolution_note"],
+ "fields": [
+  {"default": "Open", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Open\nResolved\nIgnored"},
+  {"default": "Error", "fieldname": "severity", "fieldtype": "Select", "in_list_view": 1, "label": "Severity", "options": "Info\nWarning\nError\nCritical"},
+  {"fieldname": "error_type", "fieldtype": "Data", "in_list_view": 1, "label": "Error Type"},
+  {"fieldname": "source", "fieldtype": "Data", "label": "Source"},
+  {"fieldname": "agent", "fieldtype": "Link", "label": "Agent", "options": "AI Agent"},
+  {"fieldname": "task", "fieldtype": "Link", "label": "Task", "options": "AI Task"},
+  {"fieldname": "task_batch", "fieldtype": "Link", "label": "Task Batch", "options": "AI Task Batch"},
+  {"fieldname": "queue_name", "fieldtype": "Data", "label": "Queue Name"},
+  {"fieldname": "message", "fieldtype": "Small Text", "label": "Message"},
+  {"fieldname": "traceback", "fieldtype": "Long Text", "label": "Traceback"},
+  {"fieldname": "payload_json", "fieldtype": "Code", "label": "Payload JSON", "options": "JSON"},
+  {"fieldname": "resolution_note", "fieldtype": "Small Text", "label": "Resolution Note"}
+ ],
+ "indexes": [["status", "severity"], ["task", "status"], ["task_batch", "status"], ["agent", "status"]],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Error Log",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}, {"read": 1, "role": "Confluence AI Operator", "write": 1}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -1,0 +1,32 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:CHAN-{####}",
+ "creation": "2026-06-11 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": ["enabled", "account_name", "channel_type", "provider_type", "base_url", "api_key", "api_secret", "webhook_secret", "default_from", "endpoint_paths_json", "rate_limits_json"],
+ "fields": [
+  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
+  {"fieldname": "account_name", "fieldtype": "Data", "in_list_view": 1, "label": "Account Name", "reqd": 1},
+  {"fieldname": "channel_type", "fieldtype": "Select", "in_list_view": 1, "label": "Channel Type", "options": "WhatsApp\nLiveKit\nLLM\nMCP\nAPI", "reqd": 1},
+  {"fieldname": "provider_type", "fieldtype": "Data", "in_list_view": 1, "label": "Provider Type"},
+  {"fieldname": "base_url", "fieldtype": "Data", "label": "Base URL"},
+  {"fieldname": "api_key", "fieldtype": "Password", "label": "API Key"},
+  {"fieldname": "api_secret", "fieldtype": "Password", "label": "API Secret"},
+  {"fieldname": "webhook_secret", "fieldtype": "Password", "label": "Webhook Secret"},
+  {"fieldname": "default_from", "fieldtype": "Data", "label": "Default From"},
+  {"description": "JSON path config for bridge endpoints, e.g. {\"send\":\"/api/send\",\"status\":\"/api/status\"}.", "fieldname": "endpoint_paths_json", "fieldtype": "Code", "label": "Endpoint Paths JSON", "options": "JSON"},
+  {"fieldname": "rate_limits_json", "fieldtype": "Code", "label": "Rate Limits JSON", "options": "JSON"}
+ ],
+ "modified": "2026-06-11 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Channel Account",
+ "naming_rule": "By fieldname",
+ "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "account_name",
+ "track_changes": 1
+}
