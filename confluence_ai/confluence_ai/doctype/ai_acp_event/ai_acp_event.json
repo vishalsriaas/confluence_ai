@@ -3,23 +3,108 @@
  "creation": "2026-06-11 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["status", "event_type", "from_agent", "to_agent", "to_group", "task", "message", "context_json"],
- "fields": [
-  {"default": "Queued", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Queued\nDelivered\nFailed\nIgnored"},
-  {"default": "Handoff", "fieldname": "event_type", "fieldtype": "Select", "in_list_view": 1, "label": "Event Type", "options": "Handoff\nBroadcast\nEscalation\nContext Share"},
-  {"fieldname": "from_agent", "fieldtype": "Link", "label": "From Agent", "options": "AI Agent"},
-  {"fieldname": "to_agent", "fieldtype": "Link", "label": "To Agent", "options": "AI Agent"},
-  {"fieldname": "to_group", "fieldtype": "Link", "label": "To Group", "options": "AI Agent Group"},
-  {"fieldname": "task", "fieldtype": "Link", "label": "Task", "options": "AI Task"},
-  {"fieldname": "message", "fieldtype": "Small Text", "label": "Message"},
-  {"fieldname": "context_json", "fieldtype": "Code", "label": "Context JSON", "options": "JSON"}
+ "field_order": [
+  "status",
+  "event_type",
+  "from_agent",
+  "to_agent",
+  "to_group",
+  "task",
+  "message",
+  "context_json"
  ],
- "indexes": [["status", "event_type"], ["to_agent", "status"], ["to_group", "status"]],
+ "fields": [
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Queued\nDelivered\nFailed\nIgnored"
+  },
+  {
+   "default": "Handoff",
+   "fieldname": "event_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Event Type",
+   "options": "Handoff\nBroadcast\nEscalation\nContext Share"
+  },
+  {
+   "fieldname": "from_agent",
+   "fieldtype": "Link",
+   "label": "From Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "to_agent",
+   "fieldtype": "Link",
+   "label": "To Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "to_group",
+   "fieldtype": "Link",
+   "label": "To Group",
+   "options": "AI Agent Group"
+  },
+  {
+   "fieldname": "task",
+   "fieldtype": "Link",
+   "label": "Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message"
+  },
+  {
+   "fieldname": "context_json",
+   "fieldtype": "Code",
+   "label": "Context JSON",
+   "options": "JSON"
+  }
+ ],
+ "indexes": [
+  [
+   "status",
+   "event_type"
+  ],
+  [
+   "to_agent",
+   "status"
+  ],
+  [
+   "to_group",
+   "status"
+  ]
+ ],
  "modified": "2026-06-11 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI ACP Event",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}, {"read": 1, "role": "Confluence AI Operator"}],
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "autoname": "format:acpevent-{##}",
+ "naming_rule": "Expression"
 }

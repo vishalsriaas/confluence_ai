@@ -3,25 +3,120 @@
  "creation": "2026-06-11 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["status", "direction", "event_type", "source", "task", "task_batch", "signature_valid", "payload_json", "response_json", "error_message"],
- "fields": [
-  {"default": "Queued", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Queued\nProcessed\nFailed\nIgnored"},
-  {"default": "Inbound", "fieldname": "direction", "fieldtype": "Select", "label": "Direction", "options": "Inbound\nOutbound"},
-  {"fieldname": "event_type", "fieldtype": "Data", "in_list_view": 1, "label": "Event Type"},
-  {"fieldname": "source", "fieldtype": "Data", "label": "Source"},
-  {"fieldname": "task", "fieldtype": "Link", "label": "Task", "options": "AI Task"},
-  {"fieldname": "task_batch", "fieldtype": "Link", "label": "Task Batch", "options": "AI Task Batch"},
-  {"default": "0", "fieldname": "signature_valid", "fieldtype": "Check", "label": "Signature Valid"},
-  {"fieldname": "payload_json", "fieldtype": "Code", "label": "Payload JSON", "options": "JSON"},
-  {"fieldname": "response_json", "fieldtype": "Code", "label": "Response JSON", "options": "JSON"},
-  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message"}
+ "field_order": [
+  "status",
+  "direction",
+  "event_type",
+  "source",
+  "task",
+  "task_batch",
+  "signature_valid",
+  "payload_json",
+  "response_json",
+  "error_message"
  ],
- "indexes": [["status", "event_type"], ["task", "status"], ["task_batch", "status"]],
+ "fields": [
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Queued\nProcessed\nFailed\nIgnored"
+  },
+  {
+   "default": "Inbound",
+   "fieldname": "direction",
+   "fieldtype": "Select",
+   "label": "Direction",
+   "options": "Inbound\nOutbound"
+  },
+  {
+   "fieldname": "event_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Event Type"
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Data",
+   "label": "Source"
+  },
+  {
+   "fieldname": "task",
+   "fieldtype": "Link",
+   "label": "Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "task_batch",
+   "fieldtype": "Link",
+   "label": "Task Batch",
+   "options": "AI Task Batch"
+  },
+  {
+   "default": "0",
+   "fieldname": "signature_valid",
+   "fieldtype": "Check",
+   "label": "Signature Valid"
+  },
+  {
+   "fieldname": "payload_json",
+   "fieldtype": "Code",
+   "label": "Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "response_json",
+   "fieldtype": "Code",
+   "label": "Response JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message"
+  }
+ ],
+ "indexes": [
+  [
+   "status",
+   "event_type"
+  ],
+  [
+   "task",
+   "status"
+  ],
+  [
+   "task_batch",
+   "status"
+  ]
+ ],
  "modified": "2026-06-11 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Webhook Event",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}, {"read": 1, "role": "Confluence AI Operator"}],
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "autoname": "format:webhook-{##}",
+ "naming_rule": "Expression"
 }

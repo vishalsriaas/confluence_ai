@@ -1,0 +1,239 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:route-{##}",
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "route_name",
+  "source_system",
+  "description",
+  "matching_section",
+  "webhook_url_help",
+  "event_key_field",
+  "event_value",
+  "task_config_section",
+  "task_template",
+  "target_agent",
+  "target_group",
+  "channel",
+  "priority",
+  "dispatch_section",
+  "dispatch_mode",
+  "batch_records_field",
+  "batch_label",
+  "field_mapping_section",
+  "sample_json",
+  "field_mappings",
+  "mcp_tools_section",
+  "allowed_tools",
+  "advanced_section",
+  "idempotency_key_field",
+  "callback_url",
+  "webhook_secret"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "route_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Route Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_system",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Source System",
+   "description": "Optional label for the sender e.g. ERPNext, Shopify. Used for routing when same event comes from multiple sources."
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "matching_section",
+   "fieldtype": "Section Break",
+   "label": "Event Matching"
+  },
+  {
+   "fieldname": "webhook_url_help",
+   "fieldtype": "HTML",
+   "label": "Webhook URL Help"
+  },
+  {
+   "default": "event",
+   "fieldname": "event_key_field",
+   "fieldtype": "Data",
+   "label": "Event Key Field",
+   "description": "Which field in the incoming payload to read as the event type. Default: event",
+   "reqd": 1
+  },
+  {
+   "fieldname": "event_value",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Event Value",
+   "description": "The value to match e.g. order_confirmed, delivery_completed, followup_batch",
+   "reqd": 1
+  },
+  {
+   "fieldname": "task_config_section",
+   "fieldtype": "Section Break",
+   "label": "Task Configuration"
+  },
+  {
+   "fieldname": "task_template",
+   "fieldtype": "Link",
+   "label": "Task Template",
+   "options": "AI Task Template",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_agent",
+   "fieldtype": "Link",
+   "label": "Target Agent",
+   "options": "AI Agent",
+   "description": "Specific agent to handle tasks from this route"
+  },
+  {
+   "fieldname": "target_group",
+   "fieldtype": "Link",
+   "label": "Target Group",
+   "options": "AI Agent Group",
+   "description": "Agent group to distribute tasks across (used if Target Agent is not set)"
+  },
+  {
+   "default": "Voice",
+   "fieldname": "channel",
+   "fieldtype": "Select",
+   "label": "Channel",
+   "options": "Voice\nWhatsApp\nLLM\nMCP\nAPI"
+  },
+  {
+   "default": "Normal",
+   "fieldname": "priority",
+   "fieldtype": "Select",
+   "label": "Priority",
+   "options": "Low\nNormal\nHigh\nUrgent"
+  },
+  {
+   "fieldname": "dispatch_section",
+   "fieldtype": "Section Break",
+   "label": "Dispatch Mode"
+  },
+  {
+   "default": "Immediate",
+   "fieldname": "dispatch_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Dispatch Mode",
+   "options": "Immediate\nBatch",
+   "description": "Immediate: dispatch one task right now. Batch: payload contains an array of records to run as a batch."
+  },
+  {
+   "fieldname": "batch_records_field",
+   "fieldtype": "Data",
+   "label": "Batch Records Field",
+   "description": "For Batch mode: name of the field in the payload that contains the array of records e.g. records",
+   "depends_on": "eval:doc.dispatch_mode=='Batch'"
+  },
+  {
+   "fieldname": "batch_label",
+   "fieldtype": "Data",
+   "label": "Batch Label",
+   "description": "Optional human-readable label for auto-generated batches from this route. e.g. 'Monday Followup'",
+   "depends_on": "eval:doc.dispatch_mode=='Batch'"
+  },
+  {
+   "fieldname": "field_mapping_section",
+   "fieldtype": "Section Break",
+   "label": "Field Mapping"
+  },
+  {
+   "fieldname": "sample_json",
+   "fieldtype": "Code",
+   "label": "Sample Webhook JSON",
+   "options": "JSON",
+   "description": "Paste a sample webhook payload here to automatically populate field mapping source fields."
+  },
+  {
+   "fieldname": "field_mappings",
+   "fieldtype": "Table",
+   "label": "Field Mappings",
+   "options": "AI Event Route Field",
+   "description": "Map fields from incoming payload to context JSON. Leave empty to pass full raw payload as context."
+  },
+  {
+   "fieldname": "mcp_tools_section",
+   "fieldtype": "Section Break",
+   "label": "Allowed MCP Tools",
+   "depends_on": "eval:doc.channel=='Voice' || doc.channel=='LLM' || doc.channel=='MCP'"
+  },
+  {
+   "fieldname": "allowed_tools",
+   "fieldtype": "Table",
+   "label": "Allowed Tools",
+   "options": "AI Event Route Tool",
+   "description": "Select the MCP tools this agent/campaign is allowed to call during the conversation."
+  },
+  {
+   "fieldname": "advanced_section",
+   "fieldtype": "Section Break",
+   "label": "Advanced"
+  },
+  {
+   "fieldname": "idempotency_key_field",
+   "fieldtype": "Data",
+   "label": "Idempotency Key Field",
+   "description": "Payload field to use as idempotency key (prevents duplicate tasks). e.g. order_id"
+  },
+  {
+   "fieldname": "callback_url",
+   "fieldtype": "Data",
+   "label": "Callback URL",
+   "description": "URL to POST status updates when tasks complete"
+  },
+  {
+   "fieldname": "webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret Key",
+   "description": "Optional. If set, incoming requests must include matching X-Webhook-Secret header. Leave blank to allow unauthenticated webhooks."
+  }
+ ],
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Event Route",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "naming_rule": "Expression"
+}

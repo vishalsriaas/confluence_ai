@@ -1,8 +1,8 @@
 {
  "actions": [],
  "creation": "2026-06-11 00:00:00.000000",
+ "custom": 0,
  "doctype": "DocType",
- "engine": "InnoDB",
  "field_order": ["queues_section", "ingest_queue", "dispatch_queue", "whatsapp_queue", "voice_queue", "llm_queue", "callbacks_queue", "deadline_queue", "defaults_section", "default_timezone", "default_task_timeout_seconds", "dispatch_batch_size"],
  "fields": [
   {"fieldname": "queues_section", "fieldtype": "Section Break", "label": "Queues"},

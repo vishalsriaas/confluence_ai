@@ -1,0 +1,77 @@
+{
+ "actions": [],
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "target_field",
+  "value_type",
+  "source_field",
+  "sample_value",
+  "static_value",
+  "transformation"
+ ],
+ "fields": [
+  {
+   "fieldname": "target_field",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Target Field (in context)",
+   "description": "Key to write in the task context JSON. e.g. phone, patient_name, order_id",
+   "reqd": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "value_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Value Type",
+   "options": "From Payload\nStatic Value",
+   "default": "From Payload",
+   "reqd": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "source_field",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Source Field (from payload)",
+   "description": "Field name to read from the incoming webhook payload. e.g. customer_name",
+   "depends_on": "eval:doc.value_type=='From Payload'",
+   "columns": 2
+  },
+  {
+   "fieldname": "sample_value",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Sample Value",
+   "read_only": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "static_value",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Static Value",
+   "description": "Fixed value to always set. e.g. INR, confirmed",
+   "depends_on": "eval:doc.value_type=='Static Value'",
+   "columns": 2
+  },
+  {
+   "fieldname": "transformation",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Transform",
+   "options": "None\nUppercase\nLowercase\nTrim\nTrim + Lowercase",
+   "default": "None",
+   "columns": 2
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Event Route Field",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}

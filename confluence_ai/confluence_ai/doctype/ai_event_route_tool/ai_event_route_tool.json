@@ -1,0 +1,36 @@
+{
+ "actions": [],
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "tool",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "tool",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Tool",
+   "options": "AI MCP Tool",
+   "reqd": 1,
+   "columns": 5
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Description",
+   "read_only": 1,
+   "columns": 7
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Event Route Tool",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}

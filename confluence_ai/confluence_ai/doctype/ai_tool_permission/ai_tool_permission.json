@@ -3,21 +3,87 @@
  "creation": "2026-06-11 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["enabled", "agent", "agent_group", "tool", "scope", "rate_limit_per_minute"],
- "fields": [
-  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
-  {"fieldname": "agent", "fieldtype": "Link", "in_list_view": 1, "label": "Agent", "options": "AI Agent"},
-  {"fieldname": "agent_group", "fieldtype": "Link", "label": "Agent Group", "options": "AI Agent Group"},
-  {"fieldname": "tool", "fieldtype": "Link", "in_list_view": 1, "label": "Tool", "options": "AI MCP Tool", "reqd": 1},
-  {"fieldname": "scope", "fieldtype": "Small Text", "label": "Scope"},
-  {"default": "60", "fieldname": "rate_limit_per_minute", "fieldtype": "Int", "label": "Rate Limit Per Minute"}
+ "field_order": [
+  "enabled",
+  "agent",
+  "agent_group",
+  "tool",
+  "scope",
+  "rate_limit_per_minute"
  ],
- "indexes": [["agent", "tool"], ["agent_group", "tool"]],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "agent_group",
+   "fieldtype": "Link",
+   "label": "Agent Group",
+   "options": "AI Agent Group"
+  },
+  {
+   "fieldname": "tool",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Tool",
+   "options": "AI MCP Tool",
+   "reqd": 1
+  },
+  {
+   "fieldname": "scope",
+   "fieldtype": "Small Text",
+   "label": "Scope"
+  },
+  {
+   "default": "60",
+   "fieldname": "rate_limit_per_minute",
+   "fieldtype": "Int",
+   "label": "Rate Limit Per Minute"
+  }
+ ],
+ "indexes": [
+  [
+   "agent",
+   "tool"
+  ],
+  [
+   "agent_group",
+   "tool"
+  ]
+ ],
  "modified": "2026-06-11 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Tool Permission",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}],
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "autoname": "format:permission-{##}",
+ "naming_rule": "Expression"
 }

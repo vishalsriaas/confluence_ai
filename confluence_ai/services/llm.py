@@ -38,7 +38,7 @@ def _run_provider(provider: str, task, agent, payload: dict) -> dict:
 
     request_payload = {
         "model": provider_config.get("model"),
-        "system_prompt": agent.system_prompt if agent else "",
+        "system_prompt": agent.get_system_prompt() if agent else "",
         "personality": agent.personality if agent else "",
         "task_context": payload,
     }

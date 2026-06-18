@@ -1,5 +1,5 @@
 from frappe.model.document import Document
 
 
-class AgentArmySettings(Document):
+class ConfluenceAISettings(Document):
     pass

@@ -1,0 +1,53 @@
+{
+ "actions": [],
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "parameter_name",
+  "type",
+  "required",
+  "description"
+ ],
+ "fields": [
+  {
+   "fieldname": "parameter_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Parameter Name",
+   "reqd": 1,
+   "columns": 3
+  },
+  {
+   "fieldname": "type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Type",
+   "options": "string\nnumber\nboolean\narray\nobject",
+   "default": "string",
+   "reqd": 1,
+   "columns": 2
+  },
+  {
+   "fieldname": "required",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Required",
+   "columns": 2
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "reqd": 1,
+   "columns": 5
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI MCP Tool Parameter",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}

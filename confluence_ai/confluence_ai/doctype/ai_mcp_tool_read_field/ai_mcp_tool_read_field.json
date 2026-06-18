@@ -1,0 +1,26 @@
+{
+ "actions": [],
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "client_field"
+ ],
+ "fields": [
+  {
+   "fieldname": "client_field",
+   "fieldtype": "Autocomplete",
+   "in_list_view": 1,
+   "label": "Client Field",
+   "reqd": 1,
+   "columns": 6
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI MCP Tool Read Field",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}

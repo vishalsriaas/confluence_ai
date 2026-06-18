@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import frappe
 
-from confluence_ai.services import livekit, whatsapp_bridge
+from confluence_ai.services import livekit, whatsapp_bridge, vobiz
+from confluence_ai.services import event_router
 from confluence_ai.services.auth import require_access
 from confluence_ai.services.utils import as_json, get_request_json
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def receive_vobiz() -> dict:
+    payload = get_request_json()
+    event = _record_inbound("vobiz", payload)
+    result = vobiz.handle_callback(payload)
+    frappe.db.set_value("AI Webhook Event", event, {"status": "Processed", "response_json": as_json(result)})
+    return result
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -25,6 +35,62 @@ def receive_livekit() -> dict:
     result = livekit.handle_callback(payload)
     frappe.db.set_value("AI Webhook Event", event, {"status": "Processed", "response_json": as_json(result)})
     return result
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def receive_event(source_system: str | None = None) -> dict:
+    """
+    Universal inbound webhook endpoint for external systems (ERP, CRM, etc.).
+
+    Routing is driven entirely by AI Event Route records in the UI — no code
+    changes needed to support new event types.
+
+    Optional query param:
+        ?source_system=ERPNext   — used to disambiguate same event from multiple sources
+    """
+    payload = get_request_json()
+    webhook_event = _record_inbound(source_system or "external", payload)
+
+    # Find matching route
+    route = event_router.find_matching_route(payload, source_system=source_system)
+
+    if not route:
+        event_key = payload.get("event") or payload.get("event_type") or "unknown"
+        frappe.db.set_value(
+            "AI Webhook Event",
+            webhook_event,
+            {"status": "Failed", "response_json": as_json({"error": "no_matching_route", "event": event_key})},
+        )
+        frappe.log_error(
+            title="AI Event Route: no matching route",
+            message=f"No enabled AI Event Route found for payload: {payload}",
+        )
+        return {"status": "no_route", "event": event_key, "message": "No matching AI Event Route configured for this event."}
+
+    # Per-route optional auth: validate X-Webhook-Secret header if secret is configured
+    if not event_router.validate_route_auth(route, frappe.request.headers):
+        frappe.db.set_value(
+            "AI Webhook Event",
+            webhook_event,
+            {"status": "Failed", "response_json": as_json({"error": "invalid_webhook_secret"})},
+        )
+        frappe.throw("Invalid or missing X-Webhook-Secret header", frappe.AuthenticationError)
+
+    try:
+        result = event_router.dispatch_from_route(route, payload)
+        frappe.db.set_value(
+            "AI Webhook Event",
+            webhook_event,
+            {"status": "Processed", "response_json": as_json(result)},
+        )
+        return result
+    except Exception as exc:
+        frappe.db.set_value(
+            "AI Webhook Event",
+            webhook_event,
+            {"status": "Failed", "response_json": as_json({"error": str(exc)})},
+        )
+        raise
 
 
 def _record_inbound(source: str, payload: dict) -> str:

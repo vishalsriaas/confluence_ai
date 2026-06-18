@@ -3,29 +3,203 @@
  "creation": "2026-06-11 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["status", "task", "task_batch", "agent", "channel", "provider", "started_at", "ended_at", "duration_ms", "external_id", "error_message", "request_json", "response_json"],
- "fields": [
-  {"default": "Started", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Started\nSucceeded\nFailed\nRetry Scheduled"},
-  {"fieldname": "task", "fieldtype": "Link", "in_list_view": 1, "label": "Task", "options": "AI Task", "reqd": 1},
-  {"fieldname": "task_batch", "fieldtype": "Link", "label": "Task Batch", "options": "AI Task Batch"},
-  {"fieldname": "agent", "fieldtype": "Link", "in_list_view": 1, "label": "Agent", "options": "AI Agent"},
-  {"fieldname": "channel", "fieldtype": "Data", "in_list_view": 1, "label": "Channel"},
-  {"fieldname": "provider", "fieldtype": "Data", "label": "Provider"},
-  {"fieldname": "started_at", "fieldtype": "Datetime", "label": "Started At"},
-  {"fieldname": "ended_at", "fieldtype": "Datetime", "label": "Ended At"},
-  {"default": "0", "fieldname": "duration_ms", "fieldtype": "Int", "label": "Duration MS"},
-  {"fieldname": "external_id", "fieldtype": "Data", "label": "External ID"},
-  {"fieldname": "error_message", "fieldtype": "Small Text", "label": "Error Message"},
-  {"fieldname": "request_json", "fieldtype": "Code", "label": "Request JSON", "options": "JSON"},
-  {"fieldname": "response_json", "fieldtype": "Code", "label": "Response JSON", "options": "JSON"}
+ "field_order": [
+  "status",
+  "task",
+  "task_batch",
+  "agent",
+  "channel",
+  "provider",
+  "started_at",
+  "ended_at",
+  "duration_ms",
+  "external_id",
+  "error_message",
+  "call_uuid",
+  "trunk_id",
+  "telephony_details_section",
+  "telephony_status",
+  "duration",
+  "vobiz_initiated_payload",
+  "vobiz_hangup_payload",
+  "transcript",
+  "recording_url",
+  "payload_section",
+  "request_json",
+  "response_json"
  ],
- "indexes": [["task", "status"], ["agent", "status"], ["channel", "status"]],
+ "fields": [
+  {
+   "default": "Started",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Started\nSucceeded\nFailed\nRetry Scheduled"
+  },
+  {
+   "fieldname": "task",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Task",
+   "options": "AI Task",
+   "reqd": 1
+  },
+  {
+   "fieldname": "task_batch",
+   "fieldtype": "Link",
+   "label": "Task Batch",
+   "options": "AI Task Batch"
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "channel",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Channel"
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Data",
+   "label": "Provider"
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At"
+  },
+  {
+   "fieldname": "ended_at",
+   "fieldtype": "Datetime",
+   "label": "Ended At"
+  },
+  {
+   "default": "0",
+   "fieldname": "duration_ms",
+   "fieldtype": "Int",
+   "label": "Duration MS"
+  },
+  {
+   "fieldname": "external_id",
+   "fieldtype": "Data",
+   "label": "External ID"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message"
+  },
+  {
+   "fieldname": "call_uuid",
+   "fieldtype": "Data",
+   "label": "Call UUID"
+  },
+  {
+   "fieldname": "trunk_id",
+   "fieldtype": "Data",
+   "label": "Trunk ID"
+  },
+  {
+   "fieldname": "telephony_details_section",
+   "fieldtype": "Section Break",
+   "label": "Telephony & Callback Details"
+  },
+  {
+   "fieldname": "telephony_status",
+   "fieldtype": "Data",
+   "label": "Vobiz Call Status"
+  },
+  {
+   "fieldname": "duration",
+   "fieldtype": "Int",
+   "label": "Vobiz Call Duration"
+  },
+  {
+   "fieldname": "vobiz_initiated_payload",
+   "fieldtype": "Code",
+   "label": "Vobiz Initiated Payload",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "vobiz_hangup_payload",
+   "fieldtype": "Code",
+   "label": "Vobiz Hangup Payload",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "transcript",
+   "fieldtype": "Long Text",
+   "label": "Vobiz Call Transcript"
+  },
+  {
+   "fieldname": "recording_url",
+   "fieldtype": "Data",
+   "label": "Vobiz Call Recording"
+  },
+  {
+   "fieldname": "payload_section",
+   "fieldtype": "Section Break",
+   "label": "Payloads & Results"
+  },
+  {
+   "fieldname": "request_json",
+   "fieldtype": "Code",
+   "label": "API Call (Request)",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "response_json",
+   "fieldtype": "Code",
+   "label": "API Response",
+   "options": "JSON"
+  }
+ ],
+ "indexes": [
+  [
+   "task",
+   "status"
+  ],
+  [
+   "agent",
+   "status"
+  ],
+  [
+   "channel",
+   "status"
+  ]
+ ],
  "modified": "2026-06-11 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Task Attempt",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}, {"read": 1, "role": "Confluence AI Operator"}],
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
- "track_changes": 1
+ "track_changes": 1,
+ "autoname": "format:attempt-{##}",
+ "naming_rule": "Expression"
 }

@@ -1,25 +1,163 @@
 {
  "actions": [],
  "allow_rename": 1,
- "autoname": "field:tool_name",
+ "autoname": "format:mcptl-{##}",
  "creation": "2026-06-11 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
- "field_order": ["enabled", "tool_name", "description", "server", "endpoint_url", "http_method", "parameters_schema_json"],
- "fields": [
-  {"default": "1", "fieldname": "enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
-  {"fieldname": "tool_name", "fieldtype": "Data", "in_list_view": 1, "label": "Tool Name", "reqd": 1, "unique": 1},
-  {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"},
-  {"fieldname": "server", "fieldtype": "Link", "label": "MCP Server", "options": "AI MCP Server"},
-  {"fieldname": "endpoint_url", "fieldtype": "Data", "label": "Endpoint URL", "reqd": 1},
-  {"default": "POST", "fieldname": "http_method", "fieldtype": "Select", "label": "HTTP Method", "options": "GET\nPOST\nPUT\nPATCH"},
-  {"fieldname": "parameters_schema_json", "fieldtype": "Code", "label": "Parameters Schema JSON", "options": "JSON"}
+ "field_order": [
+  "enabled",
+  "tool_name",
+  "description",
+  "schema_section",
+  "input_parameters",
+  "expected_json",
+  "native_config_section",
+  "server",
+  "client_doctype",
+  "operation_type",
+  "match_filters",
+  "fields_to_read",
+  "fields_to_write",
+  "endpoint_url",
+  "http_method",
+  "generated_curl",
+  "fetched_schema_json"
  ],
- "modified": "2026-06-11 00:00:00.000000",
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "tool_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tool Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "schema_section",
+   "fieldtype": "Section Break",
+   "label": "Tool Arguments Schema (for LLM)"
+  },
+  {
+   "fieldname": "input_parameters",
+   "fieldtype": "Table",
+   "label": "Input Parameters",
+   "options": "AI MCP Tool Parameter",
+   "description": "Define the parameters the LLM needs to extract from the conversation to call this tool."
+  },
+  {
+   "fieldname": "expected_json",
+   "fieldtype": "Code",
+   "label": "Expected JSON Format",
+   "read_only": 1,
+   "options": "JSON",
+   "description": "Expected JSON payload structure containing arguments passed by the agent."
+  },
+  {
+   "fieldname": "native_config_section",
+   "fieldtype": "Section Break",
+   "label": "Client ERP Mapping"
+  },
+  {
+   "fieldname": "server",
+   "fieldtype": "Link",
+   "label": "MCP Server",
+   "options": "AI MCP Server"
+  },
+  {
+   "fieldname": "client_doctype",
+   "fieldtype": "Autocomplete",
+   "label": "Client DocType",
+   "description": "Target DocType in the client's ERP system. e.g. Patient, Lead, Patient Encounter"
+  },
+  {
+   "fieldname": "operation_type",
+   "fieldtype": "Select",
+   "label": "Operation Type",
+   "options": "Read\nCreate\nUpdate",
+   "default": "Read"
+  },
+  {
+   "fieldname": "match_filters",
+   "fieldtype": "Table",
+   "label": "Search Filters",
+   "options": "AI MCP Tool Field",
+   "description": "Define filters to match/find records on the client ERP."
+  },
+  {
+   "fieldname": "fields_to_read",
+   "fieldtype": "Table",
+   "label": "Fields to Retrieve",
+   "options": "AI MCP Tool Read Field",
+   "description": "Select fields to read and return to the agent."
+  },
+  {
+   "fieldname": "fields_to_write",
+   "fieldtype": "Table",
+   "label": "Fields to Populate",
+   "options": "AI MCP Tool Field",
+   "description": "Define field values to create or update on the client ERP."
+  },
+  {
+   "fieldname": "endpoint_url",
+   "fieldtype": "Data",
+   "label": "Endpoint URL",
+   "description": "HTTP endpoint URL or path for external REST tool"
+  },
+  {
+   "default": "POST",
+   "fieldname": "http_method",
+   "fieldtype": "Select",
+   "label": "HTTP Method",
+   "options": "GET\nPOST\nPUT\nPATCH"
+  },
+  {
+   "fieldname": "generated_curl",
+   "fieldtype": "Code",
+   "label": "Generated cURL Command",
+   "read_only": 1,
+   "options": "Shell"
+  },
+  {
+   "fieldname": "fetched_schema_json",
+   "fieldtype": "Code",
+   "hidden": 1,
+   "label": "Fetched Schema JSON Cache",
+   "options": "JSON"
+  }
+ ],
+ "modified": "2026-06-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI MCP Tool",
- "naming_rule": "By fieldname",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1}],
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],

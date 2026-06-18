@@ -1,0 +1,252 @@
+{
+ "charts": [],
+ "content": "[{\"type\": \"header\", \"data\": {\"text\": \"Confluence AI Management\", \"level\": 4}}, {\"type\": \"card\", \"data\": {\"card_name\": \"1. Connection & Channels\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"2. ERP & Tool Integration\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"3. Inbound Routing\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"4. Agent Definitions\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"5. Templates & Operations\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"6. Monitoring & Logs\"}}]",
+ "creation": "2026-06-12 12:50:29.771371",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "hide_custom": 0,
+ "icon": "settings",
+ "idx": 0,
+ "indicator_color": "green",
+ "is_hidden": 0,
+ "label": "Confluence AI",
+ "links": [
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "1. Connection & Channels",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "System Settings",
+   "link_count": 0,
+   "link_to": "Confluence AI Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Channel Accounts",
+   "link_count": 0,
+   "link_to": "AI Channel Account",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Access Tokens",
+   "link_count": 0,
+   "link_to": "AI Access Token",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "2. ERP & Tool Integration",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "MCP Servers",
+   "link_count": 0,
+   "link_to": "AI MCP Server",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "MCP Tools",
+   "link_count": 0,
+   "link_to": "AI MCP Tool",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Tool Permissions",
+   "link_count": 0,
+   "link_to": "AI Tool Permission",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "3. Inbound Routing",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Event Routes",
+   "link_count": 0,
+   "link_to": "AI Event Route",
+   "link_type": "DocType",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "4. Agent Definitions",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agents",
+   "link_count": 0,
+   "link_to": "AI Agent",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Agent Groups",
+   "link_count": 0,
+   "link_to": "AI Agent Group",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "5. Templates & Operations",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Task Templates",
+   "link_count": 0,
+   "link_to": "AI Task Template",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Task Batches",
+   "link_count": 0,
+   "link_to": "AI Task Batch",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Tasks",
+   "link_count": 0,
+   "link_to": "AI Task",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Task Attempts",
+   "link_count": 0,
+   "link_to": "AI Task Attempt",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "6. Monitoring & Logs",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Webhook Events",
+   "link_count": 0,
+   "link_to": "AI Webhook Event",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "ACP Telephony Events",
+   "link_count": 0,
+   "link_to": "AI ACP Event",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Provider LLM Events",
+   "link_count": 0,
+   "link_to": "AI Provider Event",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Error Logs",
+   "link_count": 0,
+   "link_to": "AI Error Log",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-06-12 12:50:29.771371",
+ "modified_by": "Administrator",
+ "module": "Confluence AI",
+ "name": "Confluence AI",
+ "number_cards": [],
+ "owner": "Administrator",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [],
+ "sequence_id": 0.0,
+ "shortcuts": [],
+ "title": "Confluence AI"
+}

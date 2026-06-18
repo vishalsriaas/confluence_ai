@@ -1,0 +1,56 @@
+{
+ "actions": [],
+ "creation": "2026-06-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "client_field",
+  "value_source",
+  "source_value",
+  "is_filter"
+ ],
+ "fields": [
+  {
+   "fieldname": "client_field",
+   "fieldtype": "Autocomplete",
+   "in_list_view": 1,
+   "label": "Client Field",
+   "reqd": 1,
+   "columns": 3
+  },
+  {
+   "fieldname": "value_source",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Value Source",
+   "options": "From Tool Arguments\nStatic Value\nSystem Function",
+   "default": "From Tool Arguments",
+   "reqd": 1,
+   "columns": 3
+  },
+  {
+   "fieldname": "source_value",
+   "fieldtype": "Autocomplete",
+   "in_list_view": 1,
+   "label": "Source Value",
+   "description": "Variable name from tool arguments, static text, or system function e.g. now",
+   "columns": 4
+  },
+  {
+   "fieldname": "is_filter",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "in_list_view": 1,
+   "label": "Is Filter?",
+   "description": "If checked, this is used as a filter/matching key for Read/Update operations",
+   "columns": 2
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-06-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI MCP Tool Field",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}
