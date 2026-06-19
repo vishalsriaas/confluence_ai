@@ -73,6 +73,18 @@ def validate_route_auth(route: "frappe.Document", request_headers: dict) -> bool
     return incoming == secret
 
 
+def _get_nested_value(d: dict, path: str, default: str = "") -> Any:
+    if not path:
+        return default
+    curr: Any = d
+    for part in path.split("."):
+        if isinstance(curr, dict):
+            curr = curr.get(part)
+        else:
+            return default
+    return curr if curr is not None else default
+
+
 def build_context(route: "frappe.Document", payload: dict) -> dict:
     """
     Build the task context JSON using the n8n-style field mapping table.
@@ -100,7 +112,7 @@ def build_context(route: "frappe.Document", payload: dict) -> dict:
         else:
             # From Payload
             src = (row.source_field or "").strip()
-            value = payload.get(src, "") if src else ""
+            value = _get_nested_value(payload, src, "")
 
         # Apply transformation
         transform = row.transformation or "None"
