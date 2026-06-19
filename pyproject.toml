@@ -9,6 +9,7 @@ authors = [
 ]
 dependencies = [
     "requests",
+    "livekit-api",
 ]
 
 [build-system]
