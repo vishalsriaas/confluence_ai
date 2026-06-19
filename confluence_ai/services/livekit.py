@@ -20,6 +20,18 @@ class SafeFormatter(string.Formatter):
         return super().get_value(key, args, kwargs)
 
 
+def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
+    """Resolve the LiveKit worker dispatch name for voice calls."""
+    return (
+        payload.get("livekit_agent_name")
+        or payload.get("agent_name")
+        or endpoints.get("livekit_agent_name")
+        or endpoints.get("agent_name")
+        or endpoints.get("dispatch_agent_name")
+        or "vobiz-gemini-live"
+    )
+
+
 def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
 
@@ -84,6 +96,7 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         "context": payload,
     }
     metadata_str = json.dumps(metadata)
+    livekit_agent_name = _livekit_dispatch_name(agent, endpoints, payload)
 
     lkapi = api.LiveKitAPI(url, api_key, api_secret)
     try:
@@ -102,12 +115,12 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             "metadata": room_info.metadata,
         }
 
-        # 2. If it's a SIP call, trigger it
+        # 2. If it's a SIP call, place the participant before dispatching the agent.
         if operation == "outbound_call":
             phone = payload.get("phone") or payload.get("to")
-            sip_trunk_id = endpoints.get("sip_trunk_id")
+            sip_trunk_id = account.trunk_id or endpoints.get("sip_trunk_id")
             if not sip_trunk_id:
-                raise ValueError("Missing 'sip_trunk_id' in Channel Account Endpoint Paths JSON configuration.")
+                raise ValueError("Missing SIP trunk ID. Configure AI Channel Account.trunk_id or endpoint_paths_json.sip_trunk_id.")
 
             sip_req = proto_sip.CreateSIPParticipantRequest(
                 sip_trunk_id=sip_trunk_id,
@@ -119,15 +132,16 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             sip_info = await lkapi.sip.create_sip_participant(sip_req)
             result_payload["sip_call_sid"] = sip_info.sip_call_id
             result_payload["participant_identity"] = sip_info.participant_identity
-        else:
-            # 3. For non-telephony calls, dispatch the agent explicitly
-            dispatch_req = proto_dispatch.CreateAgentDispatchRequest(
-                agent_name="",
-                room=room_name,
-                metadata=metadata_str
-            )
-            dispatch_info = await lkapi.agent_dispatch.create_dispatch(dispatch_req)
-            result_payload["dispatch_id"] = dispatch_info.id
+
+        # 3. Dispatch the LiveKit voice agent for both outbound SIP and room-only calls.
+        dispatch_req = proto_dispatch.CreateAgentDispatchRequest(
+            agent_name=livekit_agent_name,
+            room=room_name,
+            metadata=metadata_str
+        )
+        dispatch_info = await lkapi.agent_dispatch.create_dispatch(dispatch_req)
+        result_payload["dispatch_id"] = dispatch_info.id
+        result_payload["livekit_agent_name"] = livekit_agent_name
 
         record_provider_event(
             provider=account.provider_type or "LiveKit",
