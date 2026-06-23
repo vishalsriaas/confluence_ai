@@ -72,11 +72,13 @@ def handle_callback(payload: dict) -> dict:
     task_name, attempt_name = find_task_and_attempt(payload)
 
     if not task_name:
+        call_log = upsert_call_log(payload)
+        frappe.db.commit()
         frappe.log_error(
             title="Vobiz callback match failed",
             message=f"Could not find matching AI Task or AI Task Attempt for payload: {json.dumps(payload, default=str)}",
         )
-        return {"status": "error", "message": "No matching task or attempt found"}
+        return {"status": "error", "message": "No matching task or attempt found", "call_log": call_log}
 
     # 2. Get the documents
     task = frappe.get_doc("AI Task", task_name)
@@ -213,6 +215,8 @@ def handle_callback(payload: dict) -> dict:
         if attempt:
             attempt.call_uuid = call_uuid
 
+    call_log = upsert_call_log(payload, task=task, attempt=attempt)
+
     # 4. Save updates
     task.result_json = as_json(task_result)
     task.save(ignore_permissions=True)
@@ -227,8 +231,117 @@ def handle_callback(payload: dict) -> dict:
         "status": "success",
         "task": task.name,
         "attempt": attempt.name if attempt else None,
+        "call_log": call_log,
         "processed_event": event_type,
     }
+
+
+def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
+    """Create/update a human-friendly call log row from Vobiz callback payloads."""
+    if not frappe.db.exists("DocType", "AI Call Log"):
+        return None
+
+    call_uuid = (
+        payload.get("CallUUID")
+        or payload.get("call_uuid")
+        or payload.get("RequestID")
+        or payload.get("recording_id")
+        or payload.get("transcription_id")
+    )
+    sip_call_id = payload.get("SIPCallID") or payload.get("sip_call_id")
+
+    existing = None
+    if call_uuid:
+        existing = frappe.db.exists("AI Call Log", {"call_uuid": call_uuid})
+    if not existing and sip_call_id:
+        existing = frappe.db.exists("AI Call Log", {"sip_call_id": sip_call_id})
+
+    doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
+    event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
+    event_type_lower = str(event_type).lower()
+
+    doc.provider = "Vobiz"
+    doc.event_type = event_type
+    doc.direction = payload.get("Direction") or payload.get("direction")
+    doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
+    doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
+    doc.customer_phone = doc.to_number or doc.customer_phone
+    doc.call_uuid = call_uuid or doc.call_uuid
+    doc.sip_call_id = sip_call_id or doc.sip_call_id
+    doc.trunk_id = payload.get("TrunkID") or payload.get("trunk_id") or doc.trunk_id
+    doc.domain = payload.get("Domain") or payload.get("domain") or doc.domain
+    doc.reason = payload.get("Reason") or payload.get("reason") or payload.get("hangup_cause") or doc.reason
+    doc.last_payload_json = as_json(payload)
+
+    if task:
+        doc.task = task.name
+        doc.agent = task.assigned_agent or task.target_agent
+        try:
+            context = json.loads(task.context_json or "{}")
+            if isinstance(context, dict):
+                doc.customer_name = context.get("customer_name") or context.get("patient_name") or context.get("order_patient_name") or doc.customer_name
+                doc.customer_phone = context.get("customer_phone") or context.get("phone") or context.get("phone_number") or doc.customer_phone
+        except Exception:
+            pass
+    if attempt:
+        doc.attempt = attempt.name
+
+    status = payload.get("CallStatus") or payload.get("Status") or payload.get("status") or event_type
+    status_lower = str(status or "").lower()
+    if status_lower == "rejected":
+        doc.status = "Rejected"
+    elif status_lower in {"failed", "failure"}:
+        doc.status = "Failed"
+    elif status_lower == "busy":
+        doc.status = "Busy"
+    elif status_lower in {"no_answer", "no answer"}:
+        doc.status = "No Answer"
+    elif status_lower in {"cancel", "cancelled", "canceled"}:
+        doc.status = "Cancelled"
+    elif status_lower in {"completed", "hangup"}:
+        doc.status = "Completed"
+    elif status_lower in {"ringing"}:
+        doc.status = "Ringing"
+    elif status_lower in {"answer", "in_progress"}:
+        doc.status = "In Progress"
+    elif event_type_lower in {"initiated", "dial", "callinitiated"}:
+        doc.status = "Initiated"
+    elif not doc.status:
+        doc.status = "Unknown"
+
+    if event_type_lower in {"initiated", "dial", "ringing", "callinitiated"}:
+        doc.initiated_payload_json = as_json(payload)
+        if not doc.started_at:
+            doc.started_at = now()
+    elif event_type_lower in {"status", "hangup", "answer", "completed", "failed", "busy", "no_answer", "timeout", "cancel"}:
+        doc.status_payload_json = as_json(payload)
+        if doc.status in {"Completed", "Failed", "Rejected", "No Answer", "Busy", "Cancelled"}:
+            doc.ended_at = now()
+
+    duration = payload.get("Duration") or payload.get("duration") or payload.get("recording_duration_sec")
+    if duration is not None:
+        try:
+            doc.duration_sec = int(float(duration))
+        except (TypeError, ValueError):
+            pass
+
+    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+    if event_type_lower in {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
+        doc.transcript_payload_json = as_json(payload)
+        if transcript:
+            doc.transcript = transcript
+            doc.transcript_summary = payload.get("summary") or payload.get("transcription_summary") or transcript[:1000]
+        doc.sentiment = payload.get("sentiment") or doc.sentiment
+
+    recording_url = payload.get("recording_url") or payload.get("url") or payload.get("recording")
+    if event_type_lower in {"recording", "call_recording", "recording_ready", "recording.completed"}:
+        doc.recording_payload_json = as_json(payload)
+        if recording_url:
+            doc.external_recording_url = recording_url
+            doc.recording_url = recording_url
+
+    doc.save(ignore_permissions=True)
+    return doc.name
 
 
 def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
