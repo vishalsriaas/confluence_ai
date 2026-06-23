@@ -236,6 +236,56 @@ def handle_callback(payload: dict) -> dict:
     }
 
 
+def _payload_call_ids(payload: dict) -> list[str]:
+    values = [
+        payload.get("CallUUID"),
+        payload.get("call_uuid"),
+        payload.get("RequestID"),
+        payload.get("request_id"),
+        payload.get("SIPCallID"),
+        payload.get("sip_call_id"),
+        payload.get("recording_id"),
+        payload.get("transcription_id"),
+    ]
+    result = []
+    for value in values:
+        if value:
+            value = str(value).strip()
+            if value and value not in result:
+                result.append(value)
+    return result
+
+
+def _find_existing_call_log(payload: dict) -> str | None:
+    ids = _payload_call_ids(payload)
+    for value in ids:
+        existing = frappe.db.exists("AI Call Log", {"call_uuid": value})
+        if existing:
+            return existing
+        existing = frappe.db.exists("AI Call Log", {"sip_call_id": value})
+        if existing:
+            return existing
+
+    phone = payload.get("To") or payload.get("to") or payload.get("to_number")
+    from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
+    if phone and from_number:
+        recent = frappe.get_all(
+            "AI Call Log",
+            filters={
+                "customer_phone": phone,
+                "from_number": from_number,
+                "status": ["in", ["Initiated", "Ringing", "In Progress", "Completed"]],
+            },
+            order_by="creation desc",
+            limit=1,
+            pluck="name",
+        )
+        if recent:
+            return recent[0]
+
+    return None
+
+
 def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     """Create/update a human-friendly call log row from Vobiz callback payloads."""
     if not frappe.db.exists("DocType", "AI Call Log"):
@@ -250,11 +300,7 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     )
     sip_call_id = payload.get("SIPCallID") or payload.get("sip_call_id")
 
-    existing = None
-    if call_uuid:
-        existing = frappe.db.exists("AI Call Log", {"call_uuid": call_uuid})
-    if not existing and sip_call_id:
-        existing = frappe.db.exists("AI Call Log", {"sip_call_id": sip_call_id})
+    existing = _find_existing_call_log(payload)
 
     doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
     event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
@@ -266,8 +312,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
     doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
     doc.customer_phone = doc.to_number or doc.customer_phone
-    doc.call_uuid = call_uuid or doc.call_uuid
-    doc.sip_call_id = sip_call_id or doc.sip_call_id
+    doc.call_uuid = doc.call_uuid or call_uuid
+    doc.sip_call_id = doc.sip_call_id or sip_call_id
+    if not doc.sip_call_id and event_type_lower in {"initiated", "dial", "ringing", "callinitiated"} and call_uuid:
+        doc.sip_call_id = call_uuid
     doc.trunk_id = payload.get("TrunkID") or payload.get("trunk_id") or doc.trunk_id
     doc.domain = payload.get("Domain") or payload.get("domain") or doc.domain
     doc.reason = payload.get("Reason") or payload.get("reason") or payload.get("hangup_cause") or doc.reason

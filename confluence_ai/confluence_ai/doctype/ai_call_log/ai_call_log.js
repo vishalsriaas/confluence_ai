@@ -8,7 +8,8 @@ frappe.ui.form.on('AI Call Log', {
             wrapper.html('<div class="text-muted">No recording available.</div>');
             return;
         }
-        const escaped = frappe.utils.escape_html(url);
+        const proxied = `/api/method/confluence_ai.api.call_log.recording_audio?call_log=${encodeURIComponent(frm.doc.name)}`;
+        const escaped = frappe.utils.escape_html(proxied);
         wrapper.html(`
             <div class="mb-2">
                 <audio controls preload="metadata" style="width: 100%; max-width: 720px;">
@@ -16,7 +17,7 @@ frappe.ui.form.on('AI Call Log', {
                     Your browser does not support audio playback.
                 </audio>
             </div>
-            <a href="${escaped}" target="_blank" rel="noopener">Open recording</a>
+            <a href="${escaped}" target="_blank" rel="noopener">Open audio</a>
         `);
     }
 });
