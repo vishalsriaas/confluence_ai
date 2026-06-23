@@ -3,7 +3,7 @@ import requests
 from urllib.parse import quote, urljoin
 import frappe
 from confluence_ai.services.auth import require_access
-from confluence_ai.services.utils import as_json, get_request_json, parse_json_object, record_provider_event
+from confluence_ai.services.utils import as_json, create_error, get_request_json, parse_json_object, record_provider_event
 from confluence_ai.services.mcp import assert_tool_allowed
 
 
@@ -73,10 +73,18 @@ def gateway() -> dict:
             # Load tool configuration
             tool_list = frappe.get_all("AI MCP Tool", filters={"tool_name": tool_name}, limit=1)
             if not tool_list:
+                error_message = f"Tool not found: {tool_name}"
+                log_mcp_error(
+                    tool_name or "unknown",
+                    error_message,
+                    arguments,
+                    task_id,
+                    error_type="MCP Tool Not Found",
+                )
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {"code": -32601, "message": f"Tool not found: {tool_name}"}
+                    "error": {"code": -32601, "message": error_message}
                 }
             
             tool = frappe.get_doc("AI MCP Tool", tool_list[0].name)
@@ -84,10 +92,18 @@ def gateway() -> dict:
             # Check permission: Verify if the tool is in the list of allowed tools for this task/route
             allowed_tools = [t.name for t in get_allowed_tools(task_id)]
             if tool.name not in allowed_tools:
+                error_message = f"Tool {tool_name} is not allowed for the active campaign route."
+                log_mcp_error(
+                    tool_name,
+                    error_message,
+                    arguments,
+                    task_id,
+                    error_type="MCP Tool Not Allowed",
+                )
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
-                    "error": {"code": -32602, "message": f"Tool {tool_name} is not allowed for the active campaign route."}
+                    "error": {"code": -32602, "message": error_message}
                 }
             
             # Execute the tool call
@@ -99,6 +115,14 @@ def gateway() -> dict:
             }
         except Exception as e:
             frappe.log_error(title=f"MCP tools/call failed: {tool_name}", message=frappe.get_traceback())
+            log_mcp_error(
+                tool_name or "unknown",
+                str(e),
+                arguments,
+                task_id,
+                error_type="MCP Tool Call Failed",
+                exc=e,
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -248,7 +272,23 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
             
         names = [d.get("name") for d in response_get.json().get("data", [])]
         if not names:
-            return {"status": "success", "message": "No matching records found to update"}
+            message = f"No matching {client_doctype} records found to update"
+            result = {
+                "status_code": response_get.status_code,
+                "ok": False,
+                "message": message,
+                "filters": filters,
+            }
+            record_mcp_event(tool.tool_name, arguments, result, task_id, error=message)
+            log_mcp_error(
+                tool.tool_name,
+                message,
+                arguments,
+                task_id,
+                error_type="MCP Update No Matching Records",
+                response=result,
+            )
+            frappe.throw(message)
 
         doc_data = {}
         for m in tool.fields_to_write:
@@ -308,7 +348,18 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
 
         names = frappe.get_all(client_doctype, filters=filters, pluck="name")
         if not names:
-            return {"status": "success", "message": "No matching records found to update"}
+            message = f"No matching {client_doctype} records found to update"
+            result = {"ok": False, "message": message, "filters": filters}
+            record_mcp_event(tool.tool_name, arguments, result, None, error=message)
+            log_mcp_error(
+                tool.tool_name,
+                message,
+                arguments,
+                None,
+                error_type="MCP Update No Matching Records",
+                response=result,
+            )
+            frappe.throw(message)
 
         doc_data = {}
         for m in tool.fields_to_write:
@@ -336,19 +387,55 @@ def resolve_mapping_value(mapping: "frappe.Document", arguments: dict):
     return None
 
 
-def record_mcp_event(tool_name: str, request: dict, response: dict, task_id: str | None):
+def log_mcp_error(
+    tool_name: str,
+    message: str,
+    request: dict,
+    task_id: str | None,
+    *,
+    error_type: str = "MCP Error",
+    response: dict | None = None,
+    exc: Exception | None = None,
+) -> str | None:
+    agent = None
+    task_batch = None
+    if task_id and frappe.db.exists("AI Task", task_id):
+        task = frappe.get_doc("AI Task", task_id)
+        agent = task.assigned_agent or task.target_agent
+        task_batch = task.task_batch
+
+    payload = {
+        "tool": tool_name,
+        "request": request,
+        "response": response or {},
+    }
+    return create_error(
+        error_type,
+        message,
+        source="MCP",
+        task=task_id,
+        task_batch=task_batch,
+        agent=agent,
+        payload=payload,
+        exc=exc,
+    )
+
+
+def record_mcp_event(tool_name: str, request: dict, response: dict, task_id: str | None, error: str | None = None):
     agent = None
     if task_id and frappe.db.exists("AI Task", task_id):
-        agent = frappe.db.get_value("AI Task", task_id, "assigned_agent")
+        task_values = frappe.db.get_value("AI Task", task_id, ["assigned_agent", "target_agent"], as_dict=True)
+        agent = task_values.assigned_agent or task_values.target_agent
         
     record_provider_event(
         provider="MCP",
         operation=tool_name,
-        status="Succeeded" if response.get("ok", True) else "Failed",
+        status="Succeeded" if response.get("ok", True) and not error else "Failed",
         agent=agent,
         task=task_id,
         request=request,
         response=response,
+        error=error,
     )
 
 
@@ -629,6 +716,5 @@ def fetch_client_doctypes(server: str | None = None) -> list[str]:
     except Exception as e:
         frappe.log_error(title="fetch_client_doctypes exception", message=frappe.get_traceback())
         return []
-
 
 
