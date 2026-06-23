@@ -16,6 +16,9 @@
   "webhook_secret",
   "default_from",
   "trunk_id",
+  "vobiz_recording_auth_section",
+  "vobiz_auth_id",
+  "vobiz_auth_token",
   "endpoint_paths_json",
   "rate_limits_json"
  ],
@@ -77,6 +80,24 @@
    "fieldname": "trunk_id",
    "fieldtype": "Data",
    "label": "Trunk ID"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "vobiz_recording_auth_section",
+   "fieldtype": "Section Break",
+   "label": "Vobiz Recording Auth"
+  },
+  {
+   "description": "Vobiz X-Auth-ID used by the call log audio proxy.",
+   "fieldname": "vobiz_auth_id",
+   "fieldtype": "Data",
+   "label": "Vobiz Auth ID"
+  },
+  {
+   "description": "Vobiz X-Auth-Token used by the call log audio proxy.",
+   "fieldname": "vobiz_auth_token",
+   "fieldtype": "Password",
+   "label": "Vobiz Auth Token"
   },
   {
    "description": "JSON path config for bridge endpoints, e.g. {\"send\":\"/api/send\",\"status\":\"/api/status\"}.",

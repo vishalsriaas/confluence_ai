@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from urllib.parse import urlparse
 
 import frappe
@@ -50,14 +49,13 @@ def _channel_candidates(call_log) -> list:
 
 
 def _vobiz_auth_headers(call_log) -> dict:
-    auth_id = os.getenv("VOBIZ_AUTH_ID")
-    auth_token = os.getenv("VOBIZ_AUTH_TOKEN")
+    auth_id = None
+    auth_token = None
 
     for channel_name in _channel_candidates(call_log):
         channel = frappe.get_doc("AI Channel Account", channel_name)
-        endpoints = _parse_json(channel.endpoint_paths_json)
-        auth_id = endpoints.get("vobiz_auth_id") or endpoints.get("x_auth_id") or auth_id
-        auth_token = endpoints.get("vobiz_auth_token") or endpoints.get("x_auth_token") or auth_token
+        auth_id = channel.get("vobiz_auth_id") or auth_id
+        auth_token = channel.get_password("vobiz_auth_token", raise_exception=False) or auth_token
         if auth_id and auth_token:
             break
 
@@ -70,7 +68,7 @@ def _vobiz_auth_headers(call_log) -> dict:
                 auth_id = parts[idx + 1]
 
     if not auth_id or not auth_token:
-        frappe.throw("Vobiz recording auth is not configured. Add vobiz_auth_id and vobiz_auth_token to the AI Channel Account Endpoint Paths JSON.")
+        frappe.throw("Vobiz recording auth is not configured. Add Vobiz Auth ID and Vobiz Auth Token to the matching AI Channel Account.")
 
     return {"X-Auth-ID": auth_id, "X-Auth-Token": auth_token}
 
@@ -94,4 +92,3 @@ def recording_audio(call_log: str):
         "Content-Type": response.headers.get("Content-Type") or "audio/wav",
         "Cache-Control": "private, max-age=300",
     }
-
