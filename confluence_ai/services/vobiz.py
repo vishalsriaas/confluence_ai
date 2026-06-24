@@ -274,7 +274,7 @@ def _find_existing_call_log(payload: dict) -> str | None:
             filters={
                 "customer_phone": phone,
                 "from_number": from_number,
-                "status": ["in", ["Initiated", "Ringing", "In Progress", "Completed"]],
+                "status": ["in", ["Initiated", "Ringing", "In Progress", "Unknown"]],
             },
             order_by="creation desc",
             limit=1,
@@ -284,6 +284,50 @@ def _find_existing_call_log(payload: dict) -> str | None:
             return recent[0]
 
     return None
+
+
+def _parse_json_object(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _candidate_livekit_trunk_ids(payload: dict) -> list[str]:
+    """Return LiveKit ST_* trunk IDs that can correspond to a Vobiz callback."""
+    raw_trunk_id = (payload.get("TrunkID") or payload.get("trunk_id") or "").strip()
+    domain = (payload.get("Domain") or payload.get("domain") or "").strip()
+    from_number = (payload.get("From") or payload.get("from") or payload.get("from_number") or "").strip()
+
+    candidates: list[str] = []
+    if raw_trunk_id:
+        candidates.append(raw_trunk_id)
+
+    for row in frappe.get_all(
+        "AI Channel Account",
+        filters={"enabled": 1},
+        fields=["trunk_id", "endpoint_paths_json"],
+    ):
+        endpoints = _parse_json_object(row.endpoint_paths_json)
+        matches = False
+        if domain and endpoints.get("sip_uri") == domain:
+            matches = True
+        if from_number and endpoints.get("outbound_phone_number") == from_number:
+            matches = True
+        if raw_trunk_id and endpoints.get("vobiz_trunk_id") == raw_trunk_id:
+            matches = True
+
+        if matches and row.trunk_id:
+            candidates.append(row.trunk_id)
+
+    result = []
+    for value in candidates:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
@@ -394,12 +438,13 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
 
 def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
     payload_trunk_id = (payload.get("TrunkID") or payload.get("trunk_id") or "").strip()
+    candidate_trunk_ids = _candidate_livekit_trunk_ids(payload)
 
     # 1. Match by task ID or room name (mainly for LiveKit events or direct mappings)
     task_name = payload.get("task") or payload.get("task_name") or payload.get("task_id")
     if task_name:
-        if payload_trunk_id:
-            if frappe.db.exists("AI Task", {"name": task_name, "trunk_id": payload_trunk_id}):
+        if candidate_trunk_ids:
+            if frappe.db.exists("AI Task", {"name": task_name, "trunk_id": ["in", candidate_trunk_ids]}):
                 return task_name, None
         elif frappe.db.exists("AI Task", task_name):
             return task_name, None
@@ -407,8 +452,8 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
     room_name = payload.get("room_name") or payload.get("room")
     if room_name and room_name.startswith("agent-army-"):
         t_name = room_name[len("agent-army-") :]
-        if payload_trunk_id:
-            if frappe.db.exists("AI Task", {"name": t_name, "trunk_id": payload_trunk_id}):
+        if candidate_trunk_ids:
+            if frappe.db.exists("AI Task", {"name": t_name, "trunk_id": ["in", candidate_trunk_ids]}):
                 return t_name, None
         elif frappe.db.exists("AI Task", t_name):
             return t_name, None
@@ -438,17 +483,17 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
         or payload.get("recording_id")
     )
 
-    # 4. Strict match for Vobiz payloads (requiring Trunk ID, UUID/SIPCallID, and Phone Suffix)
-    if payload_trunk_id and suffix:
+    # 4. Strict match for Vobiz payloads (requiring trunk identity, UUID/SIPCallID, and Phone Suffix)
+    if candidate_trunk_ids and suffix:
         if uuid:
             # Check attempts by external_id or call_uuid matching the trunk
             attempts = frappe.db.sql(
                 """
                 select name, task from `tabAI Task Attempt`
-                where (external_id = %s or call_uuid = %s) and trunk_id = %s
+                where (external_id = %(uuid)s or call_uuid = %(uuid)s) and trunk_id in %(trunk_ids)s
                 order by creation desc
                 """,
-                (uuid, uuid, payload_trunk_id),
+                {"trunk_ids": tuple(candidate_trunk_ids), "uuid": uuid},
                 as_dict=True
             )
             for att in attempts:
@@ -461,10 +506,10 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
             tasks = frappe.db.sql(
                 """
                 select name from `tabAI Task`
-                where call_uuid = %s and trunk_id = %s
+                where call_uuid = %(uuid)s and trunk_id in %(trunk_ids)s
                 order by modified desc
                 """,
-                (uuid, payload_trunk_id),
+                {"uuid": uuid, "trunk_ids": tuple(candidate_trunk_ids)},
                 as_dict=True
             )
             for t in tasks:
@@ -485,10 +530,10 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
         tasks = frappe.db.sql(
             """
             select name from `tabAI Task`
-            where status in ('Queued', 'Running', 'Waiting') and trunk_id = %s
+            where status in ('Queued', 'Running', 'Waiting') and trunk_id in %(trunk_ids)s
             order by modified desc
             """,
-            (payload_trunk_id,),
+            {"trunk_ids": tuple(candidate_trunk_ids)},
             as_dict=True
         )
         for t in tasks:

@@ -29,6 +29,7 @@ def execute_task(task_name: str) -> dict:
         if agent.allowed_channel_account:
             trunk_id = frappe.db.get_value("AI Channel Account", agent.allowed_channel_account, "trunk_id")
 
+    task.assigned_agent = agent_name
     task.status = "Running"
     task.attempt_count = int(task.attempt_count or 0) + 1
     task.trunk_id = trunk_id
@@ -136,6 +137,5 @@ def run_task_5():
     frappe.db.commit()
     result = execute_task(task_name)
     print(f"Result: {result}")
-
 
 
