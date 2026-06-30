@@ -11,15 +11,21 @@ from confluence_ai.services.utils import now
 
 def _request_headers() -> dict:
     request = getattr(frappe.local, "request", None)
-    return dict(request.headers) if request else {}
+    if not request:
+        return {}
+    return {str(key).lower(): value for key, value in dict(request.headers).items()}
 
 
 def _bearer_token() -> str:
     headers = _request_headers()
-    auth = headers.get("Authorization") or headers.get("authorization") or ""
+    mcp_token = headers.get("x-mcp-token")
+    if mcp_token:
+        return mcp_token
+
+    auth = headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return headers.get("X-Agent-Army-Token") or headers.get("x-agent-army-token") or ""
+    return headers.get("x-agent-army-token") or ""
 
 
 def require_access(scope: str) -> str:

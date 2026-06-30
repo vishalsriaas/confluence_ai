@@ -18,6 +18,10 @@
   "access_section",
   "api_identity",
   "allowed_channel_account",
+  "sales_context_section",
+  "enable_sales_context",
+  "sales_kb_limit",
+  "sales_patient_lookup_tool",
   "allowed_tools",
   "allowed_mcp_tools",
   "schedule_section",
@@ -102,6 +106,34 @@
    "fieldtype": "Link",
    "label": "Allowed Channel Account",
    "options": "AI Channel Account"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sales_context_section",
+   "fieldtype": "Section Break",
+   "label": "Sales Context"
+  },
+  {
+   "default": "0",
+   "description": "Build a pre-call sales brief from Knowledge Base and patient/customer context before LiveKit dispatch.",
+   "fieldname": "enable_sales_context",
+   "fieldtype": "Check",
+   "label": "Enable Sales Context"
+  },
+  {
+   "default": "6",
+   "depends_on": "enable_sales_context",
+   "fieldname": "sales_kb_limit",
+   "fieldtype": "Int",
+   "label": "Sales KB Snippet Limit"
+  },
+  {
+   "depends_on": "enable_sales_context",
+   "description": "Optional MCP read tool used to fetch repeat-customer context before the call. If blank, Confluence AI tries a tool named lookup_patient_sales_context and then local Patient records.",
+   "fieldname": "sales_patient_lookup_tool",
+   "fieldtype": "Link",
+   "label": "Sales Patient Lookup Tool",
+   "options": "AI MCP Tool"
   },
   {
    "description": "Comma-separated tool names or JSON array. Enforced by AI Tool Permission for sensitive tools.",

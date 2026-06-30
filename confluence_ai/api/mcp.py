@@ -106,6 +106,14 @@ def gateway() -> dict:
                     "error": {"code": -32602, "message": error_message}
                 }
             
+            builtin_result = execute_builtin_sales_tool(tool.tool_name, arguments, task_id)
+            if builtin_result is not None:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": builtin_result
+                }
+
             # Execute the tool call
             result = execute_mcp_tool(tool, arguments, task_id)
             return {
@@ -134,6 +142,44 @@ def gateway() -> dict:
         "id": req_id,
         "error": {"code": -32601, "message": f"Method not found: {method}"}
     }
+
+
+def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | None) -> dict | None:
+    """Handle Confluence AI sales tools that need orchestration around configured MCP mappings."""
+    if tool_name not in {
+        "search_sales_knowledge",
+        "lookup_patient_sales_context",
+        "create_or_update_lead",
+        "create_sales_followup",
+        "log_sales_call_outcome",
+        "create_draft_patient_encounter_from_sales",
+    }:
+        return None
+
+    agent = None
+    if task_id and frappe.db.exists("AI Task", task_id):
+        task_values = frappe.db.get_value("AI Task", task_id, ["assigned_agent", "target_agent"], as_dict=True)
+        agent = task_values.assigned_agent or task_values.target_agent
+
+    from confluence_ai.services import sales_context
+
+    if tool_name == "search_sales_knowledge":
+        from confluence_ai.services.knowledge_base import retrieve_knowledge
+
+        query = arguments.get("query") or arguments.get("question") or ""
+        limit = int(arguments.get("limit") or 5)
+        return {"status": "success", "data": retrieve_knowledge(query, agent=agent, limit=limit)}
+    if tool_name == "lookup_patient_sales_context":
+        return sales_context.lookup_patient_sales_context(arguments, agent=agent)
+    if tool_name == "create_or_update_lead":
+        return sales_context.create_or_update_lead(arguments, task_id=task_id, agent=agent)
+    if tool_name == "create_sales_followup":
+        return sales_context.create_sales_followup(arguments, task_id=task_id, agent=agent)
+    if tool_name == "log_sales_call_outcome":
+        return sales_context.log_sales_call_outcome(arguments, task_id=task_id, agent=agent)
+    if tool_name == "create_draft_patient_encounter_from_sales":
+        return sales_context.create_draft_patient_encounter_from_sales(arguments, task_id=task_id, agent=agent)
+    return None
 
 
 def get_allowed_tools(task_id: str | None) -> list["frappe.Document"]:
@@ -204,6 +250,7 @@ def validate_filter_arguments(tool: "frappe.Document", arguments: dict):
 
 def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | None) -> dict:
     """Executes the tool natively (using REST API of client ERP mapped to server config)."""
+    arguments = enrich_order_confirmation_issue_arguments(tool, dict(arguments or {}), task_id)
     validate_filter_arguments(tool, arguments)
     
     server = frappe.get_doc("AI MCP Server", tool.server) if tool.server else None
@@ -372,6 +419,102 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
         return {"status": "success", "updated": len(names), "records": names}
 
     raise ValueError(f"Operation {op_type} not supported locally.")
+
+
+def enrich_order_confirmation_issue_arguments(tool: "frappe.Document", arguments: dict, task_id: str | None) -> dict:
+    """Append task/order context to issue descriptions so operators never get thin tickets."""
+    tool_name = (tool.tool_name or "").lower()
+    if "create_order_confirmation_issue" not in tool_name:
+        return arguments
+
+    task_context = get_task_context_for_mcp(task_id)
+    if not task_context:
+        return arguments
+
+    payload_json = task_context.get("payload_json") if isinstance(task_context.get("payload_json"), dict) else {}
+    data = dict(task_context)
+    data.update({k: v for k, v in payload_json.items() if v not in (None, "", [], {})})
+
+    detail_lines = build_order_issue_detail_lines(data, arguments)
+    if not detail_lines:
+        return arguments
+
+    original_description = str(arguments.get("description") or "").strip()
+    detail_block = "\n".join(detail_lines)
+    if "ORDER / CUSTOMER DETAILS" not in original_description:
+        arguments["description"] = (
+            f"{original_description}\n\nORDER / CUSTOMER DETAILS:\n{detail_block}"
+            if original_description
+            else f"ORDER / CUSTOMER DETAILS:\n{detail_block}"
+        )
+
+    if not arguments.get("subject"):
+        encounter = data.get("patient_encounter") or data.get("encounter_id") or "Order"
+        patient = data.get("patient_name") or data.get("customer_name") or data.get("order_patient_name") or "Customer"
+        arguments["subject"] = f"Order confirmation issue - {patient} - {encounter}"
+
+    return arguments
+
+
+def get_task_context_for_mcp(task_id: str | None) -> dict:
+    if not task_id or not frappe.db.exists("AI Task", task_id):
+        return {}
+    task = frappe.get_doc("AI Task", task_id)
+    context = parse_json_object(task.context_json, "AI Task Context") if task.context_json else {}
+    return context
+
+
+def build_order_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
+    def pick(*keys):
+        for key in keys:
+            value = data.get(key)
+            if value not in (None, "", [], {}):
+                return value
+        return ""
+
+    lines = []
+    simple_fields = [
+        ("Patient/Customer Name", pick("patient_name", "customer_name", "order_patient_name")),
+        ("Patient Encounter", pick("patient_encounter", "encounter_id")),
+        ("Customer Phone", pick("customer_phone", "phone_number", "phone", "mobile")),
+        ("Source System", pick("source_system")),
+        ("Event", pick("event")),
+        ("Total Amount", pick("total_amount")),
+        ("Advance Paid", pick("total_advance_paid")),
+        ("Remaining Amount", pick("remaining_amount")),
+        ("Delivery Address", pick("address")),
+    ]
+    for label, value in simple_fields:
+        if value not in (None, "", [], {}):
+            lines.append(f"- {label}: {value}")
+
+    items = pick("items")
+    if isinstance(items, list) and items:
+        lines.append("- Items:")
+        for idx, item in enumerate(items, start=1):
+            if isinstance(item, dict):
+                lines.append(
+                    "  "
+                    + f"{idx}. name={item.get('name', '')}, qty={item.get('qty', '')}, "
+                    + f"rate={item.get('rate', '')}, amount={item.get('amount', '')}"
+                )
+            else:
+                lines.append(f"  {idx}. {item}")
+
+    payments = pick("payments")
+    if isinstance(payments, list) and payments:
+        lines.append("- Payments:")
+        for idx, payment in enumerate(payments, start=1):
+            if isinstance(payment, dict):
+                lines.append(f"  {idx}. mode={payment.get('mode', '')}, amount={payment.get('amount', '')}")
+            else:
+                lines.append(f"  {idx}. {payment}")
+
+    spoken_summary = str(arguments.get("description") or "").strip()
+    if spoken_summary:
+        lines.append(f"- Customer Spoken Issue / Agent Note: {spoken_summary}")
+
+    return lines
 
 
 def resolve_mapping_value(mapping: "frappe.Document", arguments: dict):
@@ -716,5 +859,3 @@ def fetch_client_doctypes(server: str | None = None) -> list[str]:
     except Exception as e:
         frappe.log_error(title="fetch_client_doctypes exception", message=frappe.get_traceback())
         return []
-
-

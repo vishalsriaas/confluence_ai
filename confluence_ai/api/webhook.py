@@ -49,6 +49,25 @@ def receive_event(source_system: str | None = None) -> dict:
         ?source_system=ERPNext   — used to disambiguate same event from multiple sources
     """
     payload = get_request_json()
+
+    if _is_vobiz_payload(payload):
+        webhook_event = _record_inbound("vobiz", payload)
+        try:
+            result = vobiz.handle_callback(payload)
+            frappe.db.set_value(
+                "AI Webhook Event",
+                webhook_event,
+                {"status": "Processed", "response_json": as_json(result)},
+            )
+            return result
+        except Exception as exc:
+            frappe.db.set_value(
+                "AI Webhook Event",
+                webhook_event,
+                {"status": "Failed", "response_json": as_json({"error": str(exc)})},
+            )
+            raise
+
     webhook_event = _record_inbound(source_system or "external", payload)
 
     # Find matching route
@@ -91,6 +110,20 @@ def receive_event(source_system: str | None = None) -> dict:
             {"status": "Failed", "response_json": as_json({"error": str(exc)})},
         )
         raise
+
+
+def _is_vobiz_payload(payload: dict) -> bool:
+    event_type = str(payload.get("event") or payload.get("Event") or payload.get("event_type") or "").lower()
+    if event_type in {"hangup", "callinitiated", "recording.completed", "transcription.completed"}:
+        return True
+    return bool(
+        payload.get("CallUUID")
+        or payload.get("SIPCallID")
+        or payload.get("recording_id")
+        or payload.get("transcription_id")
+        or payload.get("account_id")
+        or payload.get("AccountId")
+    )
 
 
 def _record_inbound(source: str, payload: dict) -> str:

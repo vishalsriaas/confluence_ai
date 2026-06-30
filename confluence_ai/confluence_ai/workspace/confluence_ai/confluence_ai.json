@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"type\": \"header\", \"data\": {\"text\": \"Confluence AI Management\", \"level\": 4}}, {\"type\": \"card\", \"data\": {\"card_name\": \"1. Connection & Channels\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"2. ERP & Tool Integration\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"3. Inbound Routing\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"4. Agent Definitions\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"5. Templates & Operations\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"6. Monitoring & Logs\"}}]",
+ "content": "[{\"type\": \"header\", \"data\": {\"text\": \"Confluence AI Management\", \"level\": 4}}, {\"type\": \"card\", \"data\": {\"card_name\": \"1. Connection & Channels\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"2. ERP & Tool Integration\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"3. Inbound Routing\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"4. Agent Definitions\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"5. Templates & Operations\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"6. Knowledge Base\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"7. Monitoring & Logs\"}}]",
  "creation": "2026-06-12 12:50:29.771371",
  "custom_blocks": [],
  "docstatus": 0,
@@ -112,6 +112,16 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "Sales Disease Routes",
+   "link_count": 0,
+   "link_to": "AI Sales Disease Route",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "4. Agent Definitions",
    "link_count": 0,
    "link_type": "DocType",
@@ -190,7 +200,46 @@
   {
    "hidden": 0,
    "is_query_report": 0,
-   "label": "6. Monitoring & Logs",
+   "label": "6. Knowledge Base",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Knowledge Categories",
+   "link_count": 0,
+   "link_to": "AI Knowledge Category",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Knowledge Documents",
+   "link_count": 0,
+   "link_to": "AI Knowledge Document",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Knowledge Chunks",
+   "link_count": 0,
+   "link_to": "AI Knowledge Chunk",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "7. Monitoring & Logs",
    "link_count": 0,
    "link_type": "DocType",
    "onboard": 0,

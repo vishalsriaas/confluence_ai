@@ -1,0 +1,165 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:sales-route-{##}",
+ "creation": "2026-06-26 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "route_name",
+  "is_default",
+  "priority",
+  "match_section",
+  "event_values",
+  "source_system",
+  "disease_key",
+  "aliases_json",
+  "target_section",
+  "target_agent",
+  "channel_account",
+  "metadata_section",
+  "profile_key",
+  "outbound_phone_number",
+  "sip_trunk_id",
+  "sip_uri",
+  "notes"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "route_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Route Name",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Default Sales Route"
+  },
+  {
+   "default": "100",
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Priority"
+  },
+  {
+   "fieldname": "match_section",
+   "fieldtype": "Section Break",
+   "label": "Match"
+  },
+  {
+   "default": "sales-call-required",
+   "description": "Comma-separated webhook event values where this disease route is allowed. Leave blank to allow all sales events.",
+   "fieldname": "event_values",
+   "fieldtype": "Small Text",
+   "label": "Event Values"
+  },
+  {
+   "description": "Optional source_system filter. Leave blank to match any source.",
+   "fieldname": "source_system",
+   "fieldtype": "Data",
+   "label": "Source System"
+  },
+  {
+   "description": "Canonical disease/topic key, for example kidney, skin, male-infertility.",
+   "fieldname": "disease_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Disease Key"
+  },
+  {
+   "description": "JSON array of aliases/keywords that should select this route, for example [\"kidney\", \"ckd\", \"creatinine\"].",
+   "fieldname": "aliases_json",
+   "fieldtype": "Code",
+   "label": "Aliases JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "target_section",
+   "fieldtype": "Section Break",
+   "label": "Target"
+  },
+  {
+   "fieldname": "target_agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Target Agent",
+   "options": "AI Agent",
+   "reqd": 1
+  },
+  {
+   "description": "Expected LiveKit channel account for this disease agent. The selected agent should also use this in Allowed Channel Account.",
+   "fieldname": "channel_account",
+   "fieldtype": "Link",
+   "label": "Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "metadata_section",
+   "fieldtype": "Section Break",
+   "label": "Metadata"
+  },
+  {
+   "fieldname": "profile_key",
+   "fieldtype": "Data",
+   "label": "Profile Key"
+  },
+  {
+   "fieldname": "outbound_phone_number",
+   "fieldtype": "Data",
+   "label": "Outbound Phone Number"
+  },
+  {
+   "fieldname": "sip_trunk_id",
+   "fieldtype": "Data",
+   "label": "SIP Trunk ID"
+  },
+  {
+   "fieldname": "sip_uri",
+   "fieldtype": "Data",
+   "label": "SIP URI"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "modified": "2026-06-26 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Sales Disease Route",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "priority",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "route_name",
+ "track_changes": 1
+}

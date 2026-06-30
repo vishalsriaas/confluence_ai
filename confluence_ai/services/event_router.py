@@ -14,8 +14,11 @@ Handles:
 from __future__ import annotations
 
 import frappe
+from typing import Any
 
 from confluence_ai.services.dispatcher import enqueue_task_execution, refresh_batch_counts
+from confluence_ai.services.sales_disease_router import apply_sales_route_context, resolve_sales_disease_route
+from confluence_ai.services.sales_context import enrich_sales_context
 from confluence_ai.services.utils import as_json, create_error
 
 
@@ -157,6 +160,11 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
     Priority: defaults to High so immediate tasks are processed before batch tasks.
     """
     context = build_context(route, payload)
+    sales_selection = resolve_sales_disease_route(context, payload, route=route)
+    context = apply_sales_route_context(context, sales_selection)
+    target_agent = sales_selection.get("target_agent") or route.target_agent or None
+    agent = frappe.get_doc("AI Agent", target_agent) if target_agent else None
+    context = enrich_sales_context(context, route=route, agent=agent)
 
     # Idempotency: block duplicate tasks on same key
     idem_key = _build_idempotency_key(route, payload)
@@ -175,7 +183,7 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
         "status": "Queued",
         "task_batch": batch.name,
         "task_template": route.task_template,
-        "target_agent": route.target_agent or None,
+        "target_agent": target_agent,
         "target_group": route.target_group or None,
         "channel": route.channel or "Voice",
         "priority": effective_priority,
@@ -219,6 +227,11 @@ def _dispatch_batch(route: "frappe.Document", payload: dict) -> dict:
     created = 0
     for index, record in enumerate(records, start=1):
         context = build_context(route, record)
+        sales_selection = resolve_sales_disease_route(context, record, route=route)
+        context = apply_sales_route_context(context, sales_selection)
+        target_agent = sales_selection.get("target_agent") or route.target_agent or None
+        agent = frappe.get_doc("AI Agent", target_agent) if target_agent else None
+        context = enrich_sales_context(context, route=route, agent=agent)
         idem_key = _build_idempotency_key(route, record, batch_prefix=batch.name)
         record_id = record.get("external_record_id") or record.get("id") or str(index)
 
@@ -227,7 +240,7 @@ def _dispatch_batch(route: "frappe.Document", payload: dict) -> dict:
             "status": "Queued",
             "task_batch": batch.name,
             "task_template": route.task_template,
-            "target_agent": route.target_agent or None,
+            "target_agent": target_agent,
             "target_group": route.target_group or None,
             "channel": route.channel or "Voice",
             "priority": effective_priority,

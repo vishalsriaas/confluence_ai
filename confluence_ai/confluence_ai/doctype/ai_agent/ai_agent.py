@@ -12,11 +12,24 @@ class AIAgent(Document):
         parse_json_object(self.schedule_json, "Schedule JSON")
         parse_json_object(self.limits_json, "Limits JSON")
 
-    def get_system_prompt(self) -> str:
+    def get_system_prompt(self, include_tool_catalog: bool = True) -> str:
         base_prompt = self.get("system_prompt") or ""
+        if self.get("enable_sales_context"):
+            base_prompt += """
+
+## Sales Context Rules
+- Use the Sales Brief from Context & Metadata as your primary source of truth for this call.
+- If customer_type is repeat, refer to previous context respectfully and confirm what they need now.
+- If customer_type is new, explain the company, relevant treatment/product category, diet/pricing/offer basics from the brief, then qualify the lead.
+- You may explain approved information, pricing ranges, discounts, and next steps from the brief, but you must not diagnose, prescribe, guarantee cure, or claim medical certainty.
+- If the customer asks for detail missing from the Sales Brief and a knowledge search tool is available, call it before answering.
+- If the customer asks a medical suitability question you cannot answer safely, offer a doctor callback.
+- Before creating a follow-up or lead update, ask the needed details and confirm the next action with the customer.
+- At the end of the call, use the available sales MCP tool to log outcome and create/update lead or follow-up when appropriate.
+"""
         
         tools = self.get("allowed_mcp_tools") or []
-        if not tools:
+        if not tools or not include_tool_catalog:
             return base_prompt
             
         instructions = ["\n\nYou are allowed to call the following MCP tools:"]

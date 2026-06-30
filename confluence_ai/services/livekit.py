@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import frappe
 from livekit import api
 from livekit.protocol import room as proto_room
@@ -20,15 +21,59 @@ class SafeFormatter(string.Formatter):
         return super().get_value(key, args, kwargs)
 
 
+def _voice_metadata_context(payload: dict) -> dict:
+    """Return only the context the realtime voice model needs at call start.
+
+    Full task context can be large and may contain backend-only rules or long
+    patient notes. Keep LiveKit metadata compact so the agent can greet quickly.
+    """
+    event_name = str(payload.get("event") or payload.get("event_type") or "").lower()
+    is_sales_flow = (
+        "sales" in event_name
+        or bool(payload.get("sales_brief"))
+        or bool(payload.get("selected_sales_route"))
+        or payload.get("build_sales_context") in (1, "1", True, "true", "True")
+    )
+    if not is_sales_flow:
+        return payload
+
+    allowed_keys = [
+        "event",
+        "customer_name",
+        "patient_name",
+        "customer_phone",
+        "phone",
+        "disease_or_concern",
+        "product_interest",
+        "campaign",
+        "customer_type",
+        "profile_key",
+        "outbound_phone_number",
+    ]
+    compact = {key: payload.get(key) for key in allowed_keys if payload.get(key) not in (None, "", [], {})}
+
+    sales_brief = str(payload.get("sales_brief") or "")
+    if sales_brief:
+        # Enough to keep old/new awareness, without overloading the live prompt.
+        compact["sales_brief"] = sales_brief[:800]
+
+    patient_summary = str(payload.get("patient_summary") or "")
+    if patient_summary:
+        compact["patient_summary"] = patient_summary[:240]
+
+    compact["voice_context_compacted"] = 1
+    return compact
+
+
 def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
     """Resolve the LiveKit worker dispatch name for voice calls."""
     return (
-        payload.get("livekit_agent_name")
-        or payload.get("agent_name")
+        os.getenv("LIVEKIT_AGENT_NAME")
         or endpoints.get("livekit_agent_name")
         or endpoints.get("agent_name")
         or endpoints.get("dispatch_agent_name")
-        or "vobiz-gemini-live"
+        or payload.get("livekit_agent_name")
+        or payload.get("agent_name")
     )
 
 
@@ -60,7 +105,10 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
 
     room_name = f"agent-army-{task.name}"
 
-    system_prompt = agent.get_system_prompt() if agent else ""
+    try:
+        system_prompt = agent.get_system_prompt(include_tool_catalog=False) if agent else ""
+    except TypeError:
+        system_prompt = agent.get_system_prompt() if agent else ""
     personality = agent.personality if agent else ""
 
     # Infuse variables into prompt templates using Task Context payload
@@ -88,12 +136,13 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             except Exception:
                 pass
 
+    voice_context = _voice_metadata_context(payload)
     metadata = {
         "task": task.name,
         "agent": agent_name,
         "system_prompt": system_prompt,
         "personality": personality,
-        "context": payload,
+        "context": voice_context,
     }
     metadata_str = json.dumps(metadata)
     livekit_agent_name = _livekit_dispatch_name(agent, endpoints, payload)
@@ -428,8 +477,3 @@ def test_livekit_callback():
     frappe.delete_doc("AI Task", task_name, force=True)
     print("Cleaned up test documents.")
     print("=== ALL TESTS PASSED SUCCESSFULLY ===")
-
-
-
-
-

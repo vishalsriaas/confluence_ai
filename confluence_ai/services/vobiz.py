@@ -487,14 +487,12 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
     if candidate_trunk_ids and suffix:
         if uuid:
             # Check attempts by external_id or call_uuid matching the trunk
-            attempts = frappe.db.sql(
-                """
-                select name, task from `tabAI Task Attempt`
-                where (external_id = %(uuid)s or call_uuid = %(uuid)s) and trunk_id in %(trunk_ids)s
-                order by creation desc
-                """,
-                {"trunk_ids": tuple(candidate_trunk_ids), "uuid": uuid},
-                as_dict=True
+            attempts = frappe.get_all(
+                "AI Task Attempt",
+                filters={"trunk_id": ["in", candidate_trunk_ids]},
+                or_filters={"external_id": uuid, "call_uuid": uuid},
+                fields=["name", "task"],
+                order_by="creation desc",
             )
             for att in attempts:
                 task = frappe.get_doc("AI Task", att.task)
@@ -503,14 +501,11 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
                     return task.name, att.name
 
             # Check tasks directly by call_uuid matching the trunk
-            tasks = frappe.db.sql(
-                """
-                select name from `tabAI Task`
-                where call_uuid = %(uuid)s and trunk_id in %(trunk_ids)s
-                order by modified desc
-                """,
-                {"uuid": uuid, "trunk_ids": tuple(candidate_trunk_ids)},
-                as_dict=True
+            tasks = frappe.get_all(
+                "AI Task",
+                filters={"call_uuid": uuid, "trunk_id": ["in", candidate_trunk_ids]},
+                fields=["name"],
+                order_by="modified desc",
             )
             for t in tasks:
                 task = frappe.get_doc("AI Task", t.name)
@@ -527,14 +522,14 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
                     return task.name, attempt_name
 
         # Fallback: Match by Trunk ID + Phone Suffix (e.g. for initial CallInitiated where UUID isn't in DB yet)
-        tasks = frappe.db.sql(
-            """
-            select name from `tabAI Task`
-            where status in ('Queued', 'Running', 'Waiting') and trunk_id in %(trunk_ids)s
-            order by modified desc
-            """,
-            {"trunk_ids": tuple(candidate_trunk_ids)},
-            as_dict=True
+        tasks = frappe.get_all(
+            "AI Task",
+            filters={
+                "status": ["in", ["Queued", "Running", "Waiting"]],
+                "trunk_id": ["in", candidate_trunk_ids],
+            },
+            fields=["name"],
+            order_by="modified desc",
         )
         for t in tasks:
             task = frappe.get_doc("AI Task", t.name)

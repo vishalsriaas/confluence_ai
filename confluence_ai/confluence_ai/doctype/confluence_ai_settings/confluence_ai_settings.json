@@ -3,26 +3,163 @@
  "creation": "2026-06-11 00:00:00.000000",
  "custom": 0,
  "doctype": "DocType",
- "field_order": ["queues_section", "ingest_queue", "dispatch_queue", "whatsapp_queue", "voice_queue", "llm_queue", "callbacks_queue", "deadline_queue", "defaults_section", "default_timezone", "default_task_timeout_seconds", "dispatch_batch_size"],
+ "field_order": [
+  "queues_section",
+  "ingest_queue",
+  "dispatch_queue",
+  "whatsapp_queue",
+  "voice_queue",
+  "llm_queue",
+  "callbacks_queue",
+  "deadline_queue",
+  "defaults_section",
+  "default_timezone",
+  "default_task_timeout_seconds",
+  "dispatch_batch_size",
+  "rag_section",
+  "embedding_provider",
+  "embedding_model",
+  "embedding_api_key",
+  "embedding_base_url",
+  "embedding_path",
+  "embedding_timeout_seconds"
+ ],
  "fields": [
-  {"fieldname": "queues_section", "fieldtype": "Section Break", "label": "Queues"},
-  {"default": "agent_ingest", "fieldname": "ingest_queue", "fieldtype": "Data", "label": "Ingest Queue"},
-  {"default": "agent_dispatch", "fieldname": "dispatch_queue", "fieldtype": "Data", "label": "Dispatch Queue"},
-  {"default": "agent_whatsapp", "fieldname": "whatsapp_queue", "fieldtype": "Data", "label": "WhatsApp Queue"},
-  {"default": "agent_voice", "fieldname": "voice_queue", "fieldtype": "Data", "label": "Voice Queue"},
-  {"default": "agent_llm", "fieldname": "llm_queue", "fieldtype": "Data", "label": "LLM Queue"},
-  {"default": "agent_callbacks", "fieldname": "callbacks_queue", "fieldtype": "Data", "label": "Callbacks Queue"},
-  {"default": "agent_deadline", "fieldname": "deadline_queue", "fieldtype": "Data", "label": "Deadline Queue"},
-  {"fieldname": "defaults_section", "fieldtype": "Section Break", "label": "Defaults"},
-  {"default": "Asia/Kolkata", "fieldname": "default_timezone", "fieldtype": "Data", "label": "Default Timezone"},
-  {"default": "900", "fieldname": "default_task_timeout_seconds", "fieldtype": "Int", "label": "Default Task Timeout Seconds"},
-  {"default": "500", "fieldname": "dispatch_batch_size", "fieldtype": "Int", "label": "Dispatch Batch Size"}
+  {
+   "fieldname": "queues_section",
+   "fieldtype": "Section Break",
+   "label": "Queues"
+  },
+  {
+   "default": "agent_ingest",
+   "fieldname": "ingest_queue",
+   "fieldtype": "Data",
+   "label": "Ingest Queue"
+  },
+  {
+   "default": "agent_dispatch",
+   "fieldname": "dispatch_queue",
+   "fieldtype": "Data",
+   "label": "Dispatch Queue"
+  },
+  {
+   "default": "agent_whatsapp",
+   "fieldname": "whatsapp_queue",
+   "fieldtype": "Data",
+   "label": "WhatsApp Queue"
+  },
+  {
+   "default": "agent_voice",
+   "fieldname": "voice_queue",
+   "fieldtype": "Data",
+   "label": "Voice Queue"
+  },
+  {
+   "default": "agent_llm",
+   "fieldname": "llm_queue",
+   "fieldtype": "Data",
+   "label": "LLM Queue"
+  },
+  {
+   "default": "agent_callbacks",
+   "fieldname": "callbacks_queue",
+   "fieldtype": "Data",
+   "label": "Callbacks Queue"
+  },
+  {
+   "default": "agent_deadline",
+   "fieldname": "deadline_queue",
+   "fieldtype": "Data",
+   "label": "Deadline Queue"
+  },
+  {
+   "fieldname": "defaults_section",
+   "fieldtype": "Section Break",
+   "label": "Defaults"
+  },
+  {
+   "default": "Asia/Kolkata",
+   "fieldname": "default_timezone",
+   "fieldtype": "Data",
+   "label": "Default Timezone"
+  },
+  {
+   "default": "900",
+   "fieldname": "default_task_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "Default Task Timeout Seconds"
+  },
+  {
+   "default": "500",
+   "fieldname": "dispatch_batch_size",
+   "fieldtype": "Int",
+   "label": "Dispatch Batch Size"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "rag_section",
+   "fieldtype": "Section Break",
+   "label": "Production RAG / Embeddings"
+  },
+  {
+   "default": "OpenAI",
+   "description": "Provider used for Knowledge Base indexing and semantic search. No local/dummy fallback is used.",
+   "fieldname": "embedding_provider",
+   "fieldtype": "Select",
+   "label": "Embedding Provider",
+   "options": "OpenAI\nOpenAI Compatible\nGemini"
+  },
+  {
+   "default": "text-embedding-3-small",
+   "fieldname": "embedding_model",
+   "fieldtype": "Data",
+   "label": "Embedding Model"
+  },
+  {
+   "description": "Required. Stored encrypted by Frappe. Used only server-side for embedding calls.",
+   "fieldname": "embedding_api_key",
+   "fieldtype": "Password",
+   "label": "Embedding API Key"
+  },
+  {
+   "default": "https://api.openai.com/v1",
+   "description": "For OpenAI Compatible providers, set your provider base URL.",
+   "fieldname": "embedding_base_url",
+   "fieldtype": "Data",
+   "label": "Embedding Base URL"
+  },
+  {
+   "default": "/embeddings",
+   "description": "For OpenAI/OpenAI Compatible providers. Gemini ignores this.",
+   "fieldname": "embedding_path",
+   "fieldtype": "Data",
+   "label": "Embedding Path"
+  },
+  {
+   "default": "30",
+   "fieldname": "embedding_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "Embedding Timeout Seconds"
+  }
  ],
  "issingle": 1,
  "modified": "2026-06-11 00:00:00.000000",
  "module": "Confluence AI",
  "name": "Confluence AI Settings",
- "permissions": [{"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1}, {"read": 1, "role": "Confluence AI Manager", "write": 1}],
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": []

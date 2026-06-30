@@ -1,0 +1,210 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:kbdoc-{####}",
+ "creation": "2026-06-24 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "title",
+  "category",
+  "status",
+  "version",
+  "source_type",
+  "source_name",
+  "source_file",
+  "source_url",
+  "crawl_url_on_save",
+  "crawl_same_domain_only",
+  "crawl_max_pages",
+  "last_url_fetched_at",
+  "last_url_fetch_summary",
+  "tags",
+  "content",
+  "visibility_section",
+  "agent_visibility",
+  "indexing_section",
+  "chunk_size",
+  "chunk_overlap",
+  "last_indexed_at"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Title",
+   "reqd": 1
+  },
+  {
+   "fieldname": "category",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Category",
+   "options": "AI Knowledge Category"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nPublished\nArchived"
+  },
+  {
+   "default": "1",
+   "fieldname": "version",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Version"
+  },
+  {
+   "default": "Manual",
+   "fieldname": "source_type",
+   "fieldtype": "Select",
+   "label": "Source Type",
+   "options": "Manual\nFile\nURL\nImported"
+  },
+  {
+   "fieldname": "source_name",
+   "fieldtype": "Data",
+   "label": "Source Name"
+  },
+  {
+   "description": "Optional plain-text upload (.txt, .md, .csv, .json). If Content is empty, Confluence AI will load text from this file.",
+   "fieldname": "source_file",
+   "fieldtype": "Attach",
+   "label": "Source File"
+  },
+  {
+   "depends_on": "eval:doc.source_type=='URL'",
+   "description": "Website/page URL to fetch into this Knowledge Document.",
+   "fieldname": "source_url",
+   "fieldtype": "Data",
+   "label": "Source URL"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.source_type=='URL'",
+   "description": "Fetch readable website text into Content when this document is saved and the URL/crawl settings changed.",
+   "fieldname": "crawl_url_on_save",
+   "fieldtype": "Check",
+   "label": "Fetch URL on Save"
+  },
+  {
+   "default": "1",
+   "depends_on": "eval:doc.source_type=='URL'",
+   "description": "Only crawl links under the same domain as Source URL.",
+   "fieldname": "crawl_same_domain_only",
+   "fieldtype": "Check",
+   "label": "Same Domain Only"
+  },
+  {
+   "default": "10",
+   "depends_on": "eval:doc.source_type=='URL'",
+   "description": "Maximum pages to fetch from the URL. Hard capped at 100.",
+   "fieldname": "crawl_max_pages",
+   "fieldtype": "Int",
+   "label": "Max Pages"
+  },
+  {
+   "fieldname": "last_url_fetched_at",
+   "fieldtype": "Datetime",
+   "label": "Last URL Fetched At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_url_fetch_summary",
+   "fieldtype": "Small Text",
+   "label": "Last URL Fetch Summary",
+   "read_only": 1
+  },
+  {
+   "fieldname": "tags",
+   "fieldtype": "Small Text",
+   "label": "Tags"
+  },
+  {
+   "fieldname": "content",
+   "fieldtype": "Long Text",
+   "label": "Content",
+   "reqd": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "visibility_section",
+   "fieldtype": "Section Break",
+   "label": "Agent Visibility"
+  },
+  {
+   "description": "Leave empty to make this document available to all agents.",
+   "fieldname": "agent_visibility",
+   "fieldtype": "Table",
+   "label": "Agent Visibility",
+   "options": "AI Knowledge Document Agent"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "indexing_section",
+   "fieldtype": "Section Break",
+   "label": "Indexing"
+  },
+  {
+   "default": "1200",
+   "fieldname": "chunk_size",
+   "fieldtype": "Int",
+   "label": "Chunk Size"
+  },
+  {
+   "default": "150",
+   "fieldname": "chunk_overlap",
+   "fieldtype": "Int",
+   "label": "Chunk Overlap"
+  },
+  {
+   "fieldname": "last_indexed_at",
+   "fieldtype": "Datetime",
+   "label": "Last Indexed At",
+   "read_only": 1
+  }
+ ],
+ "modified": "2026-06-24 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Knowledge Document",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "title",
+ "track_changes": 1
+}
