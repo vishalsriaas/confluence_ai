@@ -143,7 +143,17 @@ def rebuild_document_chunks(document_name: str) -> int:
             payload={"document": document_name},
             exc=exc,
         )
-        frappe.throw(f"Knowledge indexing failed for {doc.title}: {exc}")
+        frappe.db.set_value(
+            "AI Knowledge Chunk",
+            {"document": doc.name},
+            {
+                "index_status": "Failed",
+                "index_error": str(exc)[:1000],
+            },
+            update_modified=False,
+        )
+        doc.db_set("last_indexed_at", now(), update_modified=False)
+        return 0
 
     frappe.db.delete("AI Knowledge Chunk", {"document": doc.name})
     for chunk_payload in prepared_chunks:
