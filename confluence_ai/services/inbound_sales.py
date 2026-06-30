@@ -124,6 +124,11 @@ def resolve_latest_inbound_metadata(payload: dict) -> dict:
     """Resolve metadata for a LiveKit inbound room that arrived without metadata."""
     task = _find_latest_inbound_task(payload)
     if not task:
+        created = _create_task_from_livekit_resolve_payload(payload)
+        if created.get("status") in {"routed", "duplicate"} and created.get("task"):
+            task = frappe.get_doc("AI Task", created["task"])
+
+    if not task:
         return {"status": "no_task"}
 
     context = _task_context(task)
@@ -133,6 +138,41 @@ def resolve_latest_inbound_metadata(payload: dict) -> dict:
         "task": task.name,
         "metadata": metadata,
     }
+
+
+def _create_task_from_livekit_resolve_payload(payload: dict) -> dict:
+    """Create an inbound sales task directly from LiveKit SIP metadata.
+
+    LiveKit can connect the SIP room before the Vobiz recording/status webhook
+    reaches Confluence AI. In that case the worker asks this resolver for room
+    metadata and previously received ``no_task``, causing a generic no-prompt
+    session. This fallback creates the same inbound task shape using the SIP
+    metadata already present in the LiveKit room.
+    """
+    caller = payload.get("caller_phone") or payload.get("From") or payload.get("from")
+    called = payload.get("called_number") or payload.get("To") or payload.get("to")
+    call_uuid = _payload_call_uuid(payload)
+    trunk_id = payload.get("trunk_id") or payload.get("TrunkID")
+    domain = payload.get("domain") or payload.get("Domain")
+
+    if not (caller or called or call_uuid or trunk_id):
+        return {"status": "no_task"}
+
+    synthesized = {
+        "Direction": "inbound",
+        "Event": "CallInitiated",
+        "Status": "initiated",
+        "From": caller,
+        "To": called,
+        "CallUUID": call_uuid,
+        "RequestID": call_uuid,
+        "SIPCallID": call_uuid,
+        "TrunkID": trunk_id,
+        "Domain": domain,
+        "source": "livekit_inbound_resolver",
+    }
+    synthesized = {key: value for key, value in synthesized.items() if value not in (None, "", [], {})}
+    return handle_vobiz_inbound_call(synthesized)
 
 
 def _find_latest_inbound_task(payload: dict):
