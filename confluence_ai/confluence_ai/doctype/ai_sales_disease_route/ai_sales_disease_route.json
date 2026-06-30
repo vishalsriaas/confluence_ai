@@ -23,6 +23,10 @@
   "outbound_phone_number",
   "sip_trunk_id",
   "sip_uri",
+  "inbound_section",
+  "inbound_vobiz_trunk_id",
+  "inbound_phone_number",
+  "inbound_domain",
   "notes"
  ],
  "fields": [
@@ -130,6 +134,31 @@
    "fieldname": "sip_uri",
    "fieldtype": "Data",
    "label": "SIP URI"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "inbound_section",
+   "fieldtype": "Section Break",
+   "label": "Inbound Vobiz Routing"
+  },
+  {
+   "description": "Vobiz incoming webhook TrunkID. When an inbound CallInitiated arrives with this TrunkID, Confluence AI maps it to this sales route.",
+   "fieldname": "inbound_vobiz_trunk_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Inbound Vobiz Trunk ID"
+  },
+  {
+   "description": "Optional DID/number customers dial for this route, for example +917971442248.",
+   "fieldname": "inbound_phone_number",
+   "fieldtype": "Data",
+   "label": "Inbound Phone Number"
+  },
+  {
+   "description": "Optional Vobiz/LiveKit SIP domain from the incoming webhook.",
+   "fieldname": "inbound_domain",
+   "fieldtype": "Data",
+   "label": "Inbound Domain"
   },
   {
    "fieldname": "notes",

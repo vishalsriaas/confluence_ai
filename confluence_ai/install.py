@@ -152,6 +152,34 @@ def ensure_sales_mcp_tools() -> None:
                 ("next_action", "string", 0, "Next action for prescription/order team."),
             ],
         },
+        "create_sales_rejection_issue": {
+            "description": (
+                "Create an Issue when a sales customer rejects/refuses the order after objection handling. "
+                "Use only when customer clearly says they do not want to buy/order now, refuses treatment, rejects price, "
+                "has trust concern, needs family approval, or asks not to proceed. Ask the reason first and include full customer/call details."
+            ),
+            "operation_type": "Create",
+            "server": "mcpsrv-02",
+            "client_doctype": "Issue",
+            "parameters": [
+                ("subject", "string", 0, "Short issue subject. If blank, backend builds it from customer details."),
+                ("description", "string", 0, "Detailed sales rejection description or call summary."),
+                ("customer_name", "string", 1, "Customer name from call."),
+                ("customer_phone", "string", 1, "Customer phone number."),
+                ("disease_or_concern", "string", 0, "Disease/concern/product discussed."),
+                ("reason", "string", 1, "Exact reason customer rejected/refused order."),
+                ("objection_type", "string", 0, "price/trust/not interested/family approval/callback/other."),
+                ("agent_response", "string", 0, "How agent handled the objection or offer explained."),
+                ("next_action", "string", 0, "Follow-up, callback, closed, or other action."),
+                ("raised_by", "string", 0, "Requester email if known; otherwise blank."),
+            ],
+            "fields_to_write": [
+                ("subject", "From Tool Arguments", "subject"),
+                ("description", "From Tool Arguments", "description"),
+                ("raised_by", "From Tool Arguments", "raised_by"),
+                ("status", "Static Value", "Open"),
+            ],
+        },
     }
 
     for tool_name, config in tools.items():
@@ -160,7 +188,11 @@ def ensure_sales_mcp_tools() -> None:
         tool.enabled = 1
         tool.tool_name = tool_name
         tool.description = config["description"]
-        tool.operation_type = tool.operation_type or "Read"
+        tool.operation_type = config.get("operation_type") or tool.operation_type or "Read"
+        if config.get("server") and frappe.db.exists("AI MCP Server", config["server"]):
+            tool.server = config["server"]
+        if config.get("client_doctype"):
+            tool.client_doctype = config["client_doctype"]
 
         existing_params = {row.parameter_name for row in (tool.get("input_parameters") or [])}
         for parameter_name, param_type, required, description in config["parameters"]:
@@ -173,6 +205,23 @@ def ensure_sales_mcp_tools() -> None:
                     "type": param_type,
                     "required": required,
                     "description": description,
+                },
+            )
+
+        existing_write_fields = {
+            (row.client_field, row.value_source, row.source_value)
+            for row in (tool.get("fields_to_write") or [])
+        }
+        for client_field, value_source, source_value in config.get("fields_to_write", []):
+            key = (client_field, value_source, source_value)
+            if key in existing_write_fields:
+                continue
+            tool.append(
+                "fields_to_write",
+                {
+                    "client_field": client_field,
+                    "value_source": value_source,
+                    "source_value": source_value,
                 },
             )
 

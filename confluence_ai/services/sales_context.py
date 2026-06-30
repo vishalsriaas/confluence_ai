@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import urljoin
 
@@ -195,7 +196,7 @@ def create_draft_patient_encounter_from_sales(
                 "interest": concern,
                 "summary": notes,
                 "next_action": "Prescription/detail call required from sales/doctor team",
-                "status": "Prescription Requested",
+                "status": "Converted",
             },
             task_id=task_id,
             agent=agent,
@@ -220,6 +221,32 @@ def create_draft_patient_encounter_from_sales(
         )
         return result
 
+    patient_result = _remote_find_or_create_patient(
+        server_name,
+        customer_name=customer_name,
+        phone=phone,
+        concern=concern,
+    )
+    if not patient_result.get("ok"):
+        result = {
+            "status": "failed",
+            "lead": lead_result,
+            "patient_encounter": None,
+            "erp_response": patient_result,
+            "created_by": "Confluence AI sales voice agent",
+        }
+        record_provider_event(
+            provider="Sales",
+            operation="create_draft_patient_encounter_from_sales",
+            status="Failed",
+            agent=agent,
+            task=task_id,
+            request=arguments,
+            response=result,
+            error=patient_result.get("error"),
+        )
+        return result
+
     encounter_payload = _build_patient_encounter_payload(
         server_name,
         customer_name=customer_name,
@@ -227,6 +254,7 @@ def create_draft_patient_encounter_from_sales(
         concern=concern,
         notes=notes,
         arguments=arguments,
+        patient=patient_result.get("patient"),
     )
     create_result = _remote_frappe_create(server_name, "Patient Encounter", encounter_payload)
     status = "Succeeded" if create_result.get("ok") else "Failed"
@@ -256,13 +284,14 @@ def _upsert_local_sales_lead(arguments: dict, *, task_id: str | None = None, age
     filters = {"phone": phone} if phone else {"customer_name": customer_name}
     existing = frappe.db.get_value("AI Sales Lead", filters, "name") if filters else None
 
+    status = _valid_sales_lead_status(arguments.get("status") or "Interested")
     values = {
         "customer_name": customer_name,
         "phone": phone,
         "interest": _stringify(arguments.get("interest") or arguments.get("product_interest") or arguments.get("disease_or_concern") or ""),
         "summary": _stringify(arguments.get("summary") or arguments.get("notes") or ""),
         "next_action": _stringify(arguments.get("next_action") or ""),
-        "status": arguments.get("status") or "Interested",
+        "status": status,
         "source_task": task_id,
         "source_agent": agent,
         "last_contact_at": frappe.utils.now(),
@@ -292,6 +321,21 @@ def _upsert_local_sales_lead(arguments: dict, *, task_id: str | None = None, age
         response=result,
     )
     return result
+
+
+def _valid_sales_lead_status(status: str | None) -> str:
+    allowed = {"New", "Interested", "Callback", "Not Interested", "Converted", "Closed"}
+    normalized = (status or "").strip()
+    if normalized in allowed:
+        return normalized
+    status_map = {
+        "Prescription Requested": "Converted",
+        "Order Confirmed": "Converted",
+        "Sale": "Converted",
+        "Follow Up": "Callback",
+        "Follow-up": "Callback",
+    }
+    return status_map.get(normalized, "Interested")
 
 
 def _create_local_sales_followup(arguments: dict, *, task_id: str | None = None, agent: str | None = None) -> dict:
@@ -623,11 +667,154 @@ def _remote_frappe_create(server_name: str, doctype: str, payload: dict) -> dict
         return {"ok": False, "error": str(exc)}
 
 
+def _remote_find_or_create_patient(
+    server_name: str,
+    *,
+    customer_name: str,
+    phone: str | None,
+    concern: str,
+) -> dict:
+    patient = _remote_find_patient(server_name, phone)
+    if patient:
+        return {"ok": True, "patient": patient, "action": "found"}
+
+    patient_payload = _build_patient_payload(
+        server_name,
+        customer_name=customer_name,
+        phone=phone,
+        concern=concern,
+    )
+    created = _remote_frappe_create(server_name, "Patient", patient_payload)
+    if not created.get("ok"):
+        return {
+            "ok": False,
+            "error": f"Patient create failed before Patient Encounter: {created.get('error')}",
+            "patient_payload": patient_payload,
+            "patient_response": created,
+        }
+    data = created.get("data") if isinstance(created.get("data"), dict) else {}
+    return {"ok": True, "patient": data.get("name"), "action": "created", "patient_response": created}
+
+
+def _remote_find_patient(server_name: str, phone: str | None) -> str | None:
+    variants = _phone_variants(phone)
+    if not variants:
+        return None
+    for fieldname in ("mobile", "phone"):
+        for value in variants:
+            result = _remote_frappe_list(
+                server_name,
+                "Patient",
+                filters=[[fieldname, "=", value]],
+                fields=["name", "patient_name", "mobile", "phone"],
+                limit=1,
+            )
+            if result.get("ok") and result.get("data"):
+                return result["data"][0].get("name")
+    return None
+
+
+def _phone_variants(phone: str | None) -> list[str]:
+    cleaned = _clean_phone(phone)
+    digits = re.sub(r"\D", "", str(phone or cleaned or ""))
+    if not cleaned and not digits:
+        return []
+    variants = []
+    for value in (phone, cleaned, digits):
+        if value and str(value).strip() not in variants:
+            variants.append(str(value).strip())
+    if digits.startswith("91") and len(digits) == 12:
+        ten_digit = digits[-10:]
+        for value in (ten_digit, f"+91{ten_digit}"):
+            if value not in variants:
+                variants.append(value)
+    elif len(digits) == 10:
+        for value in (f"91{digits}", f"+91{digits}"):
+            if value not in variants:
+                variants.append(value)
+    return variants
+
+
+def _build_patient_payload(
+    server_name: str,
+    *,
+    customer_name: str,
+    phone: str | None,
+    concern: str,
+) -> dict:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    mobile = digits[-10:] if digits.startswith("91") and len(digits) == 12 else digits or _clean_phone(phone)
+    first_name = (customer_name or "Unknown").strip() or "Unknown"
+    field_types = _remote_doctype_field_types(server_name, "Patient")
+    candidate = {
+        "first_name": first_name,
+        "patient_name": first_name,
+        "mobile": mobile or phone,
+        "phone": phone,
+        "sr_medical_department": _department_for_concern(server_name, concern),
+        "status": "Active",
+    }
+    if field_types:
+        return {
+            key: value
+            for key, value in candidate.items()
+            if key in field_types and value not in (None, "") and not _is_child_table_field(field_types.get(key))
+        }
+    return {key: value for key, value in candidate.items() if value not in (None, "")}
+
+
+def _department_for_concern(server_name: str, concern: str) -> str:
+    concern_l = (concern or "").lower()
+    candidates = []
+    if any(term in concern_l for term in ("psoriasis", "skin", "itch", "patch", "redness", "scaling")):
+        candidates.append("Psoriasis")
+    if "kidney" in concern_l or "creatinine" in concern_l:
+        candidates.append("Kidney")
+    if "liver" in concern_l or "fatty" in concern_l:
+        candidates.append("Liver")
+    if "cancer" in concern_l:
+        candidates.append("Cancer")
+    if "paralysis" in concern_l:
+        candidates.append("Paralysis")
+    if "male infertility" in concern_l:
+        candidates.append("Male Infertility")
+    candidates.append("All Department")
+
+    for candidate in candidates:
+        result = _remote_frappe_list(
+            server_name,
+            "Medical Department",
+            filters=[["name", "=", candidate]],
+            fields=["name"],
+            limit=1,
+        )
+        if result.get("ok") and result.get("data"):
+            return candidate
+    return "All Department"
+
+
+def _default_company(server_name: str) -> str | None:
+    result = _remote_frappe_list(
+        server_name,
+        "Company",
+        filters=[],
+        fields=["name"],
+        limit=1,
+    )
+    if result.get("ok") and result.get("data"):
+        return result["data"][0].get("name")
+    return None
+
+
 def _remote_doctype_fields(server_name: str, doctype: str) -> set[str]:
+    return set(_remote_doctype_field_types(server_name, doctype).keys())
+
+
+def _remote_doctype_field_types(server_name: str, doctype: str) -> dict[str, str]:
     try:
         server_url, headers = _mcp_server_connection(server_name)
         if not server_url:
-            return set()
+            return {}
 
         response = requests.get(
             urljoin(server_url.rstrip("/") + "/", "api/method/frappe.desk.form.load.getdoctype"),
@@ -636,18 +823,26 @@ def _remote_doctype_fields(server_name: str, doctype: str) -> set[str]:
             timeout=20,
         )
         if not response.ok:
-            return set()
+            return {}
         docs = response.json().get("docs") or []
         if not docs and isinstance(response.json().get("message"), dict):
             docs = response.json()["message"].get("docs") or []
         for doc in docs:
             if doc.get("name") == doctype or doc.get("doctype") == "DocType":
-                fields = {field.get("fieldname") for field in doc.get("fields", []) if field.get("fieldname")}
-                fields.add("name")
+                fields = {
+                    field.get("fieldname"): field.get("fieldtype")
+                    for field in doc.get("fields", [])
+                    if field.get("fieldname")
+                }
+                fields["name"] = "Data"
                 return fields
     except Exception:
-        return set()
-    return set()
+        return {}
+    return {}
+
+
+def _is_child_table_field(fieldtype: str | None) -> bool:
+    return str(fieldtype or "").strip().lower() in {"table", "table multiselect"}
 
 
 def _build_patient_encounter_payload(
@@ -658,27 +853,28 @@ def _build_patient_encounter_payload(
     concern: str,
     notes: str,
     arguments: dict,
+    patient: str | None = None,
 ) -> dict:
     candidate = {
+        "patient": patient,
         "patient_name": customer_name,
         "sr_pe_mobile": phone,
         "mobile": phone,
         "phone": phone,
         "encounter_date": frappe.utils.today(),
+        "encounter_time": frappe.utils.nowtime(),
+        "company": _default_company(server_name),
+        "sr_encounter_type": "Order",
+        "sr_encounter_place": "Online",
+        "sr_encounter_source": arguments.get("encounter_source") or "Vobiz Ai Call",
+        "sr_lead_notes": notes[:1000],
+        "sr_utm_source": arguments.get("source_system") or "Vobiz Inbound Sales",
+        "status": "Open",
         "sr_encounter_status": "Draft",
-        "status": "Draft",
         "sr_notes": notes,
         "encounter_comment": notes,
+        "sr_pe_order_items": _build_sales_order_items(server_name, concern, arguments),
     }
-    if concern:
-        candidate.update(
-            {
-                "chief_complaint": concern,
-                "complaint": concern,
-                "symptoms": concern,
-                "reason": concern,
-            }
-        )
 
     extra_map = {
         "age": arguments.get("age"),
@@ -686,15 +882,91 @@ def _build_patient_encounter_payload(
         "duration": arguments.get("duration") or arguments.get("kab_se_hai"),
         "has_report": arguments.get("has_report"),
         "previous_treatment": arguments.get("previous_treatment"),
+        "address": arguments.get("address") or arguments.get("delivery_address"),
+        "payment_mode": arguments.get("payment_mode"),
     }
     for key, value in extra_map.items():
         if value not in (None, "", [], {}):
             candidate[key] = value
 
-    fields = _remote_doctype_fields(server_name, "Patient Encounter")
-    if fields:
-        return {key: value for key, value in candidate.items() if key in fields and value not in (None, "")}
+    field_types = _remote_doctype_field_types(server_name, "Patient Encounter")
+    if field_types:
+        return {
+            key: value
+            for key, value in candidate.items()
+            if key in field_types
+            and value not in (None, "")
+            and (key == "sr_pe_order_items" or not _is_child_table_field(field_types.get(key)))
+        }
     return {key: value for key, value in candidate.items() if value not in (None, "")}
+
+
+def _build_sales_order_items(server_name: str, concern: str, arguments: dict) -> list[dict]:
+    raw_items = arguments.get("items")
+    if isinstance(raw_items, str):
+        try:
+            raw_items = json.loads(raw_items)
+        except Exception:
+            raw_items = None
+
+    items = raw_items if isinstance(raw_items, list) and raw_items else [{}]
+    rows = []
+    for item in items[:5]:
+        item = item if isinstance(item, dict) else {"name": str(item)}
+        item_record = _resolve_sales_item(server_name, item, concern)
+        if not item_record:
+            continue
+        qty = item.get("qty") or item.get("quantity") or 1
+        rate = item.get("rate") or item.get("price") or item.get("amount") or 5500
+        amount = item.get("amount") or (float(qty or 1) * float(rate or 0))
+        rows.append(
+            {
+                "sr_item_code": item_record.get("item_code") or item_record.get("name"),
+                "sr_item_name": item_record.get("item_name") or item_record.get("name"),
+                "sr_item_uom": item_record.get("stock_uom") or "Nos",
+                "sr_item_qty": qty,
+                "sr_item_rate": rate,
+                "sr_item_amount": amount,
+            }
+        )
+    return rows
+
+
+def _resolve_sales_item(server_name: str, item: dict, concern: str) -> dict | None:
+    explicit = item.get("item_code") or item.get("name") or item.get("item_name")
+    for term in [explicit, *_default_item_terms(concern)]:
+        if not term:
+            continue
+        found = _find_remote_item(server_name, str(term))
+        if found:
+            return found
+    return None
+
+
+def _default_item_terms(concern: str) -> list[str]:
+    concern_l = (concern or "").lower()
+    if any(term in concern_l for term in ("psoriasis", "skin", "itch", "patch", "redness", "scaling")):
+        return ["PSO", "Psoriasis Treatment 30 Days", "Skin Treatment 30Days", "AROGYA"]
+    if "kidney" in concern_l:
+        return ["AROGYA"]
+    if "male infertility" in concern_l or "mi " in f"{concern_l} ":
+        return ["MI Varicocele 30days", "AROGYA"]
+    return ["AROGYA"]
+
+
+def _find_remote_item(server_name: str, term: str) -> dict | None:
+    fields = ["name", "item_code", "item_name", "stock_uom"]
+    filters_to_try = [
+        [["name", "=", term]],
+        [["item_code", "=", term]],
+        [["item_name", "=", term]],
+        [["item_name", "like", f"%{term}%"]],
+    ]
+    for filters in filters_to_try:
+        result = _remote_frappe_list(server_name, "Item", filters=filters, fields=fields, limit=1)
+        if result.get("ok") and result.get("data"):
+            return result["data"][0]
+    return None
 
 
 def _compose_sales_patient_encounter_notes(arguments: dict, *, task_id: str | None = None, agent: str | None = None) -> str:
@@ -714,6 +986,14 @@ def _compose_sales_patient_encounter_notes(arguments: dict, *, task_id: str | No
         f"Current Treatment/Medicine: {_stringify(arguments.get('current_treatment') or arguments.get('current_medicine') or '')}",
         f"Customer Interest/Readiness: {_stringify(arguments.get('readiness') or arguments.get('outcome') or '')}",
         f"Package/Price Discussed: {_stringify(arguments.get('price_discussed') or arguments.get('package_discussed') or '')}",
+        f"Delivery Address: {_stringify(arguments.get('address') or arguments.get('delivery_address') or '')}",
+        f"Address Confirmed By Customer: {_stringify(arguments.get('address_confirmed') or arguments.get('whatsapp_address_confirmed') or '')}",
+        f"WhatsApp Sent: {_stringify(arguments.get('whatsapp_sent') or arguments.get('whatsapp_confirmation_sent') or '')}",
+        f"Payment Mode: {_stringify(arguments.get('payment_mode') or '')}",
+        f"Prepaid Discount Discussed: {_stringify(arguments.get('prepaid_discount') or '')}",
+        f"COD Token/Prescription Charge Discussed: {_stringify(arguments.get('cod_token_amount') or arguments.get('token_amount') or '')}",
+        f"Remaining Amount Instruction: {_stringify(arguments.get('remaining_amount_instruction') or '')}",
+        f"Order Confirmation Details: {_stringify(arguments.get('order_details') or '')}",
         f"Next Action: {_stringify(arguments.get('next_action') or 'Prescription/detail call required')}",
         f"Call Summary: {_stringify(arguments.get('summary') or arguments.get('notes') or '')}",
     ]

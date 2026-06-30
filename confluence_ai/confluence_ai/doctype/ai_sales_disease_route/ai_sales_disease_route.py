@@ -9,6 +9,9 @@ from frappe.model.document import Document
 class AISalesDiseaseRoute(Document):
     def validate(self) -> None:
         self.disease_key = (self.disease_key or "").strip().lower()
+        self.inbound_vobiz_trunk_id = (self.inbound_vobiz_trunk_id or "").strip()
+        self.inbound_phone_number = (self.inbound_phone_number or "").strip()
+        self.inbound_domain = (self.inbound_domain or "").strip()
         if self.aliases_json:
             try:
                 aliases = json.loads(self.aliases_json)

@@ -81,29 +81,12 @@ def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
 
 
-async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
+def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
+    """Build the metadata consumed by the universal LiveKit worker."""
     task = frappe.get_doc("AI Task", task_name)
+    payload = payload or parse_json_object(task.context_json, "Task Context JSON") or {}
     agent_name = task.assigned_agent or task.target_agent
     agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
-    account_name = agent.allowed_channel_account if agent else None
-    if not account_name:
-        return {"status": "skipped", "reason": "no_livekit_account"}
-
-    account = frappe.get_doc("AI Channel Account", account_name)
-    endpoints = parse_json_object(account.endpoint_paths_json, "Endpoint Paths JSON") or {}
-    operation = "outbound_call" if payload.get("phone") or payload.get("to") else "create_room"
-
-    url = account.base_url or ""
-    # Ensure HTTP/HTTPS schemes for REST calls inside LiveKitAPI
-    if url.startswith("wss://"):
-        url = url.replace("wss://", "https://")
-    elif url.startswith("ws://"):
-        url = url.replace("ws://", "http://")
-
-    api_key = account.get_password("api_key")
-    api_secret = account.get_password("api_secret")
-
-    room_name = f"agent-army-{task.name}"
 
     try:
         system_prompt = agent.get_system_prompt(include_tool_catalog=False) if agent else ""
@@ -111,7 +94,6 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         system_prompt = agent.get_system_prompt() if agent else ""
     personality = agent.personality if agent else ""
 
-    # Infuse variables into prompt templates using Task Context payload
     if system_prompt:
         if "{{" in system_prompt:
             try:
@@ -136,14 +118,40 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             except Exception:
                 pass
 
-    voice_context = _voice_metadata_context(payload)
-    metadata = {
+    return {
         "task": task.name,
         "agent": agent_name,
         "system_prompt": system_prompt,
         "personality": personality,
-        "context": voice_context,
+        "context": _voice_metadata_context(payload),
     }
+
+
+async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
+    task = frappe.get_doc("AI Task", task_name)
+    agent_name = task.assigned_agent or task.target_agent
+    agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
+    account_name = agent.allowed_channel_account if agent else None
+    if not account_name:
+        return {"status": "skipped", "reason": "no_livekit_account"}
+
+    account = frappe.get_doc("AI Channel Account", account_name)
+    endpoints = parse_json_object(account.endpoint_paths_json, "Endpoint Paths JSON") or {}
+    operation = "outbound_call" if payload.get("phone") or payload.get("to") else "create_room"
+
+    url = account.base_url or ""
+    # Ensure HTTP/HTTPS schemes for REST calls inside LiveKitAPI
+    if url.startswith("wss://"):
+        url = url.replace("wss://", "https://")
+    elif url.startswith("ws://"):
+        url = url.replace("ws://", "http://")
+
+    api_key = account.get_password("api_key")
+    api_secret = account.get_password("api_secret")
+
+    room_name = f"agent-army-{task.name}"
+
+    metadata = build_voice_metadata(task.name, payload)
     metadata_str = json.dumps(metadata)
     livekit_agent_name = _livekit_dispatch_name(agent, endpoints, payload)
 

@@ -153,6 +153,7 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "create_sales_followup",
         "log_sales_call_outcome",
         "create_draft_patient_encounter_from_sales",
+        "send_mapped_whatsapp_template",
     }:
         return None
 
@@ -168,7 +169,10 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
 
         query = arguments.get("query") or arguments.get("question") or ""
         limit = int(arguments.get("limit") or 5)
-        return {"status": "success", "data": retrieve_knowledge(query, agent=agent, limit=limit)}
+        results = retrieve_knowledge(query, agent=agent, limit=limit)
+        if not results and agent:
+            results = retrieve_knowledge(query, limit=limit)
+        return {"status": "success", "data": results}
     if tool_name == "lookup_patient_sales_context":
         return sales_context.lookup_patient_sales_context(arguments, agent=agent)
     if tool_name == "create_or_update_lead":
@@ -179,6 +183,10 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         return sales_context.log_sales_call_outcome(arguments, task_id=task_id, agent=agent)
     if tool_name == "create_draft_patient_encounter_from_sales":
         return sales_context.create_draft_patient_encounter_from_sales(arguments, task_id=task_id, agent=agent)
+    if tool_name == "send_mapped_whatsapp_template":
+        from confluence_ai.services.whatsapp_templates import send_mapped_whatsapp_template
+
+        return send_mapped_whatsapp_template(arguments, task_id=task_id, agent=agent)
     return None
 
 
@@ -251,6 +259,7 @@ def validate_filter_arguments(tool: "frappe.Document", arguments: dict):
 def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | None) -> dict:
     """Executes the tool natively (using REST API of client ERP mapped to server config)."""
     arguments = enrich_order_confirmation_issue_arguments(tool, dict(arguments or {}), task_id)
+    arguments = enrich_sales_rejection_issue_arguments(tool, dict(arguments or {}), task_id)
     validate_filter_arguments(tool, arguments)
     
     server = frappe.get_doc("AI MCP Server", tool.server) if tool.server else None
@@ -456,6 +465,40 @@ def enrich_order_confirmation_issue_arguments(tool: "frappe.Document", arguments
     return arguments
 
 
+def enrich_sales_rejection_issue_arguments(tool: "frappe.Document", arguments: dict, task_id: str | None) -> dict:
+    """Append sales-call context to rejection/refusal issues so follow-up teams get the full picture."""
+    tool_name = (tool.tool_name or "").lower()
+    if tool_name != "create_sales_rejection_issue":
+        return arguments
+
+    task_context = get_task_context_for_mcp(task_id)
+    payload_json = task_context.get("payload_json") if isinstance(task_context.get("payload_json"), dict) else {}
+    data = dict(task_context or {})
+    data.update({k: v for k, v in payload_json.items() if v not in (None, "", [], {})})
+    data.update({k: v for k, v in arguments.items() if v not in (None, "", [], {})})
+
+    detail_lines = build_sales_rejection_issue_detail_lines(data, arguments)
+    original_description = str(arguments.get("description") or arguments.get("reason") or "").strip()
+    detail_block = "\n".join(detail_lines)
+    if detail_block and "SALES REJECTION DETAILS" not in original_description:
+        arguments["description"] = (
+            f"{original_description}\n\nSALES REJECTION DETAILS:\n{detail_block}"
+            if original_description
+            else f"SALES REJECTION DETAILS:\n{detail_block}"
+        )
+
+    if not arguments.get("subject"):
+        customer = data.get("customer_name") or data.get("patient_name") or "Customer"
+        phone = data.get("customer_phone") or data.get("phone") or data.get("mobile") or ""
+        concern = data.get("disease_or_concern") or data.get("interest") or data.get("product_interest") or "Sales"
+        arguments["subject"] = f"Sales rejected - {customer} - {phone} - {concern}"
+
+    if not arguments.get("raised_by"):
+        arguments["raised_by"] = ""
+
+    return arguments
+
+
 def get_task_context_for_mcp(task_id: str | None) -> dict:
     if not task_id or not frappe.db.exists("AI Task", task_id):
         return {}
@@ -513,6 +556,46 @@ def build_order_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
     spoken_summary = str(arguments.get("description") or "").strip()
     if spoken_summary:
         lines.append(f"- Customer Spoken Issue / Agent Note: {spoken_summary}")
+
+    return lines
+
+
+def build_sales_rejection_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
+    def pick(*keys):
+        for key in keys:
+            value = data.get(key)
+            if value not in (None, "", [], {}):
+                return value
+        return ""
+
+    lines = []
+    simple_fields = [
+        ("Customer Name", pick("customer_name", "patient_name", "name")),
+        ("Customer Phone", pick("customer_phone", "phone", "mobile", "phone_number")),
+        ("Task", pick("task_id", "task")),
+        ("Source System", pick("source_system")),
+        ("Event", pick("event")),
+        ("Disease / Concern", pick("disease_or_concern", "concern", "interest", "product_interest")),
+        ("Age", pick("age")),
+        ("Location", pick("location")),
+        ("Duration", pick("duration", "kab_se_hai")),
+        ("Symptoms", pick("symptoms")),
+        ("Reports Available", pick("has_report", "reports")),
+        ("Previous Treatment", pick("previous_treatment", "current_treatment")),
+        ("Price / Package Discussed", pick("price_discussed", "package_discussed")),
+        ("Customer Rejection Reason", pick("reason", "rejection_reason", "customer_response", "requested_change_or_issue")),
+        ("Objection Type", pick("objection_type")),
+        ("Agent Handling / Offer Given", pick("agent_response", "offer_given", "summary")),
+        ("Next Action", pick("next_action")),
+        ("Preferred Callback Time", pick("callback_time", "preferred_time")),
+    ]
+    for label, value in simple_fields:
+        if value not in (None, "", [], {}):
+            lines.append(f"- {label}: {value}")
+
+    spoken_summary = str(arguments.get("description") or arguments.get("summary") or "").strip()
+    if spoken_summary:
+        lines.append(f"- Agent Note: {spoken_summary}")
 
     return lines
 

@@ -83,6 +83,57 @@ def resolve_sales_disease_route(
     return _as_selection(default_row, matched_alias="default") if default_row else {}
 
 
+def resolve_inbound_sales_route(payload: dict) -> dict:
+    """Resolve a sales route from a Vobiz inbound webhook.
+
+    Inbound calls should be mapped by the Vobiz trunk/customer-facing number,
+    not by the outbound disease route. The strongest match is TrunkID, with
+    optional DID/domain fallback for accounts where Vobiz sends alternate IDs.
+    """
+    if not _doctype_exists("AI Sales Disease Route"):
+        return {}
+
+    trunk_id = str(payload.get("TrunkID") or payload.get("trunk_id") or "").strip()
+    called_number = str(payload.get("To") or payload.get("to") or payload.get("to_number") or "").strip()
+    domain = str(payload.get("Domain") or payload.get("domain") or "").strip()
+
+    rows = frappe.get_all(
+        "AI Sales Disease Route",
+        filters={"enabled": 1},
+        fields=[
+            "name",
+            "route_name",
+            "disease_key",
+            "target_agent",
+            "channel_account",
+            "profile_key",
+            "outbound_phone_number",
+            "sip_trunk_id",
+            "sip_uri",
+            "inbound_vobiz_trunk_id",
+            "inbound_phone_number",
+            "inbound_domain",
+            "is_default",
+            "priority",
+        ],
+        order_by="priority asc, creation asc",
+    )
+
+    for row in rows:
+        if trunk_id and _same_token(trunk_id, row.get("inbound_vobiz_trunk_id")):
+            return _as_selection(row, matched_alias="inbound_trunk_id")
+
+    for row in rows:
+        if called_number and _same_phone(called_number, row.get("inbound_phone_number")):
+            return _as_selection(row, matched_alias="inbound_phone_number")
+
+    for row in rows:
+        if domain and _same_token(domain, row.get("inbound_domain")):
+            return _as_selection(row, matched_alias="inbound_domain")
+
+    return {}
+
+
 def apply_sales_route_context(context: dict, selection: dict) -> dict:
     if not selection:
         return context
@@ -187,6 +238,18 @@ def _normalize(value: str) -> str:
     value = (value or "").lower()
     value = re.sub(r"[^a-z0-9+]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _same_token(left: str | None, right: str | None) -> bool:
+    return bool(left and right and str(left).strip().lower() == str(right).strip().lower())
+
+
+def _same_phone(left: str | None, right: str | None) -> bool:
+    left_digits = re.sub(r"\D+", "", str(left or ""))
+    right_digits = re.sub(r"\D+", "", str(right or ""))
+    if not left_digits or not right_digits:
+        return False
+    return left_digits == right_digits or left_digits[-10:] == right_digits[-10:]
 
 
 def _doctype_exists(doctype: str) -> bool:

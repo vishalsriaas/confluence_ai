@@ -68,6 +68,27 @@ def download_vobiz_recording(recording_url: str, task) -> str | None:
 
 
 def handle_callback(payload: dict) -> dict:
+    from confluence_ai.services.inbound_sales import handle_vobiz_inbound_call
+
+    # Inbound call starts must create their own task keyed by CallUUID before
+    # generic phone/trunk matching runs. Otherwise a fresh inbound call from the
+    # same caller can attach to an older still-running task.
+    inbound_result = handle_vobiz_inbound_call(payload)
+    if inbound_result.get("status") in {"routed", "duplicate"} and inbound_result.get("task"):
+        task = frappe.get_doc("AI Task", inbound_result["task"])
+        attempts = frappe.get_all(
+            "AI Task Attempt",
+            filters={"task": task.name},
+            order_by="creation desc",
+            limit=1,
+            pluck="name",
+        )
+        attempt = frappe.get_doc("AI Task Attempt", attempts[0]) if attempts else None
+        call_log = upsert_call_log(payload, task=task, attempt=attempt)
+        frappe.db.commit()
+        inbound_result["call_log"] = call_log
+        return inbound_result
+
     # 1. Match the webhook payload to a task and/or attempt
     task_name, attempt_name = find_task_and_attempt(payload)
 
