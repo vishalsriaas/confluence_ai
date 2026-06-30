@@ -38,6 +38,7 @@ def enrich_sales_context(
     *,
     route: "frappe.Document | None" = None,
     agent: "frappe.Document | None" = None,
+    task_id: str | None = None,
 ) -> dict:
     if not should_build_sales_context(route, agent, context):
         return context
@@ -67,6 +68,24 @@ def enrich_sales_context(
     )
     customer_type = "repeat" if patient_context.get("found") else "new"
 
+    record_provider_event(
+        provider="Sales",
+        operation="lookup_patient_sales_context",
+        status="Succeeded",
+        agent=agent.name if agent else None,
+        task=task_id,
+        request={
+            "phone": phone,
+            "customer_name": customer_name,
+            "patient_encounter": patient_encounter,
+        },
+        response={
+            "found": patient_context.get("found"),
+            "customer_type": customer_type,
+            "summary": patient_context.get("summary", ""),
+        },
+    )
+
     query = _build_kb_query(enriched, patient_context)
     snippets = retrieve_knowledge(
         query,
@@ -88,6 +107,7 @@ def enrich_sales_context(
             "customer_type": customer_type,
             "sales_brief": brief,
             "patient_summary": patient_context.get("summary", ""),
+            "repeat_customer_details": patient_context.get("summary", "") if customer_type == "repeat" else "",
             "knowledge_snippets": [
                 {
                     "title": item.get("title"),
@@ -108,6 +128,7 @@ def enrich_sales_context(
         operation="build_sales_context",
         status="Succeeded",
         agent=agent.name if agent else None,
+        task=task_id,
         request={"phone": phone, "customer_name": customer_name, "query": query},
         response={
             "customer_type": customer_type,
@@ -173,6 +194,157 @@ def log_sales_call_outcome(arguments: dict, *, task_id: str | None = None, agent
         response={"message": "Stored as provider event because no external sales outcome tool is configured."},
     )
     return {"status": "success", "logged": True}
+
+
+def ensure_final_sales_mcp(task_id: str | None, *, trigger: str = "call_completed") -> dict:
+    """Guarantee sales calls end with either a draft Patient Encounter or a rejection Issue."""
+    if not task_id or not frappe.db.exists("AI Task", task_id):
+        return {"status": "skipped", "reason": "missing_task"}
+
+    task = frappe.get_doc("AI Task", task_id)
+    context = parse_json_object(task.context_json, "AI Task Context") if task.context_json else {}
+    if not isinstance(context, dict):
+        context = {}
+
+    event = str(context.get("event") or "").lower()
+    if "sales" not in event and not context.get("selected_sales_route"):
+        return {"status": "skipped", "reason": "not_sales_task"}
+
+    operations = [
+        row.operation
+        for row in frappe.get_all(
+            "AI Provider Event",
+            filters={"task": task_id},
+            fields=["operation"],
+            limit=200,
+        )
+    ]
+    if any(op in operations for op in ("create_draft_patient_encounter_from_sales", "mcp_create_draft_patient_encounter_from_sales")):
+        return {"status": "skipped", "reason": "patient_encounter_already_created"}
+    if any(op in operations for op in ("create_sales_rejection_issue", "mcp_create_sales_rejection_issue")):
+        return {"status": "skipped", "reason": "rejection_issue_already_created"}
+
+    latest_outcome = frappe.get_all(
+        "AI Provider Event",
+        filters={"task": task_id, "operation": ["in", ["log_sales_call_outcome", "mcp_log_sales_call_outcome"]]},
+        fields=["request_json", "creation"],
+        order_by="creation desc",
+        limit=1,
+    )
+    outcome_payload = {}
+    if latest_outcome:
+        outcome_payload = parse_json_object(latest_outcome[0].request_json, "Sales Outcome Request") or {}
+        if not isinstance(outcome_payload, dict):
+            outcome_payload = {}
+
+    summary = _stringify(outcome_payload.get("summary") or "")
+    outcome = _stringify(outcome_payload.get("outcome") or "")
+    next_action = _stringify(outcome_payload.get("next_action") or "")
+
+    call_log = _latest_call_log_for_task(task_id)
+    transcript = ""
+    if call_log:
+        transcript = _stringify(call_log.get("transcript") or call_log.get("transcript_summary") or "")
+
+    phone = _first_value(context, "customer_phone", "phone", "payload_json.From") or outcome_payload.get("phone")
+    name = (
+        _first_value(context, "customer_name", "patient_name")
+        or _extract_name_from_summary(_stringify(context.get("repeat_customer_details") or context.get("patient_summary") or ""))
+        or _extract_name_from_summary(summary)
+        or "Unknown"
+    )
+    concern = _first_value(context, "disease_or_concern", "product_interest") or "Sales"
+    reason = _fallback_rejection_reason(outcome, summary, next_action, transcript, trigger)
+
+    arguments = {
+        "subject": f"Sales follow-up required - {name} - {phone} - {concern}",
+        "customer_name": name,
+        "customer_phone": phone,
+        "disease_or_concern": concern,
+        "reason": reason,
+        "objection_type": _fallback_objection_type(outcome, summary, next_action),
+        "agent_response": "Auto-created by Confluence AI because the completed sales call did not create a Patient Encounter and did not create a rejection Issue.",
+        "next_action": next_action or "Review call and follow up manually",
+        "description": (
+            f"Auto-created by Confluence AI finalizer.\n"
+            f"Trigger: {trigger}\n"
+            f"Task: {task_id}\n"
+            f"Outcome: {outcome or 'Not captured'}\n"
+            f"Summary: {summary or 'Not captured'}\n"
+            f"Reason: {reason}\n"
+            f"Transcript excerpt: {transcript[:1200] if transcript else 'Not available'}"
+        ),
+    }
+
+    try:
+        result = _execute_named_sales_tool(
+            "create_sales_rejection_issue",
+            arguments,
+            task_id=task_id,
+            agent=task.assigned_agent or task.target_agent,
+        )
+        record_provider_event(
+            provider="Sales",
+            operation="ensure_final_sales_mcp",
+            status="Succeeded",
+            agent=task.assigned_agent or task.target_agent,
+            task=task_id,
+            request={"trigger": trigger},
+            response={"action": "created_rejection_issue", "result": result},
+        )
+        return {"status": "created_rejection_issue", "result": result}
+    except Exception as exc:
+        create_error(
+            "Sales Finalizer Failed",
+            str(exc),
+            source="Sales",
+            task=task_id,
+            task_batch=task.task_batch,
+            agent=task.assigned_agent or task.target_agent,
+            payload={"trigger": trigger, "arguments": arguments},
+            exc=exc,
+        )
+        return {"status": "failed", "error": str(exc)}
+
+
+def _latest_call_log_for_task(task_id: str) -> dict | None:
+    rows = frappe.get_all(
+        "AI Call Log",
+        filters={"task": task_id},
+        fields=["name", "transcript", "transcript_summary"],
+        order_by="modified desc",
+        limit=1,
+    )
+    return dict(rows[0]) if rows else None
+
+
+def _extract_name_from_summary(summary: str) -> str | None:
+    match = re.search(r"(?:Customer|Name)[:\s]+([A-Za-z][A-Za-z ]{1,60})", summary or "")
+    if not match:
+        return None
+    return match.group(1).strip().split("\n")[0][:60]
+
+
+def _fallback_objection_type(outcome: str, summary: str, next_action: str) -> str:
+    text = f"{outcome} {summary} {next_action}".lower()
+    if "price" in text or "cost" in text:
+        return "price"
+    if "busy" in text or "call later" in text or "follow" in text or "callback" in text:
+        return "follow-up"
+    if "report" in text or "doctor" in text or "evaluation" in text:
+        return "needs review"
+    if "not interested" in text or "reject" in text or "no" in text:
+        return "not interested"
+    return "not converted"
+
+
+def _fallback_rejection_reason(outcome: str, summary: str, next_action: str, transcript: str, trigger: str) -> str:
+    for value in (summary, next_action, outcome):
+        if value:
+            return value[:500]
+    if transcript:
+        return f"Call completed without conversion. Transcript excerpt: {transcript[:400]}"
+    return f"Sales call completed without Patient Encounter or rejection Issue. Trigger: {trigger}"
 
 
 def create_draft_patient_encounter_from_sales(
@@ -1137,10 +1309,41 @@ def _extract_records(result: Any) -> list[dict[str, Any]]:
 
 def _summarize_records(records: list[dict[str, Any]]) -> str:
     parts: list[str] = []
-    for idx, record in enumerate(records[:5], start=1):
-        compact = {key: value for key, value in record.items() if value not in (None, "", [], {})}
-        parts.append(f"{idx}. {json.dumps(compact, ensure_ascii=False, default=str)[:900]}")
+    for idx, record in enumerate(records[:1], start=1):
+        compact = _summarize_record_for_voice(record)
+        if compact:
+            parts.append(f"{idx}. {compact}")
     return "\n".join(parts)
+
+
+def _summarize_record_for_voice(record: dict[str, Any]) -> str:
+    fields = [
+        ("Patient", "patient_name", "customer_name", "name1"),
+        ("Encounter", "name", "patient_encounter"),
+        ("Date", "encounter_date", "posting_date", "creation"),
+        ("Concern", "disease_or_concern", "concern", "sr_disease", "diagnosis"),
+        ("Status", "sr_encounter_status", "status"),
+        ("Phone", "sr_pe_mobile", "mobile", "phone", "customer_phone"),
+        ("Address", "address", "delivery_address", "sr_address"),
+        ("Payment", "payment_mode", "mode_of_payment"),
+        ("Notes", "sr_notes", "encounter_comment", "notes", "summary"),
+    ]
+    parts: list[str] = []
+    for label, *keys in fields:
+        value = None
+        for key in keys:
+            value = record.get(key)
+            if value not in (None, "", [], {}):
+                break
+        if value in (None, "", [], {}):
+            continue
+        text = _stringify(value).replace("\n", " ").strip()
+        if label == "Notes":
+            text = text[:180]
+        else:
+            text = text[:100]
+        parts.append(f"{label}: {text}")
+    return "; ".join(parts)[:500]
 
 
 def _first_value(data: dict, *paths: str):

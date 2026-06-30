@@ -160,6 +160,8 @@ def handle_callback(payload: dict) -> dict:
             if attempt:
                 attempt.status = "Succeeded"
                 attempt.ended_at = now()
+            from confluence_ai.services.sales_context import ensure_final_sales_mcp
+            ensure_final_sales_mcp(task.name, trigger=f"vobiz:{status_lower}")
         elif status_lower in {"failed", "busy", "no_answer", "timeout", "cancel"}:
             task.status = "Failed"
             task.last_error = payload.get("Reason") or payload.get("hangup_cause") or status

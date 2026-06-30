@@ -7,6 +7,7 @@ import frappe
 from confluence_ai.services.dispatcher import refresh_batch_counts
 from confluence_ai.services.livekit import build_voice_metadata
 from confluence_ai.services.sales_disease_router import apply_sales_route_context, resolve_inbound_sales_route
+from confluence_ai.services.sales_context import enrich_sales_context
 from confluence_ai.services.utils import as_json, now
 
 
@@ -43,11 +44,6 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
 
     context = _context_from_vobiz_payload(payload, selection)
     context = apply_sales_route_context(context, selection)
-    # Inbound callers are waiting on the line while LiveKit asks Confluence AI
-    # for metadata. Keep this path lightweight: route/agent/disease context is
-    # enough for the first greeting, and the voice agent can use MCP/KB tools
-    # during the conversation for patient lookup and deeper disease data.
-    context["sales_context_mode"] = "deferred_for_inbound"
 
     batch = frappe.new_doc("AI Task Batch")
     batch.update(
@@ -84,6 +80,12 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
         }
     )
     task.insert(ignore_permissions=True)
+
+    context = enrich_sales_context(context, agent=agent, task_id=task.name)
+    context["sales_context_mode"] = "prepared_for_inbound"
+    context.pop("inbound_sales_context_deferred", None)
+    task.context_json = as_json(context)
+    task.save(ignore_permissions=True)
 
     attempt = frappe.new_doc("AI Task Attempt")
     attempt.update(

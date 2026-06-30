@@ -47,6 +47,7 @@ def _voice_metadata_context(payload: dict) -> dict:
         "product_interest",
         "campaign",
         "customer_type",
+        "repeat_customer_details",
         "profile_key",
         "outbound_phone_number",
     ]
@@ -55,11 +56,15 @@ def _voice_metadata_context(payload: dict) -> dict:
     sales_brief = str(payload.get("sales_brief") or "")
     if sales_brief:
         # Enough to keep old/new awareness, without overloading the live prompt.
-        compact["sales_brief"] = sales_brief[:800]
+        compact["sales_brief"] = sales_brief[:550]
 
     patient_summary = str(payload.get("patient_summary") or "")
     if patient_summary:
-        compact["patient_summary"] = patient_summary[:240]
+        compact["patient_summary"] = patient_summary[:180]
+
+    repeat_details = str(payload.get("repeat_customer_details") or "")
+    if repeat_details:
+        compact["repeat_customer_details"] = repeat_details[:380]
 
     compact["voice_context_compacted"] = 1
     return compact
@@ -282,6 +287,9 @@ def handle_callback(payload: dict) -> dict:
                 attempt.status = "Succeeded"
                 from confluence_ai.services.utils import now
                 attempt.ended_at = now()
+            if event_type_lower in {"room_finished", "call_ended", "completed"}:
+                from confluence_ai.services.sales_context import ensure_final_sales_mcp
+                ensure_final_sales_mcp(task.name, trigger=f"livekit:{event_type_lower}")
         else:
             task.status = "Failed"
             task.last_error = payload.get("error") or payload.get("error_message") or event_type
