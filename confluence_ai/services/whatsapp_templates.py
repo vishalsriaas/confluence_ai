@@ -123,7 +123,15 @@ def _find_template_map(*, did_number: str, profile_key: str, disease: str, inten
 
 
 def _render_json_values(raw: str | None, *, message: str, arguments: dict, context: dict) -> Any:
-    value = parse_json_object(raw or "{}", "WhatsApp Template Values")
+    if not raw:
+        value: Any = {}
+    else:
+        try:
+            value = json.loads(raw)
+        except Exception:
+            frappe.throw("WhatsApp Template Values must be valid JSON")
+        if not isinstance(value, (dict, list)):
+            frappe.throw("WhatsApp Template Values must be a JSON object or array")
     values = {"message": message, **{k: v for k, v in context.items() if isinstance(v, (str, int, float))}}
     values.update({k: v for k, v in arguments.items() if isinstance(v, (str, int, float))})
 
