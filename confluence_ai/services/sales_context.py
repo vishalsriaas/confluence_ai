@@ -87,11 +87,35 @@ def enrich_sales_context(
     )
 
     query = _build_kb_query(enriched, patient_context)
-    snippets = retrieve_knowledge(
-        query,
-        agent=agent.name if agent else None,
-        limit=int(getattr(agent, "sales_kb_limit", 6) or 6) if agent else 6,
-    )
+    try:
+        snippets = retrieve_knowledge(
+            query,
+            agent=agent.name if agent else None,
+            limit=int(getattr(agent, "sales_kb_limit", 6) or 6) if agent else 6,
+        )
+    except Exception as exc:
+        snippets = []
+        create_error(
+            "Sales KB Retrieval Failed",
+            str(exc),
+            source="Sales",
+            task=task_id,
+            agent=agent.name if agent else None,
+            payload={"phone": phone, "customer_name": customer_name, "query": query},
+            exc=exc,
+        )
+        record_provider_event(
+            provider="Confluence AI",
+            operation="search_sales_knowledge",
+            status="Failed",
+            agent=agent.name if agent else None,
+            task=task_id,
+            request={"phone": phone, "customer_name": customer_name, "query": query},
+            response={
+                "fallback": "sales_context_without_kb",
+                "error": str(exc)[:500],
+            },
+        )
 
     brief = _compose_sales_brief(
         customer_name=customer_name,
