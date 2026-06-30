@@ -39,6 +39,8 @@ def send_mapped_whatsapp_template(
         frappe.throw("No active AI WhatsApp Template Map matched this request.")
 
     body_values = _render_json_values(mapping.body_values_json, message=message, arguments=arguments, context=context)
+    if not body_values and (message or mapping.default_message):
+        body_values = {"1": message or mapping.default_message}
     header_values = _render_json_values(mapping.header_values_json, message=message, arguments=arguments, context=context)
     button_values = _render_json_values(mapping.button_values_json, message=message, arguments=arguments, context=context)
     extra_payload = _render_json_values(mapping.extra_payload_json, message=message, arguments=arguments, context=context)
@@ -121,7 +123,7 @@ def _find_template_map(*, did_number: str, profile_key: str, disease: str, inten
 
 
 def _render_json_values(raw: str | None, *, message: str, arguments: dict, context: dict) -> Any:
-    value = parse_json_object(raw or "[]", "WhatsApp Template Values")
+    value = parse_json_object(raw or "{}", "WhatsApp Template Values")
     values = {"message": message, **{k: v for k, v in context.items() if isinstance(v, (str, int, float))}}
     values.update({k: v for k, v in arguments.items() if isinstance(v, (str, int, float))})
 
