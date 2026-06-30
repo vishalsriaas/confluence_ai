@@ -327,6 +327,21 @@ def _candidate_livekit_trunk_ids(payload: dict) -> list[str]:
     if raw_trunk_id:
         candidates.append(raw_trunk_id)
 
+    if frappe.db.exists("DocType", "AI Sales Disease Route"):
+        route_filters = []
+        if raw_trunk_id:
+            route_filters.append({"inbound_vobiz_trunk_id": raw_trunk_id})
+        if domain:
+            route_filters.append({"inbound_domain": domain})
+
+        for flt in route_filters:
+            for route in frappe.get_all("AI Sales Disease Route", filters=flt, fields=["channel_account"]):
+                if not route.channel_account:
+                    continue
+                channel_trunk_id = frappe.db.get_value("AI Channel Account", route.channel_account, "trunk_id")
+                if channel_trunk_id:
+                    candidates.append(channel_trunk_id)
+
     for row in frappe.get_all(
         "AI Channel Account",
         filters={"enabled": 1},
@@ -336,9 +351,13 @@ def _candidate_livekit_trunk_ids(payload: dict) -> list[str]:
         matches = False
         if domain and endpoints.get("sip_uri") == domain:
             matches = True
+        if domain and endpoints.get("inbound_domain") == domain:
+            matches = True
         if from_number and endpoints.get("outbound_phone_number") == from_number:
             matches = True
         if raw_trunk_id and endpoints.get("vobiz_trunk_id") == raw_trunk_id:
+            matches = True
+        if raw_trunk_id and endpoints.get("inbound_vobiz_trunk_id") == raw_trunk_id:
             matches = True
 
         if matches and row.trunk_id:

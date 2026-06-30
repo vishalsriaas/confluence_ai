@@ -26,6 +26,20 @@ def _channel_candidates(call_log) -> list:
     for flt in filters:
         channels.extend(frappe.get_all("AI Channel Account", filters=flt, pluck="name"))
 
+    if frappe.db.exists("DocType", "AI Sales Disease Route"):
+        route_filters = []
+        if call_log.trunk_id:
+            route_filters.append({"inbound_vobiz_trunk_id": call_log.trunk_id})
+        if call_log.domain:
+            route_filters.append({"inbound_domain": call_log.domain})
+        if call_log.to_number:
+            route_filters.append({"inbound_phone_number": call_log.to_number})
+
+        for flt in route_filters:
+            for row in frappe.get_all("AI Sales Disease Route", filters=flt, fields=["channel_account"]):
+                if row.channel_account:
+                    channels.append(row.channel_account)
+
     # Vobiz callback trunk IDs may be provider UUIDs while LiveKit stores ST_* IDs,
     # so also match by sip_uri/domain or outbound phone in endpoint_paths_json.
     for row in frappe.get_all(
@@ -35,6 +49,12 @@ def _channel_candidates(call_log) -> list:
     ):
         endpoints = _parse_json(row.endpoint_paths_json)
         if call_log.domain and endpoints.get("sip_uri") == call_log.domain:
+            channels.append(row.name)
+        if call_log.domain and endpoints.get("inbound_domain") == call_log.domain:
+            channels.append(row.name)
+        if call_log.trunk_id and endpoints.get("inbound_vobiz_trunk_id") == call_log.trunk_id:
+            channels.append(row.name)
+        if call_log.trunk_id and endpoints.get("vobiz_trunk_id") == call_log.trunk_id:
             channels.append(row.name)
         if call_log.from_number and endpoints.get("outbound_phone_number") == call_log.from_number:
             channels.append(row.name)
