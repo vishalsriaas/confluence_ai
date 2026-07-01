@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urljoin
 
 import frappe
+import requests
+from frappe.utils.password import get_decrypted_password
 
 from confluence_ai.services.utils import as_json, create_error, parse_json_object, record_provider_event
 
@@ -61,7 +64,7 @@ def send_mapped_whatsapp_template(
         payload.update(extra_payload)
 
     try:
-        result = _call_send_method(mapping.send_method, payload)
+        result = _send_template(mapping, payload)
         record_provider_event(
             provider="WhatsApp",
             operation="send_mapped_whatsapp_template",
@@ -90,11 +93,222 @@ def send_mapped_whatsapp_template(
         raise
 
 
+def _send_template(mapping, payload: dict) -> dict:
+    remote_server = getattr(mapping, "remote_mcp_server", None)
+    method_path = getattr(mapping, "remote_send_method", None) or mapping.send_method
+
+    if not remote_server and str(method_path or "").startswith("wa_chat_hub."):
+        remote_server = _default_remote_frappe_server()
+
+    if remote_server:
+        return _call_remote_whatsapp_method(remote_server, method_path, payload)
+
+    return _call_send_method(mapping.send_method, payload)
+
+
+def _call_remote_whatsapp_method(server_name: str, method_path: str, payload: dict) -> dict:
+    if not method_path:
+        frappe.throw("WhatsApp template map has no remote send method configured.")
+
+    phone = _clean_phone(payload.get("to"))
+    if not phone:
+        frappe.throw("WhatsApp recipient phone number is required.")
+    if not payload.get("channel_account"):
+        frappe.throw("WhatsApp channel account is required.")
+
+    conversation = payload.get("conversation")
+    if not conversation:
+        contact = _remote_find_or_create_chat_contact(
+            server_name,
+            phone=phone,
+            display_name=payload.get("customer_name") or payload.get("patient_name") or payload.get("name"),
+        )
+        conversation = _remote_find_or_create_chat_conversation(
+            server_name,
+            channel_account=payload["channel_account"],
+            contact=contact,
+        )
+
+    remote_payload = {
+        **payload,
+        "conversation": conversation,
+        "template_name": payload.get("template_name"),
+        "name": payload.get("template_name"),
+        "body": payload.get("message") or f"Template: {payload.get('template_name')}",
+        "sender_type": payload.get("sender_type") or "Agent",
+    }
+    return _remote_frappe_method(server_name, method_path, remote_payload)
+
+
+def _remote_find_or_create_chat_contact(server_name: str, *, phone: str, display_name: str | None = None) -> str:
+    variants = _phone_variants(phone)
+    for value in variants:
+        result = _remote_frappe_list(
+            server_name,
+            "Chat Contact",
+            filters=[["phone_number", "=", value]],
+            fields=["name", "phone_number"],
+            limit=1,
+        )
+        if result.get("ok") and result.get("data"):
+            return result["data"][0].get("name")
+
+    create_result = _remote_frappe_create(
+        server_name,
+        "Chat Contact",
+        {
+            "phone_number": phone,
+            "display_name": display_name or phone,
+            "source_doctype": "Confluence AI",
+            "source_name": "AI WhatsApp Template Map",
+        },
+    )
+    if create_result.get("ok") and isinstance(create_result.get("data"), dict):
+        return create_result["data"].get("name") or phone
+
+    retry = _remote_frappe_list(
+        server_name,
+        "Chat Contact",
+        filters=[["phone_number", "=", phone]],
+        fields=["name", "phone_number"],
+        limit=1,
+    )
+    if retry.get("ok") and retry.get("data"):
+        return retry["data"][0].get("name")
+
+    frappe.throw(f"Remote WhatsApp contact create failed: {create_result.get('error')}")
+
+
+def _remote_find_or_create_chat_conversation(server_name: str, *, channel_account: str, contact: str) -> str:
+    result = _remote_frappe_list(
+        server_name,
+        "Chat Conversation",
+        filters=[["channel_account", "=", channel_account], ["contact", "=", contact], ["status", "!=", "Closed"]],
+        fields=["name", "channel_account", "contact"],
+        limit=1,
+    )
+    if result.get("ok") and result.get("data"):
+        return result["data"][0].get("name")
+
+    create_result = _remote_frappe_create(
+        server_name,
+        "Chat Conversation",
+        {
+            "channel_account": channel_account,
+            "contact": contact,
+            "status": "Open",
+            "priority": "Medium",
+        },
+    )
+    if create_result.get("ok") and isinstance(create_result.get("data"), dict):
+        return create_result["data"].get("name")
+    frappe.throw(f"Remote WhatsApp conversation create failed: {create_result.get('error')}")
+
+
 def _task_context(task_id: str | None) -> dict:
     if not task_id or not frappe.db.exists("AI Task", task_id):
         return {}
     task = frappe.get_doc("AI Task", task_id)
     return parse_json_object(task.context_json, "AI Task Context") if task.context_json else {}
+
+
+def _default_remote_frappe_server() -> str | None:
+    preferred = frappe.db.get_value("AI MCP Server", {"server_name": "Remote Dev SR Frappe", "enabled": 1}, "name")
+    if preferred:
+        return preferred
+    return frappe.db.get_value("AI MCP Server", {"enabled": 1}, "name")
+
+
+def _mcp_server_connection(server_name: str) -> tuple[str, dict]:
+    values = frappe.db.get_value("AI MCP Server", server_name, ["server_url", "api_key"], as_dict=True)
+    if not values:
+        return "", {"Content-Type": "application/json"}
+
+    headers = {"Content-Type": "application/json"}
+    api_key = values.get("api_key")
+    api_secret = get_decrypted_password("AI MCP Server", server_name, "api_secret", raise_exception=False)
+    if api_key and api_secret:
+        headers["Authorization"] = f"token {api_key}:{api_secret}"
+    else:
+        bearer = get_decrypted_password("AI MCP Server", server_name, "bearer_token", raise_exception=False)
+        if bearer:
+            headers["Authorization"] = bearer if bearer.startswith(("Bearer", "token")) else f"Bearer {bearer}"
+    return (values.get("server_url") or "").strip(), headers
+
+
+def _remote_frappe_list(
+    server_name: str,
+    doctype: str,
+    *,
+    filters: list,
+    fields: list[str],
+    limit: int = 5,
+) -> dict:
+    try:
+        server_url, headers = _mcp_server_connection(server_name)
+        if not server_url:
+            return {"ok": False, "error": f"MCP server {server_name} has no URL"}
+        response = requests.get(
+            urljoin(server_url.rstrip("/") + "/", f"api/resource/{doctype}"),
+            headers=headers,
+            params={
+                "filters": json.dumps(filters),
+                "fields": json.dumps(fields),
+                "limit_page_length": limit,
+            },
+            timeout=20,
+        )
+        if not response.ok:
+            return {"ok": False, "error": f"{doctype} lookup HTTP {response.status_code}: {response.text[:500]}"}
+        return {"ok": True, "data": response.json().get("data") or []}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _remote_frappe_create(server_name: str, doctype: str, payload: dict) -> dict:
+    try:
+        server_url, headers = _mcp_server_connection(server_name)
+        if not server_url:
+            return {"ok": False, "error": f"MCP server {server_name} has no URL"}
+        response = requests.post(
+            urljoin(server_url.rstrip("/") + "/", f"api/resource/{doctype}"),
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        if not response.ok:
+            return {"ok": False, "error": f"{doctype} create HTTP {response.status_code}: {response.text[:800]}"}
+        return {"ok": True, "data": response.json().get("data") or {}}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _remote_frappe_method(server_name: str, method_path: str, payload: dict) -> dict:
+    server_url, headers = _mcp_server_connection(server_name)
+    if not server_url:
+        frappe.throw(f"MCP server {server_name} has no URL")
+    response = requests.post(
+        urljoin(server_url.rstrip("/") + "/", f"api/method/{method_path}"),
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    result = {
+        "status_code": response.status_code,
+        "ok": response.ok,
+        "body": response.json() if _looks_like_json(response) else response.text[:2000],
+    }
+    if not response.ok:
+        frappe.throw(f"Remote WhatsApp send failed HTTP {response.status_code}: {response.text[:500]}")
+    body = result["body"]
+    if isinstance(body, dict) and body.get("exc"):
+        frappe.throw(f"Remote WhatsApp send failed: {body.get('exception') or body.get('exc')}")
+    return result
+
+
+def _looks_like_json(response) -> bool:
+    content_type = response.headers.get("Content-Type", "")
+    return "json" in content_type.lower()
 
 
 def _find_template_map(*, did_number: str, profile_key: str, disease: str, intent: str):
@@ -162,3 +376,23 @@ def _call_send_method(method_path: str, payload: dict) -> dict:
 
 def _clean_phone(value) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _phone_variants(phone: str) -> list[str]:
+    digits = _clean_phone(phone)
+    if not digits:
+        return []
+    values = []
+    for value in (phone, digits, f"+{digits}"):
+        if value and value not in values:
+            values.append(value)
+    if digits.startswith("91") and len(digits) == 12:
+        ten_digit = digits[-10:]
+        for value in (ten_digit, f"91{ten_digit}", f"+91{ten_digit}"):
+            if value not in values:
+                values.append(value)
+    elif len(digits) == 10:
+        for value in (digits, f"91{digits}", f"+91{digits}"):
+            if value not in values:
+                values.append(value)
+    return values

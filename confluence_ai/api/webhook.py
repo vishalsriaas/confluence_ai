@@ -13,7 +13,7 @@ def receive_vobiz() -> dict:
     payload = get_request_json()
     event = _record_inbound("vobiz", payload)
     result = vobiz.handle_callback(payload)
-    frappe.db.set_value("AI Webhook Event", event, {"status": "Processed", "response_json": as_json(result)})
+    _mark_webhook_processed(event, result)
     return result
 
 
@@ -54,11 +54,7 @@ def receive_event(source_system: str | None = None) -> dict:
         webhook_event = _record_inbound("vobiz", payload)
         try:
             result = vobiz.handle_callback(payload)
-            frappe.db.set_value(
-                "AI Webhook Event",
-                webhook_event,
-                {"status": "Processed", "response_json": as_json(result)},
-            )
+            _mark_webhook_processed(webhook_event, result)
             return result
         except Exception as exc:
             frappe.db.set_value(
@@ -142,3 +138,13 @@ def _record_inbound(source: str, payload: dict) -> str:
     )
     doc.insert(ignore_permissions=True)
     return doc.name
+
+
+def _mark_webhook_processed(webhook_event: str, result: dict) -> None:
+    values = {"status": "Processed", "response_json": as_json(result)}
+    if isinstance(result, dict):
+        if result.get("task") and frappe.db.exists("AI Task", result.get("task")):
+            values["task"] = result.get("task")
+        if result.get("batch") and frappe.db.exists("AI Task Batch", result.get("batch")):
+            values["task_batch"] = result.get("batch")
+    frappe.db.set_value("AI Webhook Event", webhook_event, values)

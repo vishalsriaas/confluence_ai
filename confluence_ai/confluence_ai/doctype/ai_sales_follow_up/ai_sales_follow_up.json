@@ -1,0 +1,44 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:sfup-{####}",
+ "creation": "2026-07-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "customer_name",
+  "phone",
+  "status",
+  "followup_reason",
+  "preferred_time",
+  "notes",
+  "source_task",
+  "source_agent"
+ ],
+ "fields": [
+  {"fieldname": "customer_name", "fieldtype": "Data", "in_list_view": 1, "label": "Customer Name"},
+  {"fieldname": "phone", "fieldtype": "Data", "in_list_view": 1, "label": "Phone", "reqd": 1},
+  {"default": "Open", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "label": "Status", "options": "Open\nCompleted\nCancelled"},
+  {"fieldname": "followup_reason", "fieldtype": "Small Text", "in_list_view": 1, "label": "Follow-up Reason", "reqd": 1},
+  {"fieldname": "preferred_time", "fieldtype": "Data", "label": "Preferred Time"},
+  {"fieldname": "notes", "fieldtype": "Text", "label": "Notes"},
+  {"fieldname": "source_task", "fieldtype": "Link", "label": "Source Task", "options": "AI Task"},
+  {"fieldname": "source_agent", "fieldtype": "Link", "label": "Source Agent", "options": "AI Agent"}
+ ],
+ "links": [],
+ "modified": "2026-07-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Confluence AI",
+ "name": "AI Sales Follow Up",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1},
+  {"read": 1, "role": "Confluence AI Operator"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "customer_name",
+ "track_changes": 1
+}

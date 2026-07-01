@@ -1,4 +1,5 @@
 import json
+import re
 import requests
 from urllib.parse import quote, urljoin
 import frappe
@@ -260,6 +261,8 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
     """Executes the tool natively (using REST API of client ERP mapped to server config)."""
     arguments = enrich_order_confirmation_issue_arguments(tool, dict(arguments or {}), task_id)
     arguments = enrich_sales_rejection_issue_arguments(tool, dict(arguments or {}), task_id)
+    arguments = sanitize_issue_email_arguments(tool, arguments)
+    validate_order_confirmation_update_arguments(tool, arguments)
     validate_filter_arguments(tool, arguments)
     
     server = frappe.get_doc("AI MCP Server", tool.server) if tool.server else None
@@ -365,6 +368,90 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
         return {"status": "success", "updated": len(names), "records": names}
 
     raise ValueError(f"Operation {op_type} not supported.")
+
+
+def sanitize_issue_email_arguments(tool: "frappe.Document", arguments: dict) -> dict:
+    """Do not send voice filler words into Frappe Issue email fields.
+
+    Frappe validates Issue.raised_by as an email address when present. Voice
+    agents often pass values such as "unspecified", "unknown", or "na"; those
+    should be treated as blank so the Issue can still be created.
+    """
+    client_doctype = (tool.client_doctype or "").lower()
+    tool_name = (tool.tool_name or "").lower()
+    if client_doctype != "issue" and "issue" not in tool_name:
+        return arguments
+
+    for fieldname in ("raised_by", "email", "contact_email"):
+        value = str(arguments.get(fieldname) or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered in {"unspecified", "unknown", "na", "n/a", "none", "null", "blank", "-"} or not _looks_like_email(value):
+            arguments[fieldname] = ""
+    return arguments
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value or ""))
+
+
+def validate_order_confirmation_update_arguments(tool: "frappe.Document", arguments: dict) -> None:
+    tool_name = (tool.tool_name or "").lower()
+    if "order_confirmation" not in tool_name or "issue" in tool_name:
+        return
+    if "update" not in tool_name and "confirm" not in tool_name:
+        return
+
+    text_parts = []
+    for value in (arguments or {}).values():
+        if isinstance(value, (dict, list)):
+            text_parts.append(json.dumps(value, ensure_ascii=False, default=str))
+        else:
+            text_parts.append(str(value or ""))
+    all_text = " ".join(text_parts).lower()
+    explicit_final = str(
+        arguments.get("customer_final_confirmation")
+        or arguments.get("final_confirmation")
+        or arguments.get("customer_confirmation")
+        or ""
+    ).lower()
+    checklist_value = arguments.get("checklist_confirmed") or arguments.get("all_order_details_confirmed")
+    checklist_confirmed = checklist_value is True or str(checklist_value).lower() in {"true", "yes", "1"}
+    has_explicit_yes_after_checklist = checklist_confirmed and any(
+        token in explicit_final
+        for token in (
+            "yes_after_full_checklist",
+            "clear_yes_after_final_question",
+            "confirmed_after_full_details",
+            "yes_after_final_question",
+        )
+    )
+    has_item = any(token in all_text for token in ("item", "medicine", "product", "qty", "quantity", "oil"))
+    has_payment = any(
+        token in all_text
+        for token in ("payment", "advance", "paid", "remaining", "balance", "total", "amount", "rupee", "rs")
+    )
+    has_address = any(token in all_text for token in ("address", "pata", "delivery"))
+    has_final_question = any(
+        token in all_text
+        for token in (
+            "final confirmation",
+            "customer confirmed all details",
+            "saari information",
+            "sari information",
+            "order confirm",
+            "confirm kar doon",
+        )
+    )
+
+    if has_explicit_yes_after_checklist or (has_item and has_payment and has_address and has_final_question):
+        return
+
+    frappe.throw(
+        "Blocked unsafe order confirmation update. Read and confirm all order details first, then call again with "
+        "checklist_confirmed=true and customer_final_confirmation='yes_after_full_checklist'."
+    )
 
 
 def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:

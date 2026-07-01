@@ -1,0 +1,40 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:sout-{####}",
+ "creation": "2026-07-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "phone",
+  "outcome",
+  "summary",
+  "next_action",
+  "source_task",
+  "source_agent"
+ ],
+ "fields": [
+  {"fieldname": "phone", "fieldtype": "Data", "in_list_view": 1, "label": "Phone", "reqd": 1},
+  {"fieldname": "outcome", "fieldtype": "Data", "in_list_view": 1, "label": "Outcome", "reqd": 1},
+  {"fieldname": "summary", "fieldtype": "Text", "label": "Summary", "reqd": 1},
+  {"fieldname": "next_action", "fieldtype": "Small Text", "label": "Next Action"},
+  {"fieldname": "source_task", "fieldtype": "Link", "label": "Source Task", "options": "AI Task"},
+  {"fieldname": "source_agent", "fieldtype": "Link", "label": "Source Agent", "options": "AI Agent"}
+ ],
+ "links": [],
+ "modified": "2026-07-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Confluence AI",
+ "name": "AI Sales Call Outcome",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 1, "delete": 1, "read": 1, "role": "System Manager", "write": 1},
+  {"create": 1, "delete": 1, "read": 1, "role": "Confluence AI Manager", "write": 1},
+  {"read": 1, "role": "Confluence AI Operator"}
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "phone",
+ "track_changes": 1
+}

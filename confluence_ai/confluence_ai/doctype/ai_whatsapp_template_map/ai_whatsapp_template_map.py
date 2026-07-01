@@ -20,6 +20,10 @@ class AIWhatsAppTemplateMap(Document):
             self.button_values_json = "{}"
         if not self.extra_payload_json:
             self.extra_payload_json = "{}"
+        if not self.remote_send_method:
+            self.remote_send_method = "wa_chat_hub.api.runtime.send_template_message"
+        if not self.send_method:
+            self.send_method = "wa_chat_hub.api.runtime.send_template_message"
 
         for fieldname in ("body_values_json", "header_values_json", "button_values_json", "extra_payload_json"):
             _validate_json_field(fieldname, self.get(fieldname))
