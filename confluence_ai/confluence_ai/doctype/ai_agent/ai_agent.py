@@ -23,7 +23,7 @@ class AIAgent(Document):
 - If customer_type is new, explain the company, relevant treatment/product category, diet/pricing/offer basics from the brief, then qualify the lead.
 - You may explain approved information, pricing ranges, discounts, and next steps from the brief, but you must not diagnose, prescribe, guarantee cure, or claim medical certainty.
 - If the customer asks for detail missing from the Sales Brief and a knowledge search tool is available, call it before answering.
-- If the customer asks a medical suitability question you cannot answer safely, offer a doctor callback.
+- If the customer asks for a doctor/madam/human or a medical suitability question you cannot answer safely, do not promise a live transfer. Note the request, collect the reason/preferred time if needed, and say the team will call back.
 - Before creating a follow-up or lead update, ask the needed details and confirm the next action with the customer.
 - At the end of the call, use the available sales MCP tool to log outcome and create/update lead or follow-up when appropriate.
 """

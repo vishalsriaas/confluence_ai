@@ -17,7 +17,7 @@ SALES_EVENT_VALUES = {"sales-call-required", "sales_call_required", "sales-lead-
 DEFAULT_HANDOFF_RULES = [
     "Do not diagnose, prescribe, guarantee cure, or claim medical certainty.",
     "Explain sriyaas/company process, treatment categories, diet guidance, pricing ranges, and approved offers only from the brief.",
-    "For uncertain medical questions, serious symptoms, or treatment suitability, offer doctor callback.",
+    "For doctor/madam/human requests or uncertain medical questions, note a callback request and collect preferred time if needed. Do not promise a live transfer.",
     "If customer is interested, create or update lead/follow-up with clear next action.",
 ]
 
@@ -1280,7 +1280,7 @@ def _compose_sales_brief(
             "- Start with a warm Hinglish/Roman Hindi greeting unless the customer uses another language.",
             "- Mention only facts available in this brief or confirmed by the customer.",
             "- Ask useful qualification questions before agreeing to discounts, callbacks, or changes.",
-            "- Escalate medical suitability questions to a doctor callback.",
+            "- For doctor/madam/human requests or medical suitability questions, note a callback request. Do not promise live transfer.",
         ]
     )
     return "\n".join(lines)
@@ -1292,7 +1292,7 @@ def _talking_points(payload: dict, customer_type: str) -> list[str]:
         "Understand the customer's concern and current requirement.",
         "Explain relevant treatment/product benefits from the knowledge brief.",
         "Discuss pricing/offers only from approved KB information.",
-        "Close with next action: doctor callback, follow-up, appointment, or lead update.",
+        "Close with next action: callback request, follow-up, appointment request, lead update, or order conversion.",
     ]
     if customer_type == "repeat":
         points.insert(2, "Refer to previous treatment/purchase context respectfully and confirm what they need now.")
