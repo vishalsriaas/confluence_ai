@@ -12,6 +12,7 @@
   "personality",
   "system_prompt",
   "language",
+  "audio_name",
   "primary_provider",
   "fallback_provider",
   "model_config",
@@ -69,6 +70,13 @@
    "fieldname": "language",
    "fieldtype": "Data",
    "label": "Language"
+  },
+  {
+   "default": "Puck",
+   "description": "Gemini Live audio voice name for this agent. Examples: Puck, Kore, Charon, Fenrir, Aoede.",
+   "fieldname": "audio_name",
+   "fieldtype": "Data",
+   "label": "Audio Name"
   },
   {
    "default": "Gemini",

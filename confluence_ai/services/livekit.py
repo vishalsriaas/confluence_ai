@@ -92,6 +92,12 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
     payload = payload or parse_json_object(task.context_json, "Task Context JSON") or {}
     agent_name = task.assigned_agent or task.target_agent
     agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
+    audio_name = (
+        (agent.get("audio_name") if agent else None)
+        or payload.get("audio_name")
+        or payload.get("voice_name")
+        or "Puck"
+    )
 
     try:
         system_prompt = agent.get_system_prompt(include_tool_catalog=False) if agent else ""
@@ -126,6 +132,7 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
     return {
         "task": task.name,
         "agent": agent_name,
+        "audio_name": audio_name,
         "system_prompt": system_prompt,
         "personality": personality,
         "context": _voice_metadata_context(payload),
