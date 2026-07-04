@@ -120,7 +120,10 @@ def resolve_inbound_sales_route(payload: dict) -> dict:
     )
 
     for row in rows:
-        if trunk_id and _same_token(trunk_id, row.get("inbound_vobiz_trunk_id")):
+        if trunk_id and (
+            _same_token(trunk_id, row.get("inbound_vobiz_trunk_id"))
+            or _same_token(trunk_id, row.get("sip_trunk_id"))
+        ):
             return _as_selection(row, matched_alias="inbound_trunk_id")
 
     for row in rows:

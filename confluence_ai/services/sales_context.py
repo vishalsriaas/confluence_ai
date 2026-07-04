@@ -912,7 +912,7 @@ def _remote_find_patient(server_name: str, phone: str | None) -> str | None:
 
 def _phone_variants(phone: str | None) -> list[str]:
     cleaned = _clean_phone(phone)
-    digits = re.sub(r"\D", "", str(phone or cleaned or ""))
+    digits = re.sub(r"\D", "", str(cleaned or phone or ""))
     if not cleaned and not digits:
         return []
     variants = []
@@ -1396,10 +1396,18 @@ def _clean_phone(phone: Any) -> str | None:
     text = str(phone).strip()
     if not text:
         return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 10:
+        ten_digit = digits[-10:]
+        if len(digits) == 10 or (digits.startswith("0") and len(digits) == 11):
+            return f"+91{ten_digit}"
+        if digits.startswith("91") and len(digits) == 12:
+            return f"+{digits}"
+        if text.startswith("+"):
+            return f"+{digits}"
+        return f"+{digits}"
     if text.startswith("+"):
         return text
-    if text.isdigit() and len(text) >= 10:
-        return f"+{text}"
     return text
 
 
