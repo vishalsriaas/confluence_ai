@@ -119,6 +119,18 @@ def _livekit_transfer_uri(value: object) -> str | None:
     return phone
 
 
+def _sip_call_to_from_transfer_uri(value: str) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("tel:"):
+        return text[4:]
+    return text
+
+
+def _safe_participant_suffix(value: str) -> str:
+    suffix = re.sub(r"[^A-Za-z0-9_-]+", "", str(value or ""))
+    return suffix[-32:] or "human"
+
+
 def _livekit_account_for_agent(agent) -> tuple["frappe.Document", str, str, str]:
     account_name = agent.allowed_channel_account if agent else None
     if not account_name:
@@ -283,7 +295,7 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
 
 
 def transfer_live_call(arguments: dict, *, task_id: str | None, agent: str | None = None) -> dict:
-    """Transfer the active LiveKit SIP participant to the agent's human number."""
+    """Bridge the configured human number into the active LiveKit room."""
     if not task_id or not frappe.db.exists("AI Task", task_id):
         frappe.throw("Active AI Task is required for live transfer.")
 
@@ -312,7 +324,7 @@ def transfer_live_call(arguments: dict, *, task_id: str | None, agent: str | Non
 
 
 async def _transfer_live_call_async(task, agent_doc, transfer_to: str, reason: str) -> dict:
-    _account, url, api_key, api_secret = _livekit_account_for_agent(agent_doc)
+    account, url, api_key, api_secret = _livekit_account_for_agent(agent_doc)
     context = parse_json_object(task.context_json, "Task Context JSON") or {}
     result_json = parse_json_object(task.result_json, "Task Result JSON") or {}
     last_livekit_payload = result_json.get("last_livekit_payload") if isinstance(result_json.get("last_livekit_payload"), dict) else {}
@@ -325,31 +337,51 @@ async def _transfer_live_call_async(task, agent_doc, transfer_to: str, reason: s
     if not room_name:
         frappe.throw("Active LiveKit room was not found for this task.")
 
+    endpoints = parse_json_object(account.endpoint_paths_json, "Endpoint Paths JSON") or {}
+    sip_trunk_id = (
+        endpoints.get("outbound_sip_trunk_id")
+        or endpoints.get("sip_trunk_id")
+        or account.trunk_id
+    )
+    if not sip_trunk_id:
+        frappe.throw("Missing outbound SIP trunk ID for live human merge.")
+
     lkapi = api.LiveKitAPI(url, api_key, api_secret)
     try:
-        participant_identity = await _find_sip_participant_identity(lkapi, room_name)
-        if not participant_identity:
-            frappe.throw("No active SIP caller participant found for live transfer.")
-
         timeout_seconds = int(agent_doc.get("transfer_ring_timeout") or 20)
-        request = proto_sip.TransferSIPParticipantRequest(
+        sip_call_to = _sip_call_to_from_transfer_uri(transfer_to)
+        human_identity = f"human_{_safe_participant_suffix(sip_call_to)}"
+        request = proto_sip.CreateSIPParticipantRequest(
+            sip_trunk_id=sip_trunk_id,
+            sip_call_to=sip_call_to,
             room_name=room_name,
-            participant_identity=participant_identity,
-            transfer_to=transfer_to,
-            play_dialtone=True,
+            participant_identity=human_identity,
+            participant_name="Human Agent",
+            participant_metadata=as_json(
+                {
+                    "role": "human_agent",
+                    "reason": reason,
+                    "source": "transfer_live_call",
+                }
+            ),
+            play_ringtone=True,
+            wait_until_answered=True,
         )
         if timeout_seconds > 0:
             request.ringing_timeout.FromSeconds(timeout_seconds)
 
-        info = await lkapi.sip.transfer_sip_participant(request)
+        info = await lkapi.sip.create_sip_participant(request)
         response = {
             "status": "success",
+            "mode": "merged_human_into_room",
             "room_name": room_name,
-            "participant_identity": participant_identity,
+            "human_participant_identity": human_identity,
             "transfer_to": transfer_to,
+            "sip_call_to": sip_call_to,
+            "sip_trunk_id": sip_trunk_id,
             "reason": reason,
             "sip_call_id": getattr(info, "sip_call_id", None),
-            "transfer_status": str(getattr(info, "transfer_status", "")),
+            "instruction": "Human agent is connected in the same room. Voice agent should stay silent unless directly asked.",
         }
         record_provider_event(
             provider="LiveKit",
@@ -357,7 +389,7 @@ async def _transfer_live_call_async(task, agent_doc, transfer_to: str, reason: s
             status="Succeeded",
             agent=agent_doc.name,
             task=task.name,
-            request={"reason": reason, "room_name": room_name, "participant_identity": participant_identity},
+            request={"reason": reason, "room_name": room_name, "human_participant_identity": human_identity},
             response=response,
         )
         return response
