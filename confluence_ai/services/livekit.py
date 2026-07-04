@@ -104,6 +104,21 @@ def _normalize_phone(value: object) -> str | None:
     return text
 
 
+def _livekit_transfer_uri(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered.startswith(("tel:", "sip:", "sips:")):
+        return text
+    phone = _normalize_phone(text)
+    if not phone:
+        return None
+    if phone.startswith("+"):
+        return f"tel:{phone}"
+    return phone
+
+
 def _livekit_account_for_agent(agent) -> tuple["frappe.Document", str, str, str]:
     account_name = agent.allowed_channel_account if agent else None
     if not account_name:
@@ -285,7 +300,7 @@ def transfer_live_call(arguments: dict, *, task_id: str | None, agent: str | Non
     if not agent_doc.get("enable_live_transfer"):
         frappe.throw("Live transfer is not enabled for this AI Agent.")
 
-    transfer_to = _normalize_phone(agent_doc.get("human_agent_number"))
+    transfer_to = _livekit_transfer_uri(agent_doc.get("human_agent_number"))
     if not transfer_to:
         frappe.throw("Human Agent Number is required for live transfer.")
 
