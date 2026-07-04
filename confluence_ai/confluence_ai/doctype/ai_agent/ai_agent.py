@@ -14,6 +14,15 @@ class AIAgent(Document):
 
     def get_system_prompt(self, include_tool_catalog: bool = True) -> str:
         base_prompt = self.get("system_prompt") or ""
+        if self.get("enable_live_transfer"):
+            base_prompt += """
+
+## Live Transfer Rules
+- If the customer explicitly asks to speak with a real doctor/human/agent now, ask for clear consent once.
+- After consent, call `transfer_live_call` with the customer's stated reason and consent_confirmed=true.
+- Never ask the customer for a transfer phone number and never choose a transfer number yourself.
+- If transfer_live_call fails or live transfer is unavailable, politely say the team will call back and continue with callback/follow-up capture.
+"""
         if self.get("enable_sales_context"):
             base_prompt += """
 
@@ -23,7 +32,7 @@ class AIAgent(Document):
 - If customer_type is new, explain the company, relevant treatment/product category, diet/pricing/offer basics from the brief, then qualify the lead.
 - You may explain approved information, pricing ranges, discounts, and next steps from the brief, but you must not diagnose, prescribe, guarantee cure, or claim medical certainty.
 - If the customer asks for detail missing from the Sales Brief and a knowledge search tool is available, call it before answering.
-- If the customer asks for a doctor/madam/human or a medical suitability question you cannot answer safely, do not promise a live transfer. Note the request, collect the reason/preferred time if needed, and say the team will call back.
+- If the customer asks for a doctor/madam/human or a medical suitability question you cannot answer safely, use live transfer only when Live Transfer Rules are present. Otherwise note the request, collect the reason/preferred time if needed, and say the team will call back.
 - Before creating a follow-up or lead update, ask the needed details and confirm the next action with the customer.
 - At the end of the call, use the available sales MCP tool to log outcome and create/update lead or follow-up when appropriate.
 """

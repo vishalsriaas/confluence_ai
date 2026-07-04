@@ -19,6 +19,10 @@
   "access_section",
   "api_identity",
   "allowed_channel_account",
+  "live_transfer_section",
+  "enable_live_transfer",
+  "human_agent_number",
+  "transfer_ring_timeout",
   "sales_context_section",
   "enable_sales_context",
   "sales_kb_limit",
@@ -114,6 +118,34 @@
    "fieldtype": "Link",
    "label": "Allowed Channel Account",
    "options": "AI Channel Account"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "live_transfer_section",
+   "fieldtype": "Section Break",
+   "label": "Live Transfer"
+  },
+  {
+   "default": "0",
+   "description": "Allow this voice agent to transfer the active LiveKit SIP call to the configured human number when the customer explicitly asks.",
+   "fieldname": "enable_live_transfer",
+   "fieldtype": "Check",
+   "label": "Enable Live Transfer"
+  },
+  {
+   "depends_on": "enable_live_transfer",
+   "description": "Human/doctor/agent phone number used by transfer_live_call. The LLM must not choose or accept a customer-provided transfer number.",
+   "fieldname": "human_agent_number",
+   "fieldtype": "Data",
+   "label": "Human Agent Number"
+  },
+  {
+   "default": "20",
+   "depends_on": "enable_live_transfer",
+   "description": "Seconds to wait while ringing the human agent during LiveKit SIP transfer.",
+   "fieldname": "transfer_ring_timeout",
+   "fieldtype": "Int",
+   "label": "Transfer Ring Timeout"
   },
   {
    "collapsible": 1,

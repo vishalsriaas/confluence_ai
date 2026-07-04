@@ -17,7 +17,7 @@ SALES_EVENT_VALUES = {"sales-call-required", "sales_call_required", "sales-lead-
 DEFAULT_HANDOFF_RULES = [
     "Do not diagnose, prescribe, guarantee cure, or claim medical certainty.",
     "Explain sriyaas/company process, treatment categories, diet guidance, pricing ranges, and approved offers only from the brief.",
-    "For doctor/madam/human requests or uncertain medical questions, note a callback request and collect preferred time if needed. Do not promise a live transfer.",
+    "For doctor/madam/human requests or uncertain medical questions, use live transfer only if the active agent has live transfer enabled and the transfer tool is available. Otherwise note a callback request and collect preferred time if needed.",
     "If customer is interested, create or update lead/follow-up with clear next action.",
 ]
 
@@ -1280,7 +1280,7 @@ def _compose_sales_brief(
             "- Start with a warm Hinglish/Roman Hindi greeting unless the customer uses another language.",
             "- Mention only facts available in this brief or confirmed by the customer.",
             "- Ask useful qualification questions before agreeing to discounts, callbacks, or changes.",
-            "- For doctor/madam/human requests or medical suitability questions, note a callback request. Do not promise live transfer.",
+            "- For doctor/madam/human requests or medical suitability questions, use live transfer only if enabled and available; otherwise note a callback request.",
         ]
     )
     return "\n".join(lines)

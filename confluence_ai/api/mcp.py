@@ -155,6 +155,7 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "log_sales_call_outcome",
         "create_draft_patient_encounter_from_sales",
         "send_mapped_whatsapp_template",
+        "transfer_live_call",
     }:
         return None
 
@@ -188,6 +189,10 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         from confluence_ai.services.whatsapp_templates import send_mapped_whatsapp_template
 
         return send_mapped_whatsapp_template(arguments, task_id=task_id, agent=agent)
+    if tool_name == "transfer_live_call":
+        from confluence_ai.services.livekit import transfer_live_call
+
+        return transfer_live_call(arguments, task_id=task_id, agent=agent)
     return None
 
 

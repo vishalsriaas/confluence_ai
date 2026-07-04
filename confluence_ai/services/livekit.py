@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import frappe
 from livekit import api
 from livekit.protocol import room as proto_room
@@ -84,6 +85,42 @@ def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
 
 def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
+
+
+def _normalize_phone(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 10:
+        ten_digit = digits[-10:]
+        if len(digits) == 10 or (digits.startswith("0") and len(digits) == 11):
+            return f"+91{ten_digit}"
+        if digits.startswith("91") and len(digits) == 12:
+            return f"+{digits}"
+        if text.startswith("+"):
+            return f"+{digits}"
+        return f"+{digits}"
+    return text
+
+
+def _livekit_account_for_agent(agent) -> tuple["frappe.Document", str, str, str]:
+    account_name = agent.allowed_channel_account if agent else None
+    if not account_name:
+        frappe.throw("Live transfer requires AI Agent Allowed Channel Account.")
+
+    account = frappe.get_doc("AI Channel Account", account_name)
+    url = account.base_url or ""
+    if url.startswith("wss://"):
+        url = url.replace("wss://", "https://")
+    elif url.startswith("ws://"):
+        url = url.replace("ws://", "http://")
+
+    api_key = account.get_password("api_key")
+    api_secret = account.get_password("api_secret")
+    if not (url and api_key and api_secret):
+        frappe.throw("LiveKit channel account URL/API credentials are required for live transfer.")
+    return account, url, api_key, api_secret
 
 
 def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
@@ -228,6 +265,105 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         raise
     finally:
         await lkapi.aclose()
+
+
+def transfer_live_call(arguments: dict, *, task_id: str | None, agent: str | None = None) -> dict:
+    """Transfer the active LiveKit SIP participant to the agent's human number."""
+    if not task_id or not frappe.db.exists("AI Task", task_id):
+        frappe.throw("Active AI Task is required for live transfer.")
+
+    consent = arguments.get("consent_confirmed")
+    if str(consent).strip().lower() not in {"1", "true", "yes", "y"}:
+        frappe.throw("Customer consent is required before live transfer.")
+
+    task = frappe.get_doc("AI Task", task_id)
+    agent_name = agent or task.assigned_agent or task.target_agent
+    if not agent_name or not frappe.db.exists("AI Agent", agent_name):
+        frappe.throw("AI Agent is required for live transfer.")
+
+    agent_doc = frappe.get_doc("AI Agent", agent_name)
+    if not agent_doc.get("enable_live_transfer"):
+        frappe.throw("Live transfer is not enabled for this AI Agent.")
+
+    transfer_to = _normalize_phone(agent_doc.get("human_agent_number"))
+    if not transfer_to:
+        frappe.throw("Human Agent Number is required for live transfer.")
+
+    reason = str(arguments.get("reason") or "").strip()
+    if not reason:
+        frappe.throw("Transfer reason is required.")
+
+    return asyncio.run(_transfer_live_call_async(task, agent_doc, transfer_to, reason))
+
+
+async def _transfer_live_call_async(task, agent_doc, transfer_to: str, reason: str) -> dict:
+    _account, url, api_key, api_secret = _livekit_account_for_agent(agent_doc)
+    context = parse_json_object(task.context_json, "Task Context JSON") or {}
+    result_json = parse_json_object(task.result_json, "Task Result JSON") or {}
+    last_livekit_payload = result_json.get("last_livekit_payload") if isinstance(result_json.get("last_livekit_payload"), dict) else {}
+    room_name = (
+        last_livekit_payload.get("room_name")
+        or last_livekit_payload.get("room")
+        or context.get("room_name")
+        or context.get("room")
+    )
+    if not room_name:
+        frappe.throw("Active LiveKit room was not found for this task.")
+
+    lkapi = api.LiveKitAPI(url, api_key, api_secret)
+    try:
+        participant_identity = await _find_sip_participant_identity(lkapi, room_name)
+        if not participant_identity:
+            frappe.throw("No active SIP caller participant found for live transfer.")
+
+        timeout_seconds = int(agent_doc.get("transfer_ring_timeout") or 20)
+        request = proto_sip.TransferSIPParticipantRequest(
+            room_name=room_name,
+            participant_identity=participant_identity,
+            transfer_to=transfer_to,
+            play_dialtone=True,
+        )
+        if timeout_seconds > 0:
+            request.ringing_timeout.FromSeconds(timeout_seconds)
+
+        info = await lkapi.sip.transfer_sip_participant(request)
+        response = {
+            "status": "success",
+            "room_name": room_name,
+            "participant_identity": participant_identity,
+            "transfer_to": transfer_to,
+            "reason": reason,
+            "sip_call_id": getattr(info, "sip_call_id", None),
+            "transfer_status": str(getattr(info, "transfer_status", "")),
+        }
+        record_provider_event(
+            provider="LiveKit",
+            operation="transfer_live_call",
+            status="Succeeded",
+            agent=agent_doc.name,
+            task=task.name,
+            request={"reason": reason, "room_name": room_name, "participant_identity": participant_identity},
+            response=response,
+        )
+        return response
+    except Exception as exc:
+        create_error("LiveKit Transfer", str(exc), source="livekit", task=task.name, agent=agent_doc.name, exc=exc)
+        raise
+    finally:
+        await lkapi.aclose()
+
+
+async def _find_sip_participant_identity(lkapi: api.LiveKitAPI, room_name: str) -> str | None:
+    response = await lkapi.room.list_participants(proto_room.ListParticipantsRequest(room=room_name))
+    for participant in response.participants:
+        identity = getattr(participant, "identity", "") or ""
+        if identity.startswith("sip_"):
+            return identity
+    for participant in response.participants:
+        identity = getattr(participant, "identity", "") or ""
+        if identity:
+            return identity
+    return None
 
 
 

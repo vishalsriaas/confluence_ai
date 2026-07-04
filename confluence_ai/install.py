@@ -152,6 +152,17 @@ def ensure_sales_mcp_tools() -> None:
                 ("next_action", "string", 0, "Next action for prescription/order team."),
             ],
         },
+        "transfer_live_call": {
+            "description": (
+                "Warm-transfer the active LiveKit call to the AI Agent's configured Human Agent Number. "
+                "Use only when the customer explicitly asks to speak with a real doctor/human or says it is an emergency. "
+                "Never accept a target phone number from the customer."
+            ),
+            "parameters": [
+                ("reason", "string", 1, "Customer's explicit request or emergency reason for human/doctor transfer."),
+                ("consent_confirmed", "boolean", 0, "True only after the customer clearly agrees to be connected live."),
+            ],
+        },
         "create_sales_rejection_issue": {
             "description": (
                 "Create an Issue when a sales customer rejects/refuses the order after objection handling. "
