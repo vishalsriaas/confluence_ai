@@ -54,7 +54,9 @@ def ensure_defaults() -> None:
 			"Advance paid: {total_advance_paid}\n"
 			"Remaining: {remaining_amount}\n"
 			"Address: {address}\n\n"
-			"Please confirm if these details are correct."
+			"If all details are correct, reply exactly: YES\n"
+			"If anything is wrong, reply with the correction, for example: Address wrong, correct address is ...\n\n"
+			"Note: If you reply YES, we will mark the order confirmed. If you send a correction, we will create an issue for the team."
 		)
 		changed = True
 
