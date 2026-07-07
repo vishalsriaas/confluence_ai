@@ -6,6 +6,7 @@ from typing import Any
 
 import frappe
 from frappe.utils import add_to_date, now_datetime
+from frappe.utils.synchronization import filelock
 
 from confluence_ai.api.mcp import execute_mcp_tool
 from confluence_ai.services.dispatcher import enqueue_task_execution, refresh_batch_counts
@@ -304,13 +305,49 @@ def on_chat_message_after_insert(doc, method=None) -> None:
 		return
 	if not frappe.db.exists(WORKFLOW, {"chat_conversation": doc.conversation, "status": ["not in", list(FINAL_STATES)]}):
 		return
-	try:
-		handle_whatsapp_reply(
-			conversation=doc.conversation,
-			message=doc.body or "",
-		)
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), "Order Confirmation WhatsApp Reply Failed")
+	frappe.enqueue(
+		"confluence_ai.services.order_confirmation.process_whatsapp_reply_message",
+		queue="short",
+		message_name=doc.name,
+		enqueue_after_commit=True,
+		job_id=f"order_confirmation_reply_{doc.name}",
+		deduplicate=True,
+	)
+
+
+def process_whatsapp_reply_message(message_name: str) -> dict:
+	if not message_name or not frappe.db.exists("Chat Message", message_name):
+		return {"status": "ignored", "reason": "missing_message"}
+	message = frappe.get_doc("Chat Message", message_name)
+	if message.direction != "Inbound":
+		return {"status": "ignored", "reason": "not_inbound"}
+	if (message.sender_type or "").strip() in {"AI", "System", "Bot"}:
+		return {"status": "ignored", "reason": "system_sender"}
+	if not message.conversation:
+		return {"status": "ignored", "reason": "missing_conversation"}
+
+	with _workflow_conversation_lock(message.conversation):
+		if not frappe.db.exists(
+			WORKFLOW,
+			{"chat_conversation": message.conversation, "status": ["not in", list(FINAL_STATES)]},
+		):
+			return {"status": "ignored", "reason": "no_active_workflow"}
+		try:
+			return handle_whatsapp_reply(
+				conversation=message.conversation,
+				message=message.body or "",
+			)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "Order Confirmation WhatsApp Reply Failed")
+			return {"status": "failed", "message": message_name}
+
+
+def _workflow_conversation_lock(conversation: str):
+	return filelock(f"order_confirmation_conversation_{conversation}", timeout=60)
+
+
+def _workflow_lock(workflow_name: str):
+	return filelock(f"order_confirmation_workflow_{workflow_name}", timeout=60)
 
 
 def process_due_workflows() -> dict:
@@ -328,8 +365,8 @@ def process_due_workflows() -> dict:
 		limit=200,
 	):
 		try:
-			queue_voice_call(name)
-			queued_calls += 1
+			if queue_voice_call(name).get("status") == "queued":
+				queued_calls += 1
 		except Exception as exc:
 			_mark_failed(name, exc)
 
@@ -362,8 +399,8 @@ def process_due_workflows() -> dict:
 				create_level_3_issue(name)
 				final_issues += 1
 			else:
-				queue_voice_call(name)
-				queued_calls += 1
+				if queue_voice_call(name).get("status") == "queued":
+					queued_calls += 1
 		except Exception as exc:
 			_mark_failed(name, exc)
 
@@ -376,28 +413,39 @@ def process_due_workflows() -> dict:
 
 
 def queue_voice_call(workflow_name: str) -> dict:
-	workflow = frappe.get_doc(WORKFLOW, workflow_name)
-	settings = _workflow_settings(workflow)
-	context = _workflow_context(workflow)
-	context.update({"phone": _normalize_phone(workflow.patient_mobile), "to": _normalize_phone(workflow.patient_mobile), "workflow": workflow.name})
-	task = _create_task(
-		workflow=workflow,
-		channel="Voice",
-		task_template=settings.voice_task_template or _template_by_key("order_confirmation_voice"),
-		context=context,
-	)
-	task.status = "Running"
-	task.save(ignore_permissions=True)
-	refresh_batch_counts(task.task_batch)
-	workflow.retry_count = int(workflow.retry_count or 0) + 1
-	workflow.voice_task = task.name
-	workflow.task_batch = task.task_batch
-	workflow.status = "Level 2 Call Queued" if workflow.retry_count <= 1 else "Level 3 Retry Queued"
-	workflow.next_call_time = None
-	workflow.save(ignore_permissions=True)
-	frappe.db.commit()
-	enqueue_task_execution(task.name, "Voice")
-	return {"workflow": workflow.name, "task": task.name, "attempt": workflow.retry_count}
+	with _workflow_lock(workflow_name):
+		workflow = frappe.get_doc(WORKFLOW, workflow_name)
+		if workflow.status not in {"Level 1 WhatsApp Sent", "Level 3 Retry Queued"}:
+			return {"status": "skipped", "reason": "workflow_not_due", "workflow": workflow.name}
+		if workflow.status == "Level 3 Retry Queued" and workflow.next_call_time:
+			if frappe.utils.get_datetime(workflow.next_call_time) > now_datetime():
+				return {"status": "skipped", "reason": "retry_not_due", "workflow": workflow.name}
+		if workflow.voice_task:
+			task_status = frappe.db.get_value("AI Task", workflow.voice_task, "status")
+			if task_status in {"Queued", "Waiting", "Running"}:
+				return {"status": "skipped", "reason": "voice_task_already_active", "workflow": workflow.name, "task": workflow.voice_task}
+
+		settings = _workflow_settings(workflow)
+		context = _workflow_context(workflow)
+		context.update({"phone": _normalize_phone(workflow.patient_mobile), "to": _normalize_phone(workflow.patient_mobile), "workflow": workflow.name})
+		task = _create_task(
+			workflow=workflow,
+			channel="Voice",
+			task_template=settings.voice_task_template or _template_by_key("order_confirmation_voice"),
+			context=context,
+		)
+		task.status = "Running"
+		task.save(ignore_permissions=True)
+		refresh_batch_counts(task.task_batch)
+		workflow.retry_count = int(workflow.retry_count or 0) + 1
+		workflow.voice_task = task.name
+		workflow.task_batch = task.task_batch
+		workflow.status = "Level 2 Call Queued" if workflow.retry_count <= 1 else "Level 3 Retry Queued"
+		workflow.next_call_time = None
+		workflow.save(ignore_permissions=True)
+		frappe.db.commit()
+		enqueue_task_execution(task.name, "Voice")
+		return {"status": "queued", "workflow": workflow.name, "task": task.name, "attempt": workflow.retry_count}
 
 
 def handle_voice_result(

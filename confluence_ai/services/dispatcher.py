@@ -31,6 +31,8 @@ def enqueue_ready_batches() -> dict:
             queue=queue,
             batch_name=batch_name,
             enqueue_after_commit=True,
+            job_id=f"dispatch_batch_{batch_name}",
+            deduplicate=True,
         )
     return {"queued": len(batches)}
 
@@ -125,6 +127,8 @@ def enqueue_task_execution(task_name: str, channel: str) -> None:
         queue=get_queue_name(queue_field, default_queue),
         task_name=task_name,
         enqueue_after_commit=True,
+        job_id=f"execute_task_{task_name}",
+        deduplicate=True,
     )
 
 

@@ -62,6 +62,8 @@ def process_deadlines() -> dict:
             queue=queue,
             task_name=task_name,
             enqueue_after_commit=True,
+            job_id=f"mark_deadline_missed_{task_name}",
+            deduplicate=True,
         )
     return {"queued": len(overdue)}
 
