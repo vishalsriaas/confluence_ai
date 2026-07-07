@@ -1,0 +1,295 @@
+{
+ "actions": [],
+ "autoname": "format:ocf-{##}",
+ "creation": "2026-07-06 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "timer_status",
+  "company",
+  "external_order_id",
+  "idempotency_key",
+  "patient_encounter",
+  "patient_name",
+  "patient_mobile",
+  "address",
+  "product",
+  "medicine_details",
+  "doctor_details",
+  "order_summary",
+  "workflow_section",
+  "channel_account",
+  "agent",
+  "chat_conversation",
+  "whatsapp_task",
+  "voice_task",
+  "task_batch",
+  "timer_section",
+  "whatsapp_deadline",
+  "next_call_time",
+  "retry_count",
+  "max_retry_count",
+  "last_customer_reply",
+  "result_section",
+  "confirmation_notes",
+  "change_details",
+  "erp_issue",
+  "level_3_issue_created",
+  "mcp_result_json",
+  "payload_section",
+  "source_payload_json",
+  "context_json",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nLevel 1 WhatsApp Sent\nWhatsApp Replied\nCorrection Pending\nLevel 2 Call Queued\nLevel 2 Call Running\nLevel 2 Call Missed\nLevel 3 Retry Queued\nConfirmed\nIssue Created\nLevel 3 Ticket Created\nFailed\nCancelled"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Company"
+  },
+  {
+   "fieldname": "external_order_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "External Order ID"
+  },
+  {
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "unique": 1
+  },
+  {
+   "fieldname": "patient_encounter",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Encounter"
+  },
+  {
+   "fieldname": "patient_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Name"
+  },
+  {
+   "fieldname": "patient_mobile",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Mobile"
+  },
+  {
+   "fieldname": "address",
+   "fieldtype": "Long Text",
+   "label": "Address"
+  },
+  {
+   "fieldname": "product",
+   "fieldtype": "Data",
+   "label": "Product"
+  },
+  {
+   "fieldname": "medicine_details",
+   "fieldtype": "Long Text",
+   "label": "Medicine Details"
+  },
+  {
+   "fieldname": "doctor_details",
+   "fieldtype": "Long Text",
+   "label": "Doctor Details"
+  },
+  {
+   "fieldname": "order_summary",
+   "fieldtype": "Long Text",
+   "label": "Order Summary"
+  },
+  {
+   "fieldname": "workflow_section",
+   "fieldtype": "Section Break",
+   "label": "Workflow Links"
+  },
+  {
+   "fieldname": "channel_account",
+   "fieldtype": "Link",
+   "label": "AI Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "label": "AI Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "chat_conversation",
+   "fieldtype": "Data",
+   "label": "Chat Conversation"
+  },
+  {
+   "fieldname": "whatsapp_task",
+   "fieldtype": "Link",
+   "label": "WhatsApp Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "voice_task",
+   "fieldtype": "Link",
+   "label": "Voice Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "task_batch",
+   "fieldtype": "Link",
+   "label": "Task Batch",
+   "options": "AI Task Batch"
+  },
+  {
+   "fieldname": "timer_section",
+   "fieldtype": "Section Break",
+   "label": "Timers"
+  },
+  {
+   "fieldname": "timer_status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Timer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "whatsapp_deadline",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "WhatsApp Deadline"
+  },
+  {
+   "fieldname": "next_call_time",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Next Call Time"
+  },
+  {
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Voice Attempt Count"
+  },
+  {
+   "default": "2",
+   "fieldname": "max_retry_count",
+   "fieldtype": "Int",
+   "label": "Max Voice Attempts"
+  },
+  {
+   "fieldname": "last_customer_reply",
+   "fieldtype": "Long Text",
+   "label": "Last Customer Reply"
+  },
+  {
+   "fieldname": "result_section",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "confirmation_notes",
+   "fieldtype": "Long Text",
+   "label": "Confirmation Notes"
+  },
+  {
+   "fieldname": "change_details",
+   "fieldtype": "Long Text",
+   "label": "Change / Issue Details"
+  },
+  {
+   "fieldname": "erp_issue",
+   "fieldtype": "Data",
+   "label": "ERP Issue"
+  },
+  {
+   "default": "0",
+   "fieldname": "level_3_issue_created",
+   "fieldtype": "Check",
+   "label": "Level 3 Issue Created"
+  },
+  {
+   "fieldname": "mcp_result_json",
+   "fieldtype": "Code",
+   "label": "MCP Result JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "payload_section",
+   "fieldtype": "Section Break",
+   "label": "Payloads"
+  },
+  {
+   "fieldname": "source_payload_json",
+   "fieldtype": "Code",
+   "label": "Source Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "context_json",
+   "fieldtype": "Code",
+   "label": "Context JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Long Text",
+   "label": "Last Error",
+   "read_only": 1
+  }
+ ],
+ "indexes": [
+  [
+   "status",
+   "whatsapp_deadline"
+  ],
+  [
+   "status",
+   "next_call_time"
+  ],
+  [
+   "patient_encounter"
+  ]
+ ],
+ "modified": "2026-07-06 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "Order Confirmation Workflow",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "patient_name",
+ "track_changes": 1
+}

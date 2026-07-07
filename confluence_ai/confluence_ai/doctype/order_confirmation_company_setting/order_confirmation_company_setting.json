@@ -1,0 +1,187 @@
+{
+ "actions": [],
+ "creation": "2026-07-07 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "is_default",
+  "company",
+  "matching_keys",
+  "timers_section",
+  "whatsapp_wait_minutes",
+  "retry_delay_minutes",
+  "voice_call_timeout_minutes",
+  "max_voice_attempts",
+  "level_3_issue_tag",
+  "routing_section",
+  "channel_account",
+  "wa_chat_channel_account",
+  "voice_agent",
+  "whatsapp_task_template",
+  "voice_task_template",
+  "first_whatsapp_section",
+  "send_first_whatsapp_as_template",
+  "whatsapp_template_name",
+  "whatsapp_template_language",
+  "mcp_section",
+  "confirm_mcp_tool_name",
+  "issue_mcp_tool_name",
+  "whatsapp_section",
+  "whatsapp_prompt_template"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "description": "Use this row when no company, brand, source system, or event key matches the payload.",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Default"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Company / Brand"
+  },
+  {
+   "description": "Optional comma-separated aliases matched against payload company, brand, source_system, or event.",
+   "fieldname": "matching_keys",
+   "fieldtype": "Small Text",
+   "label": "Matching Keys"
+  },
+  {
+   "fieldname": "timers_section",
+   "fieldtype": "Section Break",
+   "label": "Timers"
+  },
+  {
+   "fieldname": "whatsapp_wait_minutes",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "WhatsApp Wait Minutes"
+  },
+  {
+   "fieldname": "retry_delay_minutes",
+   "fieldtype": "Int",
+   "label": "Retry Delay Minutes"
+  },
+  {
+   "description": "If a voice call stays running without a provider callback for this many minutes, treat it as missed.",
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "fieldname": "max_voice_attempts",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Max Voice Attempts"
+  },
+  {
+   "fieldname": "level_3_issue_tag",
+   "fieldtype": "Data",
+   "label": "Level 3 Issue Tag"
+  },
+  {
+   "fieldname": "routing_section",
+   "fieldtype": "Section Break",
+   "label": "Routing"
+  },
+  {
+   "fieldname": "channel_account",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "AI Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "wa_chat_channel_account",
+   "fieldtype": "Link",
+   "label": "WA Chat Channel Account",
+   "options": "Chat Channel Account"
+  },
+  {
+   "fieldname": "voice_agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Voice/Chat Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "whatsapp_task_template",
+   "fieldtype": "Link",
+   "label": "WhatsApp Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "first_whatsapp_section",
+   "fieldtype": "Section Break",
+   "label": "First WhatsApp Message"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_first_whatsapp_as_template",
+   "fieldtype": "Check",
+   "label": "Send First WhatsApp As Approved Template"
+  },
+  {
+   "fieldname": "whatsapp_template_name",
+   "fieldtype": "Data",
+   "label": "WhatsApp Template Name"
+  },
+  {
+   "fieldname": "whatsapp_template_language",
+   "fieldtype": "Data",
+   "label": "WhatsApp Template Language"
+  },
+  {
+   "fieldname": "mcp_section",
+   "fieldtype": "Section Break",
+   "label": "MCP Tools"
+  },
+  {
+   "fieldname": "confirm_mcp_tool_name",
+   "fieldtype": "Data",
+   "label": "Confirm MCP Tool Name"
+  },
+  {
+   "fieldname": "issue_mcp_tool_name",
+   "fieldtype": "Data",
+   "label": "Issue MCP Tool Name"
+  },
+  {
+   "fieldname": "whatsapp_section",
+   "fieldtype": "Section Break",
+   "label": "WhatsApp Prompt"
+  },
+  {
+   "fieldname": "whatsapp_prompt_template",
+   "fieldtype": "Long Text",
+   "label": "WhatsApp Prompt Template"
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-07-07 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "Order Confirmation Company Setting",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

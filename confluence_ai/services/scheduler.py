@@ -43,11 +43,18 @@ def _parse_time(value: str | None) -> time | None:
 
 def process_deadlines() -> dict:
     queue = get_queue_name("deadline_queue", "agent_deadline")
-    overdue = frappe.get_all(
-        "AI Task",
-        filters={"status": ["in", ["Queued", "Waiting", "Running"]], "deadline": ["<", frappe.utils.now()]},
-        pluck="name",
-        limit=1000,
+    overdue = frappe.db.sql(
+        """
+        select name
+        from `tabAI Task`
+        where status in ('Queued', 'Waiting', 'Running')
+            and deadline is not null
+            and deadline != ''
+            and deadline < %s
+        limit 1000
+        """,
+        frappe.utils.now(),
+        pluck=True,
     )
     for task_name in overdue:
         frappe.enqueue(
@@ -64,6 +71,10 @@ def mark_deadline_missed(task_name: str) -> None:
         return
     task = frappe.get_doc("AI Task", task_name)
     if task.status in {"Completed", "Failed", "Cancelled", "Deadline Missed"}:
+        return
+    if not task.deadline:
+        return
+    if frappe.utils.get_datetime(task.deadline) >= frappe.utils.now_datetime():
         return
     task.status = "Deadline Missed"
     task.save(ignore_permissions=True)

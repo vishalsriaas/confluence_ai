@@ -1,0 +1,194 @@
+{
+ "actions": [],
+ "creation": "2026-07-06 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "default_company",
+  "default_whatsapp_wait_minutes",
+  "default_retry_delay_minutes",
+  "voice_call_timeout_minutes",
+  "max_voice_attempts",
+  "level_3_issue_tag",
+  "routing_section",
+  "channel_account",
+  "wa_chat_channel_account",
+  "voice_agent",
+  "whatsapp_task_template",
+  "voice_task_template",
+  "first_whatsapp_section",
+  "send_first_whatsapp_as_template",
+  "whatsapp_template_name",
+  "whatsapp_template_language",
+  "mcp_section",
+  "confirm_mcp_tool_name",
+  "issue_mcp_tool_name",
+  "whatsapp_section",
+  "whatsapp_prompt_template",
+  "company_settings_section",
+  "company_settings"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "default_company",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Default Company"
+  },
+  {
+   "default": "10",
+   "fieldname": "default_whatsapp_wait_minutes",
+   "fieldtype": "Int",
+   "label": "Default WhatsApp Wait Minutes"
+  },
+  {
+   "default": "60",
+   "fieldname": "default_retry_delay_minutes",
+   "fieldtype": "Int",
+   "label": "Default Retry Delay Minutes"
+  },
+  {
+   "default": "5",
+   "description": "If a voice call stays running without a provider callback for this many minutes, treat it as missed.",
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "default": "2",
+   "fieldname": "max_voice_attempts",
+   "fieldtype": "Int",
+   "label": "Max Voice Attempts"
+  },
+  {
+   "default": "Level 3 Call Missed Order confirmation",
+   "fieldname": "level_3_issue_tag",
+   "fieldtype": "Data",
+   "label": "Level 3 Issue Tag"
+  },
+  {
+   "fieldname": "routing_section",
+   "fieldtype": "Section Break",
+   "label": "Routing"
+  },
+  {
+   "fieldname": "channel_account",
+   "fieldtype": "Link",
+   "label": "AI Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "wa_chat_channel_account",
+   "fieldtype": "Link",
+   "label": "WA Chat Channel Account",
+   "options": "Chat Channel Account"
+  },
+  {
+   "fieldname": "voice_agent",
+   "fieldtype": "Link",
+   "label": "Voice/Chat Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "whatsapp_task_template",
+   "fieldtype": "Link",
+   "label": "WhatsApp Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "first_whatsapp_section",
+   "fieldtype": "Section Break",
+   "label": "First WhatsApp Message"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_first_whatsapp_as_template",
+   "fieldtype": "Check",
+   "label": "Send First WhatsApp As Approved Template"
+  },
+  {
+   "fieldname": "whatsapp_template_name",
+   "fieldtype": "Data",
+   "label": "WhatsApp Template Name"
+  },
+  {
+   "default": "en",
+   "fieldname": "whatsapp_template_language",
+   "fieldtype": "Data",
+   "label": "WhatsApp Template Language"
+  },
+  {
+   "fieldname": "mcp_section",
+   "fieldtype": "Section Break",
+   "label": "MCP Tools"
+  },
+  {
+   "default": "update_patient_encounter_order_confirmation",
+   "fieldname": "confirm_mcp_tool_name",
+   "fieldtype": "Data",
+   "label": "Confirm MCP Tool Name"
+  },
+  {
+   "default": "create_order_confirmation_issue",
+   "fieldname": "issue_mcp_tool_name",
+   "fieldtype": "Data",
+   "label": "Issue MCP Tool Name"
+  },
+  {
+   "fieldname": "whatsapp_section",
+   "fieldtype": "Section Break",
+   "label": "WhatsApp Prompt"
+  },
+  {
+   "fieldname": "whatsapp_prompt_template",
+   "fieldtype": "Long Text",
+   "label": "WhatsApp Prompt Template"
+  },
+  {
+   "fieldname": "company_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Company Settings"
+  },
+  {
+   "fieldname": "company_settings",
+   "fieldtype": "Table",
+   "label": "Company Settings",
+   "options": "Order Confirmation Company Setting"
+  }
+ ],
+ "issingle": 1,
+ "modified": "2026-07-06 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "Order Confirmation Settings",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

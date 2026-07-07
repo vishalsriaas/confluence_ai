@@ -472,8 +472,8 @@ def handle_callback(payload: dict) -> dict:
             from confluence_ai.services.utils import now
             attempt_response["initiated_at"] = now()
 
-    elif event_type_lower in {"room_finished", "call_ended", "recording_ready", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
-        if event_type_lower in {"room_finished", "call_ended", "recording_ready", "transcript_ready", "completed"}:
+    elif event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
+        if event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed"}:
             task.status = "Completed"
             if attempt:
                 attempt.status = "Succeeded"
@@ -548,13 +548,58 @@ def handle_callback(payload: dict) -> dict:
         attempt.save(ignore_permissions=True)
 
     frappe.db.commit()
+    order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
         "task": task.name,
         "attempt": attempt.name if attempt else None,
         "processed_event": event_type,
+        "order_confirmation": order_confirmation_result,
     }
+
+
+def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice" or task.external_record_type != "Order Confirmation Workflow" or not task.external_record_id:
+        return None
+    if event_type_lower not in {"room_finished", "call_ended", "participant_left", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
+        return None
+    try:
+        from confluence_ai.services import order_confirmation
+
+        if not frappe.db.exists("Order Confirmation Workflow", task.external_record_id):
+            return {"status": "ignored", "reason": "missing_workflow"}
+        workflow = frappe.get_doc("Order Confirmation Workflow", task.external_record_id)
+        if workflow.status in order_confirmation.FINAL_STATES:
+            return {"status": "ignored", "reason": "final_state", "workflow": workflow.name}
+
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcript_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or ""
+        )
+        outcome = payload.get("order_confirmation_outcome") or payload.get("outcome")
+        if event_type_lower in {"failed", "room_failed", "call_failed"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("error") or payload.get("error_message") or "Voice call failed before confirmation."
+        elif not notes and event_type_lower in {"room_finished", "call_ended", "participant_left", "completed"}:
+            outcome = outcome or "missed"
+            notes = "Voice call ended without transcript or confirmation result."
+
+        return order_confirmation.handle_voice_result(
+            workflow=workflow.name,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+        )
+    except Exception as exc:
+        create_error("Order Confirmation Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
@@ -620,7 +665,7 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         doc.last_payload_json = as_json(payload)
 
         status = str(payload.get("status") or livekit_event or "").lower()
-        if status in {"completed", "call_ended", "room_finished", "recording_ready", "transcript_ready"}:
+        if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
             doc.status = "Completed"
         elif status in {"failed", "room_failed", "call_failed"}:
             doc.status = "Failed"
@@ -632,7 +677,7 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         if event_type_lower in {"room_started", "participant_joined", "initiated"}:
             doc.initiated_payload_json = as_json(payload)
             doc.started_at = payload.get("started_at") or doc.started_at or now()
-        elif event_type_lower in {"room_finished", "call_ended", "completed", "failed", "room_failed", "call_failed"}:
+        elif event_type_lower in {"room_finished", "call_ended", "participant_left", "completed", "failed", "room_failed", "call_failed"}:
             doc.status_payload_json = as_json(payload)
             doc.started_at = payload.get("started_at") or doc.started_at
             doc.ended_at = payload.get("ended_at") or doc.ended_at or now()

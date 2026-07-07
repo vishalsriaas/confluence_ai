@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"type\": \"header\", \"data\": {\"text\": \"Confluence AI Management\", \"level\": 4}}, {\"type\": \"card\", \"data\": {\"card_name\": \"1. Connection & Channels\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"2. ERP & Tool Integration\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"3. Inbound Routing\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"4. Agent Definitions\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"5. Templates & Operations\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"6. Knowledge Base\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"7. Monitoring & Logs\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"8. Sales Records\"}}]",
+ "content": "[{\"type\": \"header\", \"data\": {\"text\": \"Confluence AI Management\", \"level\": 4}}, {\"type\": \"card\", \"data\": {\"card_name\": \"1. Connection & Channels\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"2. ERP & Tool Integration\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"3. Inbound Routing\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"4. Agent Definitions\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"5. Templates & Operations\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"6. Knowledge Base\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"7. Monitoring & Logs\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"8. Sales Records\"}}, {\"type\": \"card\", \"data\": {\"card_name\": \"9. Order Confirmation\"}}]",
  "creation": "2026-06-12 12:50:29.771371",
  "custom_blocks": [],
  "docstatus": 0,
@@ -340,6 +340,35 @@
    "label": "AI Sales Call Outcomes",
    "link_count": 0,
    "link_to": "AI Sales Call Outcome",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "9. Order Confirmation",
+   "link_count": 0,
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Order Confirmation Settings",
+   "link_count": 0,
+   "link_to": "Order Confirmation Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Order Confirmation Workflows",
+   "link_count": 0,
+   "link_to": "Order Confirmation Workflow",
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"

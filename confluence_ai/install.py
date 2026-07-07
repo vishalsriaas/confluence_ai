@@ -7,12 +7,22 @@ def after_install() -> None:
     ensure_roles()
     ensure_settings()
     ensure_sales_defaults()
+    ensure_order_confirmation_defaults()
 
 
 def after_migrate() -> None:
     ensure_roles()
     ensure_settings()
     ensure_sales_defaults()
+    ensure_order_confirmation_defaults()
+
+
+def ensure_order_confirmation_defaults() -> None:
+    if not frappe.db.exists("DocType", "Order Confirmation Settings"):
+        return
+    from confluence_ai.services.order_confirmation import ensure_defaults
+
+    ensure_defaults()
 
 
 def ensure_roles() -> None:

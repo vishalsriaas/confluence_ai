@@ -10,11 +10,22 @@ required_apps = ["frappe"]
 after_install = "confluence_ai.install.after_install"
 after_migrate = "confluence_ai.install.after_migrate"
 
-scheduled_events = {
+scheduler_events = {
     "all": [
         "confluence_ai.services.dispatcher.enqueue_ready_batches",
         "confluence_ai.services.scheduler.process_deadlines",
     ],
+    "cron": {
+        "* * * * *": [
+            "confluence_ai.services.order_confirmation.process_due_workflows",
+        ],
+    },
+}
+
+doc_events = {
+    "Chat Message": {
+        "after_insert": "confluence_ai.services.order_confirmation.on_chat_message_after_insert",
+    },
 }
 
 fixtures = [

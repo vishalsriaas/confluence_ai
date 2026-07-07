@@ -22,6 +22,13 @@ def _bearer_token() -> str:
     if mcp_token:
         return mcp_token
 
+    request = getattr(frappe.local, "request", None)
+    if request:
+        for key in ("token", "access_token", "confluence_token", "x_mcp_token"):
+            value = request.args.get(key)
+            if value:
+                return value
+
     auth = headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
@@ -34,10 +41,11 @@ def require_access(scope: str) -> str:
         frappe.throw("Missing Confluence AI access token", frappe.PermissionError)
 
     token_key, secret = token_value.split(":", 1)
-    if not frappe.db.exists("AI Access Token", token_key):
+    token_docname = token_key if frappe.db.exists("AI Access Token", token_key) else frappe.db.get_value("AI Access Token", {"token_key": token_key}, "name")
+    if not token_docname:
         frappe.throw("Invalid Confluence AI access token", frappe.PermissionError)
 
-    doc = frappe.get_doc("AI Access Token", token_key)
+    doc = frappe.get_doc("AI Access Token", token_docname)
     if not doc.enabled:
         frappe.throw("Confluence AI access token is disabled", frappe.PermissionError)
 

@@ -4,6 +4,7 @@ import frappe
 
 from confluence_ai.services import livekit, whatsapp_bridge, vobiz
 from confluence_ai.services import event_router
+from confluence_ai.services import order_confirmation
 from confluence_ai.services.auth import require_access
 from confluence_ai.services.utils import as_json, get_request_json
 
@@ -48,6 +49,7 @@ def receive_event(source_system: str | None = None) -> dict:
     Optional query param:
         ?source_system=ERPNext   — used to disambiguate same event from multiple sources
     """
+    require_access("webhook")
     payload = get_request_json()
 
     if _is_vobiz_payload(payload):
@@ -65,6 +67,23 @@ def receive_event(source_system: str | None = None) -> dict:
             raise
 
     webhook_event = _record_inbound(source_system or "external", payload)
+
+    if _is_order_confirmation_payload(payload):
+        try:
+            result = order_confirmation.start_from_event(payload)
+            frappe.db.set_value(
+                "AI Webhook Event",
+                webhook_event,
+                {"status": "Processed", "response_json": as_json(result)},
+            )
+            return result
+        except Exception as exc:
+            frappe.db.set_value(
+                "AI Webhook Event",
+                webhook_event,
+                {"status": "Failed", "response_json": as_json({"error": str(exc)})},
+            )
+            raise
 
     # Find matching route
     route = event_router.find_matching_route(payload, source_system=source_system)
@@ -120,6 +139,11 @@ def _is_vobiz_payload(payload: dict) -> bool:
         or payload.get("account_id")
         or payload.get("AccountId")
     )
+
+
+def _is_order_confirmation_payload(payload: dict) -> bool:
+    event_type = str(payload.get("event") or payload.get("event_type") or "").strip().lower()
+    return event_type.endswith("order-confirmation") or event_type == "order_confirmation"
 
 
 def _record_inbound(source: str, payload: dict) -> str:

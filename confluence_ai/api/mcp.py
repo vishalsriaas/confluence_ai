@@ -269,6 +269,11 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
     arguments = sanitize_issue_email_arguments(tool, arguments)
     validate_order_confirmation_update_arguments(tool, arguments)
     validate_filter_arguments(tool, arguments)
+
+    if (tool.tool_name or "").strip() == "send_whatsapp_message":
+        from confluence_ai.services.whatsapp_mcp import send_whatsapp_message
+
+        return send_whatsapp_message(arguments, task_id=task_id)
     
     server = frappe.get_doc("AI MCP Server", tool.server) if tool.server else None
     if not server:

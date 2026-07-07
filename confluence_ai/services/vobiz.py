@@ -247,6 +247,7 @@ def handle_callback(payload: dict) -> dict:
         attempt.save(ignore_permissions=True)
 
     frappe.db.commit()
+    order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
@@ -254,7 +255,55 @@ def handle_callback(payload: dict) -> dict:
         "attempt": attempt.name if attempt else None,
         "call_log": call_log,
         "processed_event": event_type,
+        "order_confirmation": order_confirmation_result,
     }
+
+
+def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice" or task.external_record_type != "Order Confirmation Workflow" or not task.external_record_id:
+        return None
+    if event_type_lower not in {"status", "hangup", "completed", "failed", "busy", "no_answer", "timeout", "cancel", "transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
+        return None
+    try:
+        from confluence_ai.services import order_confirmation
+
+        if not frappe.db.exists("Order Confirmation Workflow", task.external_record_id):
+            return {"status": "ignored", "reason": "missing_workflow"}
+        workflow = frappe.get_doc("Order Confirmation Workflow", task.external_record_id)
+        if workflow.status in order_confirmation.FINAL_STATES:
+            return {"status": "ignored", "reason": "final_state", "workflow": workflow.name}
+
+        status = str(payload.get("CallStatus") or payload.get("Status") or payload.get("status") or "").lower()
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcription_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or payload.get("transcription_text")
+            or ""
+        )
+        outcome = payload.get("order_confirmation_outcome") or payload.get("outcome")
+        if status in {"failed", "busy", "no_answer", "timeout", "cancel", "cancelled", "canceled"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("Reason") or payload.get("hangup_cause") or "Voice call did not complete before confirmation."
+        elif not notes and event_type_lower in {"status", "hangup", "completed"}:
+            outcome = outcome or "missed"
+            notes = "Voice call ended without transcript or confirmation result."
+
+        return order_confirmation.handle_voice_result(
+            workflow=workflow.name,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+        )
+    except Exception as exc:
+        from confluence_ai.services.utils import create_error
+
+        create_error("Order Confirmation Voice Callback", str(exc), source="vobiz", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _payload_call_ids(payload: dict) -> list[str]:
