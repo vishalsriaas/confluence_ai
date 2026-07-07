@@ -1049,6 +1049,14 @@ def _direct_correction_detail(workflow, message: str) -> str | None:
 		"medicine",
 		"payment",
 		"amount",
+		"discount",
+		"price",
+		"rate",
+		"quantity",
+		"qty",
+		"cod",
+		"cash",
+		"online",
 	)
 	if not any(token in normalized for token in correction_tokens):
 		return None
