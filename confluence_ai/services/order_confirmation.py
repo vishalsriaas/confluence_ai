@@ -1141,9 +1141,45 @@ def _is_confirmation_text(normalized: str) -> bool:
 	}
 	if normalized in confirmed_exact:
 		return True
+	confirmation_words = {
+		"yes",
+		"y",
+		"ok",
+		"okay",
+		"confirm",
+		"confirmed",
+		"correct",
+		"haan",
+		"ha",
+		"han",
+		"haa",
+		"ji",
+		"theek",
+		"thik",
+		"sahi",
+		"bilkul",
+	}
+	words = set(normalized.split())
+	if "confirm" in words and words.intersection(confirmation_words - {"confirm"}):
+		return True
+	if "correct" in words and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm"}):
+		return True
+	if "sahi" in words and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm", "bilkul"}):
+		return True
 	return any(
 		token in normalized
 		for token in (
+			"yes correct",
+			"correct confirm",
+			"confirmed correct",
+			"confirm correct",
+			"haan correct",
+			"han correct",
+			"haa correct",
+			"yes confirm",
+			"haan confirm",
+			"han confirm",
+			"haa confirm",
 			"confirm kar do",
 			"confirm kardo",
 			"order confirm",
