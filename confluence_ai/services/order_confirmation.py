@@ -265,6 +265,10 @@ def handle_whatsapp_reply(
 			return {"status": "correction_required", "workflow": doc.name}
 		return create_issue_for_workflow(doc.name, _correction_detail(doc, message or change_details or ""))
 
+	direct_correction = _direct_correction_detail(doc, change_details or message or "")
+	if direct_correction:
+		return create_issue_for_workflow(doc.name, direct_correction)
+
 	if resolved == "confirmed":
 		return confirm_workflow(doc.name, source="WhatsApp")
 	if resolved == "issue":
@@ -275,7 +279,8 @@ def handle_whatsapp_reply(
 			_request_correction_details(doc, message or "")
 			return {"status": "awaiting_correction", "workflow": doc.name}
 		return create_issue_for_workflow(doc.name, change_details or message or "Customer requested change on WhatsApp.")
-	return {"status": "not_confirmed", "workflow": doc.name, "outcome": resolved}
+	_request_confirmation_or_correction(doc, message or "")
+	return {"status": "awaiting_customer_confirmation", "workflow": doc.name, "outcome": resolved}
 
 
 def on_chat_message_after_insert(doc, method=None) -> None:
@@ -968,6 +973,87 @@ def _correction_detail(workflow, correction: str) -> str:
 	return "\n".join(parts)
 
 
+def _direct_correction_detail(workflow, message: str) -> str | None:
+	message = str(message or "").strip()
+	if not message:
+		return None
+
+	normalized = _normalize_reply_text(message)
+	if _is_confirmation_text(normalized):
+		return None
+
+	digits = re.sub(r"\D", "", message)
+	current_mobile = re.sub(r"\D", "", str(workflow.patient_mobile or ""))
+	if digits and len(digits) >= 8 and digits != current_mobile and len(normalized.split()) <= 4:
+		return "\n".join(
+			[
+				"Customer requested correction.",
+				"Correction Type: Phone / contact number",
+				f"Old Phone: {workflow.patient_mobile or ''}",
+				f"New / Corrected Phone: {message}",
+				f"Old Order Details: {workflow.order_summary or ''}",
+			]
+		)
+
+	correction_tokens = (
+		"wrong",
+		"galat",
+		"change",
+		"changed",
+		"correction",
+		"correct karo",
+		"update",
+		"replace",
+		"modify",
+		"cancel",
+		"cancelled",
+		"nahi chahiye",
+		"not ordered",
+		"address",
+		"phone",
+		"mobile",
+		"number",
+		"item",
+		"product",
+		"medicine",
+		"payment",
+		"amount",
+	)
+	if not any(token in normalized for token in correction_tokens):
+		return None
+
+	parts = ["Customer requested correction.", f"Customer Message: {message}"]
+	if "address" in normalized or _looks_like_address(normalized):
+		parts.append(f"Old Address: {workflow.address or ''}")
+		parts.append(f"New / Corrected Address: {message}")
+	elif any(token in normalized for token in ("phone", "mobile", "number")):
+		parts.append(f"Old Phone: {workflow.patient_mobile or ''}")
+		parts.append(f"New / Corrected Phone: {message}")
+	else:
+		parts.append(f"Old Order Details: {workflow.order_summary or ''}")
+		parts.append(f"New / Corrected Details: {message}")
+	return "\n".join(parts)
+
+
+def _request_confirmation_or_correction(workflow, message: str) -> None:
+	settings = _workflow_settings(workflow)
+	text = (
+		"Samajh gaya. Order confirm karne se pehle please batayein: "
+		"kya sab details correct hain aur main order confirm kar doon? "
+		"Agar address, phone, item ya payment mein correction hai to woh detail bhej dein."
+	)
+	try:
+		_send_wa_chat_message(settings, workflow, text)
+	except Exception as exc:
+		create_error(
+			"Order Confirmation Follow-up Prompt",
+			str(exc),
+			source="order_confirmation",
+			payload={"workflow": workflow.name, "customer_message": message},
+			exc=exc,
+		)
+
+
 def _classify_reply(message: str, outcome: str | None = None) -> str:
 	if outcome:
 		value = outcome.strip().lower().replace(" ", "_")
@@ -977,36 +1063,8 @@ def _classify_reply(message: str, outcome: str | None = None) -> str:
 			return "issue"
 		if value in {"missed", "no_answer", "not_answered", "busy", "failed"}:
 			return "missed"
-	text = (message or "").strip().lower()
-	normalized = " ".join(text.replace(".", " ").replace(",", " ").split())
-	confirmed_exact = {
-		"yes",
-		"y",
-		"ok",
-		"okay",
-		"confirm",
-		"confirmed",
-		"correct",
-		"all correct",
-		"yes correct",
-		"haan",
-		"ha",
-		"han",
-		"theek hai",
-		"thik hai",
-		"sahi hai",
-	}
-	if normalized in confirmed_exact or any(
-		token in normalized
-		for token in (
-			"confirm kar do",
-			"sab correct",
-			"order confirm",
-			"correct hai",
-			"details correct",
-			"all details correct",
-		)
-	):
+	normalized = _normalize_reply_text(message)
+	if _is_confirmation_text(normalized) and not _has_correction_intent(normalized):
 		return "confirmed"
 	if any(
 		token in normalized
@@ -1041,9 +1099,101 @@ def _classify_reply(message: str, outcome: str | None = None) -> str:
 		)
 	):
 		return "issue"
-	if "address" in normalized and normalized not in confirmed_exact:
-		return "issue"
+	if _is_confirmation_text(normalized):
+		return "confirmed"
 	return "not_confirmed"
+
+
+def _normalize_reply_text(message: str) -> str:
+	text = (message or "").strip().lower()
+	text = re.sub(r"[^\w\s+/-]", " ", text)
+	return " ".join(text.split())
+
+
+def _is_confirmation_text(normalized: str) -> bool:
+	if not normalized:
+		return False
+	confirmed_exact = {
+		"yes",
+		"y",
+		"ok",
+		"okay",
+		"k",
+		"confirm",
+		"confirmed",
+		"correct",
+		"all correct",
+		"yes correct",
+		"haan",
+		"ha",
+		"han",
+		"haa",
+		"ji",
+		"haan ji",
+		"ha ji",
+		"hanji",
+		"theek hai",
+		"thik hai",
+		"theek h",
+		"thik h",
+		"sahi hai",
+		"sahi h",
+	}
+	if normalized in confirmed_exact:
+		return True
+	return any(
+		token in normalized
+		for token in (
+			"confirm kar do",
+			"confirm kardo",
+			"order confirm",
+			"order laga do",
+			"order lagado",
+			"bhej do",
+			"send kar do",
+			"proceed",
+			"go ahead",
+			"looks good",
+			"all good",
+			"sab correct",
+			"sab sahi",
+			"sab theek",
+			"bilkul sahi",
+			"correct hai",
+			"details correct",
+			"all details correct",
+			"main confirm karta",
+			"kar do",
+			"kardo",
+		)
+	)
+
+
+def _has_correction_intent(normalized: str) -> bool:
+	return any(
+		token in normalized
+		for token in (
+			"wrong",
+			"galat",
+			"change",
+			"changed",
+			"correction",
+			"update",
+			"replace",
+			"modify",
+			"cancel",
+			"cancelled",
+			"nahi chahiye",
+			"not ordered",
+		)
+	)
+
+
+def _looks_like_address(normalized: str) -> bool:
+	if not normalized:
+		return False
+	address_words = ("house", "flat", "sector", "street", "road", "nagar", "colony", "gurugram", "haryana", "india")
+	return bool(re.search(r"\d", normalized)) and (len(normalized.split()) >= 6 or any(word in normalized for word in address_words))
 
 
 def _find_active_workflow(workflow: str | None = None, conversation: str | None = None, task: str | None = None):
