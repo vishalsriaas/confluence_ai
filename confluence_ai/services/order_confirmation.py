@@ -264,12 +264,17 @@ def handle_whatsapp_reply(
 	resolved = _classify_reply(message or "", outcome)
 	if _has_pending_correction(doc):
 		if resolved == "confirmed":
+			_request_correction_details(doc, message or "")
 			return {"status": "correction_required", "workflow": doc.name}
-		return create_issue_for_workflow(doc.name, _correction_detail(doc, message or change_details or ""))
+		return create_issue_for_workflow(
+			doc.name,
+			_correction_detail(doc, message or change_details or ""),
+			reply_on_whatsapp=True,
+		)
 
 	direct_correction = _direct_correction_detail(doc, change_details or message or "")
 	if direct_correction:
-		return create_issue_for_workflow(doc.name, direct_correction)
+		return create_issue_for_workflow(doc.name, direct_correction, reply_on_whatsapp=True)
 
 	if resolved == "confirmed":
 		return confirm_workflow(doc.name, source="WhatsApp")
@@ -280,7 +285,11 @@ def handle_whatsapp_reply(
 			doc.save(ignore_permissions=True)
 			_request_correction_details(doc, message or "")
 			return {"status": "awaiting_correction", "workflow": doc.name}
-		return create_issue_for_workflow(doc.name, change_details or message or "Customer requested change on WhatsApp.")
+		return create_issue_for_workflow(
+			doc.name,
+			change_details or message or "Customer requested change on WhatsApp.",
+			reply_on_whatsapp=True,
+		)
 	_request_confirmation_or_correction(doc, message or "")
 	return {"status": "awaiting_customer_confirmation", "workflow": doc.name, "outcome": resolved}
 
@@ -446,21 +455,39 @@ def confirm_workflow(workflow_name: str, source: str = "Unknown") -> dict:
 		"checklist_confirmed": True,
 		"customer_final_confirmation": "yes_after_full_checklist",
 	}
-	result = _call_named_mcp(_workflow_settings(workflow).confirm_mcp_tool_name, args, workflow=workflow)
+	try:
+		result = _call_named_mcp(_workflow_settings(workflow).confirm_mcp_tool_name, args, workflow=workflow)
+	except Exception:
+		if source == "WhatsApp":
+			_reply_mcp_failed(workflow, "confirmation")
+		raise
 	workflow.status = "Confirmed"
 	workflow.confirmation_notes = notes
 	workflow.mcp_result_json = as_json(result)
 	workflow.last_error = ""
 	workflow.save(ignore_permissions=True)
 	frappe.db.commit()
+	if source == "WhatsApp":
+		_reply_confirmed(workflow)
 	return {"status": "confirmed", "workflow": workflow.name, "mcp_result": result}
 
 
-def create_issue_for_workflow(workflow_name: str, change_details: str, *, level_3: bool = False) -> dict:
+def create_issue_for_workflow(
+	workflow_name: str,
+	change_details: str,
+	*,
+	level_3: bool = False,
+	reply_on_whatsapp: bool = False,
+) -> dict:
 	workflow = frappe.get_doc(WORKFLOW, workflow_name)
 	settings = _workflow_settings(workflow)
 	args = _issue_args(workflow, change_details, settings.level_3_issue_tag if level_3 else None)
-	result = _call_named_mcp(settings.issue_mcp_tool_name, args, workflow=workflow)
+	try:
+		result = _call_named_mcp(settings.issue_mcp_tool_name, args, workflow=workflow)
+	except Exception:
+		if reply_on_whatsapp:
+			_reply_mcp_failed(workflow, "correction")
+		raise
 	workflow.status = "Level 3 Ticket Created" if level_3 else "Issue Created"
 	workflow.change_details = change_details
 	workflow.level_3_issue_created = 1 if level_3 else workflow.level_3_issue_created
@@ -469,6 +496,8 @@ def create_issue_for_workflow(workflow_name: str, change_details: str, *, level_
 	workflow.last_error = ""
 	workflow.save(ignore_permissions=True)
 	frappe.db.commit()
+	if reply_on_whatsapp:
+		_reply_issue_created(workflow)
 	return {"status": workflow.status, "workflow": workflow.name, "mcp_result": result}
 
 
@@ -1052,6 +1081,49 @@ def _request_confirmation_or_correction(workflow, message: str) -> None:
 			str(exc),
 			source="order_confirmation",
 			payload={"workflow": workflow.name, "customer_message": message},
+			exc=exc,
+		)
+
+
+def _reply_confirmed(workflow) -> None:
+	_send_workflow_reply(
+		workflow,
+		"Thank you. Aapki order confirmation receive ho gayi hai. Humne Patient Encounter update kar diya hai.",
+		"Order Confirmation Success Reply",
+	)
+
+
+def _reply_issue_created(workflow) -> None:
+	_send_workflow_reply(
+		workflow,
+		"Correction receive ho gayi hai. Team ke liye issue create kar diya hai, aur order abhi approve nahi kiya gaya hai.",
+		"Order Confirmation Issue Reply",
+	)
+
+
+def _reply_mcp_failed(workflow, action: str) -> None:
+	message = (
+		"Aapka reply receive ho gaya hai. Backend update mein technical issue aa raha hai, "
+		"isliye team isko manually check karegi."
+	)
+	if action == "correction":
+		message = (
+			"Aapki correction receive ho gayi hai. Backend issue create karne mein technical issue aa raha hai, "
+			"isliye team isko manually check karegi. Order abhi approve nahi kiya gaya hai."
+		)
+	_send_workflow_reply(workflow, message, "Order Confirmation MCP Failure Reply")
+
+
+def _send_workflow_reply(workflow, text: str, title: str) -> None:
+	settings = _workflow_settings(workflow)
+	try:
+		_send_wa_chat_message(settings, workflow, text)
+	except Exception as exc:
+		create_error(
+			title,
+			str(exc),
+			source="order_confirmation",
+			payload={"workflow": workflow.name},
 			exc=exc,
 		)
 
