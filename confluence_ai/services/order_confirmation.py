@@ -1168,6 +1168,8 @@ def _is_confirmation_text(normalized: str) -> bool:
 		return True
 	if "sahi" in words and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm", "bilkul"}):
 		return True
+	if words.intersection({"theek", "thik"}) and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm", "sab", "bilkul"}):
+		return True
 	return any(
 		token in normalized
 		for token in (
@@ -1182,6 +1184,16 @@ def _is_confirmation_text(normalized: str) -> bool:
 			"haan confirm",
 			"han confirm",
 			"haa confirm",
+			"haan theek",
+			"han theek",
+			"haa theek",
+			"haan thik",
+			"han thik",
+			"haa thik",
+			"theek hai sab",
+			"thik hai sab",
+			"sab theek hai",
+			"sab thik hai",
 			"confirm kar do",
 			"confirm kardo",
 			"order confirm",
