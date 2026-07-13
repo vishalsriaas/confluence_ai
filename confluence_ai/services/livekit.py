@@ -588,8 +588,10 @@ def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: s
             outcome = outcome or "missed"
             notes = notes or payload.get("error") or payload.get("error_message") or "Voice call failed before confirmation."
         elif not notes and event_type_lower in {"room_finished", "call_ended", "participant_left", "completed"}:
-            outcome = outcome or "missed"
-            notes = "Voice call ended without transcript or confirmation result."
+            return order_confirmation.wait_for_voice_transcript(
+                workflow.name,
+                "Voice call ended; waiting for transcript before deciding confirmation.",
+            )
 
         return order_confirmation.handle_voice_result(
             workflow=workflow.name,

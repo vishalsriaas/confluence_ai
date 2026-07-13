@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 import frappe
+import requests
 from frappe.utils import add_to_date, now_datetime
 from frappe.utils.synchronization import filelock
 
 from confluence_ai.api.mcp import execute_mcp_tool
 from confluence_ai.services.dispatcher import enqueue_task_execution, refresh_batch_counts
-from confluence_ai.services.utils import as_json, create_error, parse_json_object
+from confluence_ai.services.utils import as_json, create_error, parse_json_object, record_provider_event
 
 WORKFLOW = "Order Confirmation Workflow"
 SETTINGS = "Order Confirmation Settings"
@@ -458,7 +460,21 @@ def handle_voice_result(
 	if not doc:
 		return {"status": "ignored", "reason": "no_active_workflow"}
 
-	resolved = _classify_reply(notes or "", outcome)
+	if _looks_like_transcript(notes or "") and not outcome:
+		decision = judge_voice_order_confirmation(doc, notes or "", task=task)
+		if decision.get("customer_requested_change") or decision.get("customer_cancelled"):
+			return create_issue_for_workflow(
+				doc.name,
+				_voice_review_issue_detail(doc, notes or "", decision, "Customer requested change/cancel during voice confirmation."),
+			)
+		if decision.get("order_details_read_fully") and decision.get("customer_confirmed_after_details") and float(decision.get("confidence") or 0) >= 0.8:
+			return confirm_workflow(doc.name, source="Voice", extra_notes=f"Voice confirmation judge:\n{as_json(decision)}")
+		return create_issue_for_workflow(
+			doc.name,
+			_voice_review_issue_detail(doc, notes or "", decision, "Voice confirmation was unclear; manual review required."),
+		)
+
+	resolved = _classify_voice_result(notes or "", outcome)
 	if resolved == "confirmed":
 		return confirm_workflow(doc.name, source="Voice")
 	if resolved == "issue":
@@ -467,6 +483,228 @@ def handle_voice_result(
 		return mark_call_missed(doc.name, notes)
 
 	return mark_call_missed(doc.name, notes or "Call picked but order was not clearly confirmed.")
+
+
+def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> dict:
+	workflow = frappe.get_doc(WORKFLOW, workflow_name)
+	settings = _workflow_settings(workflow)
+	if workflow.status in FINAL_STATES:
+		return {"status": "ignored", "reason": "final_state", "workflow": workflow.name}
+	if notes:
+		workflow.confirmation_notes = notes
+	workflow.status = "Level 3 Retry Queued"
+	workflow.next_call_time = add_to_date(
+		now_datetime(),
+		minutes=int(settings.default_retry_delay_minutes or 60),
+		as_datetime=True,
+	)
+	workflow.save(ignore_permissions=True)
+	frappe.db.commit()
+	return {"status": "waiting_for_transcript", "workflow": workflow.name, "next_call_time": workflow.next_call_time}
+
+
+def judge_voice_order_confirmation(workflow, transcript: str, task: str | None = None) -> dict:
+	"""Use an LLM to decide whether a voice transcript truly confirms an order."""
+	base_decision = {
+		"order_details_read_fully": False,
+		"customer_confirmed_after_details": False,
+		"customer_requested_change": False,
+		"customer_cancelled": False,
+		"confidence": 0.0,
+		"reason": "No judge decision.",
+	}
+	agent = frappe.get_doc("AI Agent", workflow.agent) if workflow.agent and frappe.db.exists("AI Agent", workflow.agent) else None
+	request_payload = _voice_judge_request_payload(workflow, transcript)
+	try:
+		result = _run_voice_confirmation_judge(agent, request_payload, task=task)
+	except Exception as exc:
+		create_error(
+			"Voice Confirmation Judge",
+			str(exc),
+			source="order_confirmation",
+			task=task,
+			agent=agent.name if agent else None,
+			payload={"workflow": workflow.name},
+			exc=exc,
+		)
+		return {**base_decision, "reason": f"Judge failed: {exc}"}
+
+	decision = _normalize_voice_judge_decision(result)
+	record_provider_event(
+		provider="Voice Confirmation Judge",
+		operation="order_confirmation_decision",
+		status="Succeeded",
+		agent=agent.name if agent else None,
+		task=task,
+		request=request_payload,
+		response=decision,
+	)
+	return decision
+
+
+def _voice_judge_request_payload(workflow, transcript: str) -> dict:
+	return {
+		"instructions": (
+			"You are auditing an order-confirmation voice call. Return ONLY JSON. "
+			"Confirm only if the agent read the available order details before final confirmation, "
+			"and the customer confirmed after that. If the customer only said yes to hearing details, "
+			"that is not confirmation. If the agent claimed updated/confirmed before customer confirmation, "
+			"do not confirm. If any correction/cancel is requested, mark it."
+		),
+		"required_schema": {
+			"order_details_read_fully": "boolean",
+			"customer_confirmed_after_details": "boolean",
+			"customer_requested_change": "boolean",
+			"customer_cancelled": "boolean",
+			"confidence": "number from 0 to 1",
+			"reason": "short string",
+		},
+		"order_details": {
+			"patient_name": workflow.patient_name,
+			"patient_mobile": workflow.patient_mobile,
+			"address": workflow.address,
+			"product": workflow.product,
+			"medicine_details": workflow.medicine_details,
+			"doctor_details": workflow.doctor_details,
+			"order_summary": workflow.order_summary,
+		},
+		"transcript": transcript,
+	}
+
+
+def _run_voice_confirmation_judge(agent, payload: dict, task: str | None = None) -> dict:
+	providers = [agent.primary_provider if agent else "OpenAI", agent.fallback_provider if agent else None]
+	last_error = None
+	for provider in [provider for provider in providers if provider]:
+		try:
+			return _run_voice_confirmation_judge_provider(provider, agent, payload, task=task)
+		except Exception as exc:
+			last_error = exc
+			record_provider_event(
+				provider=provider,
+				operation="voice_confirmation_judge",
+				status="Failed",
+				agent=agent.name if agent else None,
+				task=task,
+				request=payload,
+				error=str(exc),
+			)
+	if last_error:
+		raise last_error
+	frappe.throw("No LLM provider configured for voice confirmation judge.")
+
+
+def _run_voice_confirmation_judge_provider(provider: str, agent, payload: dict, task: str | None = None) -> dict:
+	model_config = parse_json_object(agent.model_config, "Model Config") if agent else {}
+	provider_config = model_config.get(provider) or model_config.get(str(provider).lower()) or {}
+	provider_name = str(provider or "").lower()
+	if provider_name == "openai":
+		return _call_openai_voice_judge(provider_config, payload, agent=agent, task=task)
+	return _call_custom_voice_judge(provider, provider_config, payload, agent=agent, task=task)
+
+
+def _call_openai_voice_judge(provider_config: dict, payload: dict, *, agent=None, task: str | None = None) -> dict:
+	api_key = (
+		provider_config.get("api_key")
+		or frappe.conf.get("openai_api_key")
+		or frappe.conf.get("OPENAI_API_KEY")
+		or os.getenv("OPENAI_API_KEY")
+	)
+	if not api_key:
+		frappe.throw("OpenAI API key is not configured for voice confirmation judge.")
+	base_url = (provider_config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+	url = f"{base_url}/{(provider_config.get('path') or 'chat/completions').lstrip('/')}"
+	body = {
+		"model": provider_config.get("model") or "gpt-4.1-mini",
+		"temperature": 0,
+		"response_format": {"type": "json_object"},
+		"messages": [
+			{"role": "system", "content": "Return only valid JSON for the requested schema."},
+			{"role": "user", "content": as_json(payload)},
+		],
+	}
+	response = requests.post(
+		url,
+		headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+		data=as_json(body),
+		timeout=int(provider_config.get("timeout") or 45),
+	)
+	result = {"status_code": response.status_code, "ok": response.ok, "body": response.text[:4000]}
+	record_provider_event(
+		provider="OpenAI",
+		operation="voice_confirmation_judge",
+		status="Succeeded" if response.ok else "Failed",
+		agent=agent.name if agent else None,
+		task=task,
+		request={**payload, "model": body["model"]},
+		response=result,
+	)
+	if not response.ok:
+		frappe.throw(f"OpenAI voice judge failed with HTTP {response.status_code}: {response.text[:500]}")
+	data = response.json()
+	content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+	return parse_json_object(content, "Voice Confirmation Judge Response")
+
+
+def _call_custom_voice_judge(provider: str, provider_config: dict, payload: dict, *, agent=None, task: str | None = None) -> dict:
+	base_url = provider_config.get("base_url")
+	if not base_url:
+		frappe.throw(f"{provider} base_url is not configured for voice confirmation judge.")
+	url = base_url.rstrip("/") + "/" + (provider_config.get("path") or "").lstrip("/")
+	headers = {"Content-Type": "application/json"}
+	if provider_config.get("api_key"):
+		headers["Authorization"] = f"Bearer {provider_config.get('api_key')}"
+	body = {"model": provider_config.get("model"), "task": "voice_order_confirmation_judge", "payload": payload}
+	response = requests.post(url, headers=headers, data=as_json(body), timeout=int(provider_config.get("timeout") or 45))
+	result = {"status_code": response.status_code, "ok": response.ok, "body": response.text[:4000]}
+	record_provider_event(
+		provider=provider,
+		operation="voice_confirmation_judge",
+		status="Succeeded" if response.ok else "Failed",
+		agent=agent.name if agent else None,
+		task=task,
+		request=body,
+		response=result,
+	)
+	if not response.ok:
+		frappe.throw(f"{provider} voice judge failed with HTTP {response.status_code}: {response.text[:500]}")
+	data = response.json()
+	if isinstance(data, dict) and isinstance(data.get("decision"), dict):
+		return data["decision"]
+	if isinstance(data, dict):
+		return data
+	frappe.throw(f"{provider} voice judge returned non-object JSON.")
+
+
+def _normalize_voice_judge_decision(value: dict) -> dict:
+	def flag(key: str) -> bool:
+		return value.get(key) in (True, 1, "1", "true", "True", "yes", "Yes")
+
+	try:
+		confidence = float(value.get("confidence") or 0)
+	except (TypeError, ValueError):
+		confidence = 0.0
+	return {
+		"order_details_read_fully": flag("order_details_read_fully"),
+		"customer_confirmed_after_details": flag("customer_confirmed_after_details"),
+		"customer_requested_change": flag("customer_requested_change"),
+		"customer_cancelled": flag("customer_cancelled"),
+		"confidence": max(0.0, min(1.0, confidence)),
+		"reason": str(value.get("reason") or "").strip()[:1000],
+	}
+
+
+def _voice_review_issue_detail(workflow, transcript: str, decision: dict, reason: str) -> str:
+	return (
+		f"{reason}\n\n"
+		f"Voice judge decision:\n{as_json(decision)}\n\n"
+		f"Patient Name: {workflow.patient_name or ''}\n"
+		f"Patient Mobile: {workflow.patient_mobile or ''}\n"
+		f"Patient Encounter: {workflow.patient_encounter or ''}\n"
+		f"Address: {workflow.address or ''}\n"
+		f"Order Summary: {workflow.order_summary or ''}\n\n"
+		f"Transcript:\n{str(transcript or '')[:6000]}"
+	)
 
 
 def mark_call_missed(workflow_name: str, notes: str | None = None, *, missed_at=None) -> dict:
@@ -489,11 +727,13 @@ def mark_call_missed(workflow_name: str, notes: str | None = None, *, missed_at=
 	return {"status": "retry_queued", "workflow": workflow.name, "next_call_time": workflow.next_call_time}
 
 
-def confirm_workflow(workflow_name: str, source: str = "Unknown") -> dict:
+def confirm_workflow(workflow_name: str, source: str = "Unknown", extra_notes: str | None = None) -> dict:
 	workflow = frappe.get_doc(WORKFLOW, workflow_name)
 	if workflow.status in STOP_CONFIRMATION_STATES or _has_pending_correction(workflow):
 		return {"status": "blocked", "reason": "correction_or_issue_exists", "workflow": workflow.name}
 	notes = _confirmation_notes(workflow, source)
+	if extra_notes:
+		notes = f"{notes}\n\n{extra_notes}"
 	args = {
 		"encounter_id": workflow.patient_encounter,
 		"patient_encounter": workflow.patient_encounter,
@@ -551,18 +791,7 @@ def create_issue_for_workflow(
 
 def create_level_3_issue(workflow_name: str) -> dict:
 	workflow = frappe.get_doc(WORKFLOW, workflow_name)
-	summary = (
-		"Customer did not pick the second order confirmation call.\n\n"
-		f"Company: {workflow.company or ''}\n"
-		f"Patient Name: {workflow.patient_name or ''}\n"
-		f"Patient Mobile: {workflow.patient_mobile or ''}\n"
-		f"Address: {workflow.address or ''}\n"
-		f"Product: {workflow.product or ''}\n"
-		f"Medicine Details: {workflow.medicine_details or ''}\n"
-		f"Doctor Details: {workflow.doctor_details or ''}\n"
-		f"Order Summary: {workflow.order_summary or ''}\n"
-		"Status: Pending"
-	)
+	summary = "Customer did not pick the second order confirmation call."
 	return create_issue_for_workflow(workflow.name, summary, level_3=True)
 
 
@@ -1234,6 +1463,90 @@ def _classify_reply(message: str, outcome: str | None = None) -> str:
 	return "not_confirmed"
 
 
+def _classify_voice_result(notes: str, outcome: str | None = None) -> str:
+	if outcome:
+		return _classify_reply(notes, outcome)
+	if _looks_like_transcript(notes):
+		return _classify_voice_transcript(notes)
+	return _classify_reply(notes)
+
+
+def _looks_like_transcript(text: str) -> bool:
+	return "[CUSTOMER]" in (text or "").upper() or "[AGENT]" in (text or "").upper()
+
+
+def _classify_voice_transcript(transcript: str) -> str:
+	customer_lines = _transcript_lines(transcript, "CUSTOMER")
+	agent_lines = _transcript_lines(transcript, "AGENT")
+	if not customer_lines:
+		return "not_confirmed"
+
+	customer_text = _normalize_reply_text(" ".join(customer_lines))
+	if _has_correction_intent(customer_text):
+		return "issue"
+	if any(token in customer_text for token in ("cancel", "cancelled", "canceled", "nahi chahiye", "not ordered")):
+		return "issue"
+
+	if _agent_claimed_update_without_customer_confirmation(transcript):
+		return "not_confirmed"
+
+	if not _agent_asked_final_confirmation(agent_lines):
+		return "not_confirmed"
+
+	for line in customer_lines:
+		normalized = _normalize_reply_text(line)
+		if _is_confirmation_text(normalized) and not _has_correction_intent(normalized):
+			return "confirmed"
+	return "not_confirmed"
+
+
+def _transcript_lines(transcript: str, speaker: str) -> list[str]:
+	lines = []
+	prefix = f"[{speaker.upper()}]:"
+	for line in str(transcript or "").splitlines():
+		text = line.strip()
+		if text.upper().startswith(prefix):
+			lines.append(text.split(":", 1)[1].strip())
+	return lines
+
+
+def _agent_asked_final_confirmation(agent_lines: list[str]) -> bool:
+	agent_text = _normalize_reply_text(" ".join(agent_lines))
+	return any(
+		token in agent_text
+		for token in (
+			"sabhi order details sahi",
+			"sab details sahi",
+			"sari details sahi",
+			"all details correct",
+			"details correct",
+			"order confirm kar",
+			"kya ye sahi",
+			"kya ye correct",
+			"kya ye sari information",
+			"kya ye sab",
+		)
+	)
+
+
+def _agent_claimed_update_without_customer_confirmation(transcript: str) -> bool:
+	lines = str(transcript or "").splitlines()
+	for index, line in enumerate(lines):
+		text = _normalize_reply_text(line)
+		if not line.strip().upper().startswith("[AGENT]:"):
+			continue
+		if not any(token in text for token in ("update kar di", "confirm kar diya", "confirmed", "order confirm")):
+			continue
+		previous_customer = [
+			_normalize_reply_text(prev.split(":", 1)[1])
+			for prev in lines[:index]
+			if prev.strip().upper().startswith("[CUSTOMER]:") and ":" in prev
+		]
+		if not any(_is_confirmation_text(prev) and not _has_correction_intent(prev) for prev in previous_customer):
+			return True
+	return False
+
+
 def _normalize_reply_text(message: str) -> str:
 	text = (message or "").strip().lower()
 	text = re.sub(r"[^\w\s+/-]", " ", text)
@@ -1262,12 +1575,25 @@ def _is_confirmation_text(normalized: str) -> bool:
 		"haan ji",
 		"ha ji",
 		"hanji",
+		"ji ji",
+		"ji okay",
+		"ji ok",
 		"theek hai",
 		"thik hai",
 		"theek h",
 		"thik h",
 		"sahi hai",
 		"sahi h",
+		"हाँ",
+		"हां",
+		"हा",
+		"जी",
+		"जी जी",
+		"ठीक है",
+		"ठिक है",
+		"सही है",
+		"ओके",
+		"यस",
 	}
 	if normalized in confirmed_exact:
 		return True
@@ -1284,6 +1610,15 @@ def _is_confirmation_text(normalized: str) -> bool:
 		"han",
 		"haa",
 		"ji",
+		"जी",
+		"हाँ",
+		"हां",
+		"हा",
+		"ठीक",
+		"ठिक",
+		"सही",
+		"ओके",
+		"यस",
 		"theek",
 		"thik",
 		"sahi",
@@ -1297,6 +1632,10 @@ def _is_confirmation_text(normalized: str) -> bool:
 	if "sahi" in words and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm", "bilkul"}):
 		return True
 	if words.intersection({"theek", "thik"}) and words.intersection({"yes", "haan", "ha", "han", "haa", "ji", "ok", "okay", "confirm", "sab", "bilkul"}):
+		return True
+	if words.intersection({"ठीक", "ठिक", "सही"}) and words.intersection({"हाँ", "हां", "हा", "जी", "ओके", "यस", "सब", "बिलकुल"}):
+		return True
+	if words.intersection({"जी"}) and words.intersection({"ओके", "ठीक", "ठिक", "सही", "हाँ", "हां", "हा", "यस"}):
 		return True
 	return any(
 		token in normalized
@@ -1343,6 +1682,15 @@ def _is_confirmation_text(normalized: str) -> bool:
 			"main confirm karta",
 			"kar do",
 			"kardo",
+			"जी जी ओके",
+			"हाँ जी",
+			"हां जी",
+			"जी हाँ",
+			"जी हां",
+			"ठीक है सब",
+			"सब ठीक है",
+			"सही है",
+			"सब सही",
 		)
 	)
 
@@ -1427,29 +1775,48 @@ def _confirmation_notes(workflow, source: str) -> str:
 
 
 def _issue_args(workflow, detail: str, tag: str | None = None) -> dict:
-	subject = f"Order confirmation issue - {workflow.patient_name or workflow.patient_mobile or workflow.name}"
-	if tag:
-		subject = f"{tag} - {workflow.patient_name or workflow.patient_mobile or workflow.name}"
-	description = (
-		f"{detail}\n\n"
-		f"Company: {workflow.company or ''}\n"
-		f"Patient Name: {workflow.patient_name or ''}\n"
-		f"Patient Mobile: {workflow.patient_mobile or ''}\n"
-		f"Patient Encounter: {workflow.patient_encounter or ''}\n"
-		f"Address: {workflow.address or ''}\n"
-		f"Product: {workflow.product or ''}\n"
-		f"Medicine Details: {workflow.medicine_details or ''}\n"
-		f"Doctor Details: {workflow.doctor_details or ''}\n"
-		f"Order Summary: {workflow.order_summary or ''}\n"
-		f"Status: Pending\n"
-		f"Tag: {tag or ''}"
+	context = _workflow_context(workflow)
+	source_payload = parse_json_object(workflow.source_payload_json, "Workflow Source Payload JSON") if workflow.get("source_payload_json") else {}
+	payload_details = source_payload.get("payload_json") if isinstance(source_payload.get("payload_json"), dict) else {}
+	source_data = {**payload_details, **source_payload}
+	customer = _first_value(
+		context,
+		source_data,
+		"customer_id",
+		"customer",
+		"customer_name",
+		"patient",
+		"patient_name",
+		"order_patient_name",
 	)
+	raised_by = _first_value(
+		context,
+		source_data,
+		"created_by_agent",
+		"created_by",
+		"owner",
+		"raised_by",
+		"email",
+		"contact_email",
+	)
+	patient_label = workflow.patient_name or workflow.patient_mobile or workflow.name
+	subject = f"{patient_label} - Order confirmation issue"
+	if tag:
+		subject = f"{patient_label} - {tag}"
 	return {
 		"subject": subject,
-		"description": description,
+		"description": detail,
 		"company": workflow.company,
+		"customer": customer,
 		"customer_name": workflow.patient_name,
 		"customer_phone": workflow.patient_mobile,
+		"raised_by": raised_by,
+		"created_by_agent": raised_by,
+		"source_system": context.get("source_system") or workflow.company,
+		"event": context.get("event"),
+		"total_amount": context.get("total_amount"),
+		"total_advance_paid": context.get("total_advance_paid"),
+		"remaining_amount": context.get("remaining_amount"),
 		"patient_name": workflow.patient_name,
 		"patient_mobile": workflow.patient_mobile,
 		"patient_encounter": workflow.patient_encounter,

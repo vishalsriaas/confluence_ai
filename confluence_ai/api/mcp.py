@@ -528,36 +528,36 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
 
 
 def enrich_order_confirmation_issue_arguments(tool: "frappe.Document", arguments: dict, task_id: str | None) -> dict:
-    """Append task/order context to issue descriptions so operators never get thin tickets."""
+    """Build a clean operator-facing Issue payload for order confirmation failures."""
     tool_name = (tool.tool_name or "").lower()
     if "create_order_confirmation_issue" not in tool_name:
         return arguments
 
     task_context = get_task_context_for_mcp(task_id)
-    if not task_context:
-        return arguments
-
     payload_json = task_context.get("payload_json") if isinstance(task_context.get("payload_json"), dict) else {}
-    data = dict(task_context)
+    data = dict(task_context or {})
     data.update({k: v for k, v in payload_json.items() if v not in (None, "", [], {})})
+    data.update({k: v for k, v in arguments.items() if v not in (None, "", [], {})})
 
     detail_lines = build_order_issue_detail_lines(data, arguments)
     if not detail_lines:
         return arguments
 
-    original_description = str(arguments.get("description") or "").strip()
-    detail_block = "\n".join(detail_lines)
-    if "ORDER / CUSTOMER DETAILS" not in original_description:
-        arguments["description"] = (
-            f"{original_description}\n\nORDER / CUSTOMER DETAILS:\n{detail_block}"
-            if original_description
-            else f"ORDER / CUSTOMER DETAILS:\n{detail_block}"
-        )
+    reason = clean_order_issue_reason(arguments.get("issue_summary") or arguments.get("description") or arguments.get("reason"))
+    description_parts = []
+    if reason:
+        description_parts.append(f"ISSUE DETAILS:\n- Reason: {reason}")
+    description_parts.append("ORDER / CUSTOMER DETAILS:\n" + "\n".join(detail_lines))
+    arguments["description"] = "\n\n".join(description_parts)
 
     if not arguments.get("subject"):
         encounter = data.get("patient_encounter") or data.get("encounter_id") or "Order"
         patient = data.get("patient_name") or data.get("customer_name") or data.get("order_patient_name") or "Customer"
-        arguments["subject"] = f"Order confirmation issue - {patient} - {encounter}"
+        arguments["subject"] = f"{patient} - Order confirmation issue - {encounter}"
+    if not arguments.get("customer"):
+        arguments["customer"] = data.get("customer") or data.get("customer_id") or data.get("patient") or data.get("patient_name") or data.get("customer_name")
+    if not arguments.get("raised_by"):
+        arguments["raised_by"] = data.get("created_by_agent") or data.get("created_by") or data.get("owner")
 
     return arguments
 
@@ -619,14 +619,20 @@ def build_order_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
         ("Customer Phone", pick("customer_phone", "phone_number", "phone", "mobile")),
         ("Source System", pick("source_system")),
         ("Event", pick("event")),
+        ("Product", pick("product")),
+        ("Medicine Details", pick("medicine_details")),
+        ("Doctor Details", pick("doctor_details")),
         ("Total Amount", pick("total_amount")),
         ("Advance Paid", pick("total_advance_paid")),
         ("Remaining Amount", pick("remaining_amount")),
         ("Delivery Address", pick("address")),
+        ("Order Summary", pick("order_summary")),
+        ("Status", pick("status") or "Pending"),
+        ("Tag", pick("tag")),
     ]
     for label, value in simple_fields:
         if value not in (None, "", [], {}):
-            lines.append(f"- {label}: {value}")
+            lines.extend(format_issue_detail_line(label, value))
 
     items = pick("items")
     if isinstance(items, list) and items:
@@ -650,11 +656,41 @@ def build_order_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
             else:
                 lines.append(f"  {idx}. {payment}")
 
-    spoken_summary = str(arguments.get("description") or "").strip()
-    if spoken_summary:
-        lines.append(f"- Customer Spoken Issue / Agent Note: {spoken_summary}")
-
     return lines
+
+
+def format_issue_detail_line(label: str, value) -> list[str]:
+    text = str(value or "").strip()
+    if "\n" not in text:
+        return [f"- {label}: {text}"]
+    lines = [f"- {label}:"]
+    lines.extend(f"  - {line.strip()}" for line in text.splitlines() if line.strip())
+    return lines
+
+
+def clean_order_issue_reason(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.upper().startswith("ISSUE DETAILS:"):
+        text = text[len("ISSUE DETAILS:"):].strip()
+    if text.startswith("- Reason:"):
+        text = text[len("- Reason:"):].strip()
+    stop_markers = [
+        "\n\nCompany:",
+        "\nCompany:",
+        " Company:",
+        "\n\nORDER / CUSTOMER DETAILS:",
+        "\nORDER / CUSTOMER DETAILS:",
+        " ORDER / CUSTOMER DETAILS:",
+    ]
+    cut_at = len(text)
+    for marker in stop_markers:
+        idx = text.find(marker)
+        if idx >= 0:
+            cut_at = min(cut_at, idx)
+    text = text[:cut_at].strip()
+    return " ".join(text.split())
 
 
 def build_sales_rejection_issue_detail_lines(data: dict, arguments: dict) -> list[str]:
