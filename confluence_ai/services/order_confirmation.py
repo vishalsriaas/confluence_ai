@@ -745,7 +745,20 @@ def confirm_workflow(workflow_name: str, source: str = "Unknown", extra_notes: s
 	}
 	try:
 		result = _call_named_mcp(_workflow_settings(workflow).confirm_mcp_tool_name, args, workflow=workflow)
-	except Exception:
+	except Exception as exc:
+		workflow.status = "Failed"
+		workflow.confirmation_notes = notes
+		workflow.last_error = f"Order confirmation MCP failed after customer confirmation: {exc}"
+		workflow.mcp_result_json = as_json(
+			{
+				"status": "failed",
+				"action": "confirm_order",
+				"error": str(exc),
+				"customer_confirmation_preserved": True,
+			}
+		)
+		workflow.save(ignore_permissions=True)
+		frappe.db.commit()
 		if source == "WhatsApp":
 			_reply_mcp_failed(workflow, "confirmation")
 		raise
