@@ -62,3 +62,75 @@ class TestAgentPrompts(unittest.TestCase):
         self.assertIn("test_prompter_tool", prompt)
         self.assertIn("user_id", prompt)
         self.assertIn("when the user asks for their user ID or account status", prompt)
+
+    def test_multi_stage_metadata_compilation(self):
+        from confluence_ai.services.livekit import build_voice_metadata
+
+        # 1. Update agent type to Multi-Stage
+        self.agent.agent_type = "Multi-Stage State Machine"
+        self.agent.stage_prompts = []
+        
+        # Append stage prompts
+        self.agent.append("stage_prompts", {
+            "stage_id": "greeting",
+            "stage_name": "Greeting Stage",
+            "is_orchestrator": 0,
+            "system_prompt": "Hello {patient_name}, welcome!"
+        })
+        self.agent.append("stage_prompts", {
+            "stage_id": "orchestrator",
+            "stage_name": "Orchestrator Stage",
+            "is_orchestrator": 1,
+            "system_prompt": "State contract details"
+        })
+        self.agent.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        # 2. Create a mock AI Task and Batch
+        template_name = frappe.db.get_value("AI Task Template", {"template_key": "test_agent_prompts_template_key"}, "name")
+        if not template_name:
+            tmpl = frappe.new_doc("AI Task Template")
+            tmpl.template_name = "Test Template"
+            tmpl.template_key = "test_agent_prompts_template_key"
+            tmpl.objective_prompt = "Test Objective Prompt"
+            tmpl.insert(ignore_permissions=True)
+            template_name = tmpl.name
+
+        batch = frappe.new_doc("AI Task Batch")
+        batch.status = "Running"
+        batch.source_system = "Test System"
+        batch.task_template = template_name
+        batch.save(ignore_permissions=True)
+
+        task = frappe.new_doc("AI Task")
+        task.task_batch = batch.name
+        task.task_template = template_name
+        task.channel = "Voice"
+        task.target_agent = self.agent.name
+        task.context_json = json.dumps({"patient_name": "Rahul"})
+        task.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        # 3. Call build_voice_metadata
+        metadata = build_voice_metadata(task.name, {"patient_name": "Rahul"})
+
+        # 4. Clean up mock task/batch first
+        frappe.delete_doc("AI Task", task.name, force=True)
+        frappe.delete_doc("AI Task Batch", batch.name, force=True)
+        frappe.delete_doc("AI Task Template", template_name, force=True)
+        frappe.db.commit()
+
+        # 5. Assertions
+        self.assertIn("stage_prompts", metadata)
+        stages = metadata["stage_prompts"]
+        self.assertEqual(len(stages), 2)
+        
+        # Verify orchestrator stage
+        orchestrator_stage = next((s for s in stages if s["is_orchestrator"]), None)
+        self.assertIsNotNone(orchestrator_stage)
+        self.assertEqual(orchestrator_stage["system_prompt"], "State contract details")
+        
+        # Verify greeting stage and that templating resolved {patient_name} to Rahul
+        greeting_stage = next((s for s in stages if s["stage_id"] == "greeting"), None)
+        self.assertIsNotNone(greeting_stage)
+        self.assertEqual(greeting_stage["system_prompt"], "Hello Rahul, welcome!")

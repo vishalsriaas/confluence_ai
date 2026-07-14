@@ -15,6 +15,7 @@
   "audio_name",
   "primary_provider",
   "fallback_provider",
+  "agent_type",
   "model_config",
   "access_section",
   "api_identity",
@@ -29,6 +30,7 @@
   "sales_patient_lookup_tool",
   "allowed_tools",
   "allowed_mcp_tools",
+  "stage_prompts",
   "schedule_section",
   "timezone",
   "working_days",
@@ -95,6 +97,13 @@
    "fieldtype": "Select",
    "label": "Fallback Provider",
    "options": "\nGemini\nOpenAI\nCustom"
+  },
+  {
+   "default": "Single-Stage",
+   "fieldname": "agent_type",
+   "fieldtype": "Select",
+   "label": "Agent Type",
+   "options": "Single-Stage\nMulti-Stage State Machine"
   },
   {
    "fieldname": "model_config",
@@ -187,6 +196,13 @@
    "fieldtype": "Table",
    "label": "Allowed MCP Tools",
    "options": "AI Agent MCP Tool"
+  },
+  {
+   "depends_on": "eval:doc.agent_type == 'Multi-Stage State Machine'",
+   "fieldname": "stage_prompts",
+   "fieldtype": "Table",
+   "label": "Stage Prompts",
+   "options": "AI Agent Stage"
   },
   {
    "fieldname": "schedule_section",

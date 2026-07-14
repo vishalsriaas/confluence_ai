@@ -1,0 +1,51 @@
+{
+ "actions": [],
+ "creation": "2026-07-13 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "stage_id",
+  "stage_name",
+  "is_orchestrator",
+  "system_prompt"
+ ],
+ "fields": [
+  {
+   "fieldname": "stage_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Stage ID",
+   "reqd": 1,
+   "columns": 3
+  },
+  {
+   "fieldname": "stage_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Stage Name",
+   "columns": 3
+  },
+  {
+   "default": "0",
+   "fieldname": "is_orchestrator",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Orchestrator",
+   "columns": 1
+  },
+  {
+   "fieldname": "system_prompt",
+   "fieldtype": "Long Text",
+   "label": "System Prompt",
+   "reqd": 1,
+   "columns": 5
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-07-13 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Agent Stage",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "ASC"
+}
