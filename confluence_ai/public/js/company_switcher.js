@@ -139,6 +139,9 @@
         });
         document.querySelectorAll('.confluence-ai-company-switcher').forEach((node) => node.remove());
         renderSelector();
+        document.dispatchEvent(new CustomEvent('confluence-ai-company-changed', {
+          detail: { company: currentCompany }
+        }));
         refreshCurrentView();
       }
     });
@@ -147,10 +150,12 @@
   function workspaceTarget() {
     const route = frappe.get_route();
     const isTenantWorkspace =
+      route.includes('wa-chat-hub') ||
       route.includes('Confluence AI') ||
       route.includes('WhatsApp') ||
       document.body.innerText.includes('Confluence AI Management') ||
-      document.body.innerText.includes('WhatsApp Operations Hub');
+      document.body.innerText.includes('WhatsApp Operations Hub') ||
+      document.body.innerText.includes('WA Chat Hub');
     if (!isTenantWorkspace) return null;
 
     const candidates = [

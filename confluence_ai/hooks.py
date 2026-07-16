@@ -7,7 +7,7 @@ app_license = "MIT"
 
 required_apps = ["frappe"]
 
-app_include_js = []
+app_include_js = ["/assets/confluence_ai/js/company_switcher.js?v=20260716-wa-chat-hub"]
 
 tenant_doctypes = [
     "AI Access Token",
