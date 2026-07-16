@@ -69,7 +69,7 @@ def ensure_defaults() -> None:
 			{
 				"enabled": 1,
 				"is_default": 1,
-				"company": settings.default_company or "Default",
+				"company": settings.default_company or "",
 				"matching_keys": settings.default_company or "",
 				"whatsapp_wait_minutes": settings.default_whatsapp_wait_minutes,
 				"retry_delay_minutes": settings.default_retry_delay_minutes,
@@ -126,7 +126,7 @@ def _merge_settings(settings, row=None) -> frappe._dict:
 	return frappe._dict(
 		{
 			"enabled": value("enabled"),
-			"company": row.get("company") if row else settings.default_company,
+			"company": _resolve_ai_company(row.get("company")) if row else _resolve_ai_company(settings.default_company),
 			"default_company": settings.default_company,
 			"default_whatsapp_wait_minutes": value("default_whatsapp_wait_minutes", "whatsapp_wait_minutes"),
 			"default_retry_delay_minutes": value("default_retry_delay_minutes", "retry_delay_minutes"),
@@ -169,6 +169,19 @@ def _normalize_match_key(value) -> str:
 	return " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
 
 
+def _resolve_ai_company(value) -> str:
+	value = str(value or "").strip()
+	if not value or not frappe.db.exists("DocType", "AI Company"):
+		return ""
+	if frappe.db.exists("AI Company", value):
+		return value
+	company = frappe.db.get_value("AI Company", {"company_name": value}, "name")
+	if company:
+		return company
+	company_key = _normalize_match_key(value).replace(" ", "_")
+	return frappe.db.get_value("AI Company", {"company_key": company_key}, "name") or ""
+
+
 def start_from_event(payload: dict) -> dict:
 	"""Create a new workflow attempt and start Level 1 WhatsApp."""
 	context = _normalize_payload(payload)
@@ -182,7 +195,7 @@ def start_from_event(payload: dict) -> dict:
 	doc.update(
 		{
 			"status": "Draft",
-			"company": context.get("company") or settings.company or settings.default_company,
+			"company": _resolve_ai_company(context.get("company")) or settings.company or _resolve_ai_company(settings.default_company),
 			"external_order_id": context.get("external_order_id"),
 			"idempotency_key": idempotency_key,
 			"patient_encounter": context.get("patient_encounter"),

@@ -4,6 +4,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "company",
   "status",
   "provider",
   "operation",
@@ -17,6 +18,14 @@
   "error_message"
  ],
  "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
+  },
   {
    "default": "Succeeded",
    "fieldname": "status",
@@ -96,7 +105,7 @@
    "provider"
   ]
  ],
- "modified": "2026-06-11 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Provider Event",
  "permissions": [

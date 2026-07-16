@@ -5,14 +5,18 @@ import frappe
 
 def after_install() -> None:
     ensure_roles()
+    ensure_user_company_field()
     ensure_settings()
+    ensure_companies()
     ensure_sales_defaults()
     ensure_order_confirmation_defaults()
 
 
 def after_migrate() -> None:
     ensure_roles()
+    ensure_user_company_field()
     ensure_settings()
+    ensure_companies()
     ensure_sales_defaults()
     ensure_order_confirmation_defaults()
 
@@ -25,6 +29,23 @@ def ensure_order_confirmation_defaults() -> None:
     ensure_defaults()
 
 
+def ensure_companies() -> None:
+    if not frappe.db.exists("DocType", "AI Company"):
+        return
+    for company_key, company_name in {
+        "sriaas": "SRIAAS",
+        "eternity": "ETERNITY",
+        "bharat": "BHARAT",
+    }.items():
+        if frappe.db.exists("AI Company", company_key):
+            continue
+        doc = frappe.new_doc("AI Company")
+        doc.enabled = 1
+        doc.company_key = company_key
+        doc.company_name = company_name
+        doc.insert(ignore_permissions=True)
+
+
 def ensure_roles() -> None:
     for role_name in ("Confluence AI Manager", "Confluence AI Operator"):
         if not frappe.db.exists("Role", role_name):
@@ -32,6 +53,21 @@ def ensure_roles() -> None:
             role.role_name = role_name
             role.desk_access = 1
             role.insert(ignore_permissions=True)
+
+
+def ensure_user_company_field() -> None:
+    if frappe.db.exists("Custom Field", "User-confluence_ai_company"):
+        return
+
+    field = frappe.new_doc("Custom Field")
+    field.dt = "User"
+    field.fieldname = "confluence_ai_company"
+    field.label = "Confluence AI Company"
+    field.fieldtype = "Link"
+    field.options = "AI Company"
+    field.insert_after = "role_profile_name"
+    field.description = "Locks this user to one company for Confluence AI and WhatsApp tenant data."
+    field.insert(ignore_permissions=True)
 
 
 def ensure_settings() -> None:

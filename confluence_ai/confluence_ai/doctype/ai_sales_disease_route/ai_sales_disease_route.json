@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "company",
   "route_name",
   "is_default",
   "priority",
@@ -36,6 +37,14 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
   },
   {
    "fieldname": "route_name",
@@ -166,7 +175,7 @@
    "label": "Notes"
   }
  ],
- "modified": "2026-06-26 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Sales Disease Route",
  "naming_rule": "Expression",

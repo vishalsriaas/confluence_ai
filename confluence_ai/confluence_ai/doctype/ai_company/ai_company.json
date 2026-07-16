@@ -1,0 +1,108 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:company_key",
+ "creation": "2026-07-16 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "company_name",
+  "company_key",
+  "description",
+  "defaults_section",
+  "default_channel_account",
+  "default_livekit_agent",
+  "default_mcp_server",
+  "default_whatsapp_template_map"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "company_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Company Name",
+   "reqd": 1
+  },
+  {
+   "description": "Stable lowercase key, e.g. sriaas, eternity, bharat.",
+   "fieldname": "company_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Company Key",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "defaults_section",
+   "fieldtype": "Section Break",
+   "label": "Default Routing"
+  },
+  {
+   "fieldname": "default_channel_account",
+   "fieldtype": "Link",
+   "label": "Default Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "default_livekit_agent",
+   "fieldtype": "Link",
+   "label": "Default LiveKit Agent",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "default_mcp_server",
+   "fieldtype": "Link",
+   "label": "Default MCP Server",
+   "options": "AI MCP Server"
+  },
+  {
+   "fieldname": "default_whatsapp_template_map",
+   "fieldtype": "Link",
+   "label": "Default WhatsApp Template Map",
+   "options": "AI WhatsApp Template Map"
+  }
+ ],
+ "modified": "2026-07-16 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Company",
+ "naming_rule": "By fieldname",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "company_name",
+ "track_changes": 1
+}

@@ -53,9 +53,11 @@
   },
   {
    "fieldname": "company",
-   "fieldtype": "Data",
+   "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "Company"
+   "label": "Company",
+   "in_standard_filter": 1,
+   "options": "AI Company"
   },
   {
    "fieldname": "external_order_id",
@@ -263,7 +265,7 @@
    "patient_encounter"
   ]
  ],
- "modified": "2026-07-06 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "Order Confirmation Workflow",
  "naming_rule": "Expression",

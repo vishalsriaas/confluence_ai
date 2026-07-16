@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "company",
   "template_key",
   "template_name",
   "task_type",
@@ -25,6 +26,14 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
   },
   {
    "fieldname": "template_key",
@@ -91,7 +100,7 @@
    "label": "Default Timeout Seconds"
   }
  ],
- "modified": "2026-06-11 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Task Template",
  "naming_rule": "Expression",

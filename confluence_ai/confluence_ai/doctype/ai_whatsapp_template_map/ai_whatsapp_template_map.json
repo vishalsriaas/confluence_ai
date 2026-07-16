@@ -9,6 +9,7 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "company",
   "map_name",
   "matching_section",
   "source_system",
@@ -46,6 +47,14 @@
    "read_only": 0,
    "hidden": 0,
    "columns": 0
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
   },
   {
    "fieldname": "map_name",
@@ -350,7 +359,7 @@
  ],
  "idx": 0,
  "links": [],
- "modified": "2026-06-30 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Confluence AI",
  "name": "AI WhatsApp Template Map",

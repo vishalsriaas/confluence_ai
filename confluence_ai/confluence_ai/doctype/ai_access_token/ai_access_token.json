@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "company",
   "token_key",
   "token_name",
   "token_secret",
@@ -23,6 +24,14 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
   },
   {
    "fieldname": "token_key",
@@ -72,7 +81,7 @@
    "read_only": 1
   }
  ],
- "modified": "2026-06-11 00:00:00.000000",
+ "modified": "2026-07-16 00:00:00.000000",
  "module": "Confluence AI",
  "name": "AI Access Token",
  "naming_rule": "Expression",
