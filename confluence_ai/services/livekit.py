@@ -193,29 +193,7 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
             except Exception:
                 pass
 
-    stage_prompts = []
-    if agent and agent.get("agent_type") == "Multi-Stage State Machine":
-        for s in agent.get("stage_prompts") or []:
-            prompt_text = s.system_prompt or ""
-            if prompt_text:
-                if "{{" in prompt_text:
-                    try:
-                        prompt_text = frappe.render_template(prompt_text, payload)
-                    except Exception:
-                        pass
-                if "{" in prompt_text:
-                    try:
-                        prompt_text = SafeFormatter().format(prompt_text, **payload)
-                    except Exception:
-                        pass
-            stage_prompts.append({
-                "stage_id": s.stage_id,
-                "stage_name": s.stage_name,
-                "system_prompt": prompt_text,
-                "is_orchestrator": bool(s.is_orchestrator)
-            })
-
-    metadata = {
+    return {
         "task": task.name,
         "agent": agent_name,
         "audio_name": audio_name,
@@ -223,9 +201,6 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         "personality": personality,
         "context": _voice_metadata_context(payload),
     }
-    if stage_prompts:
-        metadata["stage_prompts"] = stage_prompts
-    return metadata
 
 
 async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
