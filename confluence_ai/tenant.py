@@ -606,6 +606,36 @@ def align_records_by_company(default_company: str = "sriaas", dry_run: int = 0) 
 
 def install_company_switcher_workspace() -> dict:
 	block_name = "Company Switcher"
+	updated = []
+	for workspace_name in frappe.get_all(
+		"Workspace",
+		filters={"label": ["in", ["Confluence AI", "WhatsApp"]]},
+		pluck="name",
+	):
+		workspace = frappe.get_doc("Workspace", workspace_name)
+		before_blocks = len(workspace.custom_blocks or [])
+		workspace.custom_blocks = [
+			row for row in (workspace.custom_blocks or []) if row.custom_block_name != block_name
+		]
+
+		content = json.loads(workspace.content or "[]")
+		content = [
+			item
+			for item in content
+			if item.get("type") != "custom_block"
+			or item.get("data", {}).get("custom_block_name") != block_name
+		]
+		if len(workspace.custom_blocks or []) != before_blocks or workspace.content != json.dumps(content):
+			workspace.content = json.dumps(content)
+			workspace.save(ignore_permissions=True)
+			updated.append(workspace_name)
+
+	if frappe.db.exists("Custom HTML Block", block_name):
+		frappe.db.set_value("Custom HTML Block", block_name, "private", 1, update_modified=False)
+
+	frappe.clear_cache()
+	return {"removed_block": block_name, "workspaces": updated}
+
 	html = """
 <div class="company-switcher-card">
   <div>
