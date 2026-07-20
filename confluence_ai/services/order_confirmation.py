@@ -822,9 +822,11 @@ def create_level_3_issue(workflow_name: str) -> dict:
 
 
 def _create_task(workflow, channel: str, task_template: str, context: dict):
+	company = workflow.company or context.get("company") or ""
 	batch = frappe.new_doc("AI Task Batch")
 	batch.update(
 		{
+			"company": company,
 			"status": "Queued",
 			"source_system": workflow.company or "Order Confirmation",
 			"batch_label": workflow.name,
@@ -839,6 +841,7 @@ def _create_task(workflow, channel: str, task_template: str, context: dict):
 	task = frappe.new_doc("AI Task")
 	task.update(
 		{
+			"company": company,
 			"status": "Queued",
 			"task_batch": batch.name,
 			"task_template": task_template,
