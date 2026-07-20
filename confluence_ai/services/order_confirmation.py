@@ -449,7 +449,7 @@ def queue_voice_call(workflow_name: str) -> dict:
 			task_template=settings.voice_task_template or _template_by_key("order_confirmation_voice"),
 			context=context,
 		)
-		task.status = "Running"
+		task.status = "Queued"
 		task.save(ignore_permissions=True)
 		refresh_batch_counts(task.task_batch)
 		workflow.retry_count = int(workflow.retry_count or 0) + 1
