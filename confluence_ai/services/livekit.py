@@ -5,6 +5,7 @@ import json
 import os
 import re
 import frappe
+from google.protobuf import duration_pb2
 from livekit import api
 from livekit.protocol import room as proto_room
 from livekit.protocol import agent_dispatch as proto_dispatch
@@ -279,15 +280,37 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             sip_trunk_id = account.trunk_id or endpoints.get("sip_trunk_id")
             if not sip_trunk_id:
                 raise ValueError("Missing SIP trunk ID. Configure AI Channel Account.trunk_id or endpoint_paths_json.sip_trunk_id.")
+            ringing_timeout_seconds = int(endpoints.get("ringing_timeout_seconds") or 45)
+            sip_api_timeout_seconds = int(endpoints.get("sip_api_timeout_seconds") or 60)
+
+            record_provider_event(
+                provider=account.provider_type or "LiveKit",
+                operation="outbound_call_requested",
+                status="Succeeded",
+                agent=agent_name,
+                task=task.name,
+                request=payload,
+                response={
+                    "room_name": room_name,
+                    "sip_trunk_id": sip_trunk_id,
+                    "livekit_agent_name": livekit_agent_name,
+                    "timeout_seconds": sip_api_timeout_seconds,
+                },
+            )
 
             sip_req = proto_sip.CreateSIPParticipantRequest(
                 sip_trunk_id=sip_trunk_id,
                 sip_call_to=phone,
                 room_name=room_name,
                 participant_identity=f"sip_{phone.replace('+', '')}",
-                participant_metadata=metadata_str
+                participant_metadata=metadata_str,
+                wait_until_answered=False,
+                ringing_timeout=duration_pb2.Duration(seconds=ringing_timeout_seconds),
             )
-            sip_info = await lkapi.sip.create_sip_participant(sip_req)
+            sip_info = await asyncio.wait_for(
+                lkapi.sip.create_sip_participant(sip_req),
+                timeout=sip_api_timeout_seconds,
+            )
             result_payload["sip_call_sid"] = sip_info.sip_call_id
             result_payload["participant_identity"] = sip_info.participant_identity
 
