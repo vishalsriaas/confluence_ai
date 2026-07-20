@@ -149,6 +149,10 @@ def record_provider_event(
     try:
         if not company and task:
             company = frappe.db.get_value("AI Task", task, "company")
+        if not company and task:
+            task_batch = frappe.db.get_value("AI Task", task, "task_batch")
+            if task_batch:
+                company = frappe.db.get_value("AI Task Batch", task_batch, "company")
         if not company and agent:
             company = frappe.db.get_value("AI Agent", agent, "company")
 
