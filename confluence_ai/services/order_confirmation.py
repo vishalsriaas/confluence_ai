@@ -459,7 +459,7 @@ def queue_voice_call(workflow_name: str) -> dict:
 		workflow.next_call_time = None
 		workflow.save(ignore_permissions=True)
 		frappe.db.commit()
-		enqueue_task_execution(task.name, "Voice")
+		enqueue_task_execution(task.name, "Voice", enqueue_after_commit=False)
 		return {"status": "queued", "workflow": workflow.name, "task": task.name, "attempt": workflow.retry_count}
 
 

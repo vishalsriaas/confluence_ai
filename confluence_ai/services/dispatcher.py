@@ -120,13 +120,13 @@ def _max_concurrency(agent_name: str) -> int:
     return max(1, int(value))
 
 
-def enqueue_task_execution(task_name: str, channel: str) -> None:
+def enqueue_task_execution(task_name: str, channel: str, enqueue_after_commit: bool = True) -> None:
     queue_field, default_queue = CHANNEL_QUEUE_FIELD.get(channel or "API", ("dispatch_queue", "agent_dispatch"))
     frappe.enqueue(
         "confluence_ai.services.executor.execute_task",
         queue=get_queue_name(queue_field, default_queue),
         task_name=task_name,
-        enqueue_after_commit=True,
+        enqueue_after_commit=enqueue_after_commit,
         job_id=f"execute_task_{task_name}",
         deduplicate=True,
     )

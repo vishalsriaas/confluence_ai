@@ -39,6 +39,7 @@ def execute_task(task_name: str) -> dict:
     attempt = frappe.new_doc("AI Task Attempt")
     attempt.update(
         {
+            "company": task.company,
             "status": "Started",
             "task": task.name,
             "task_batch": task.task_batch,
@@ -137,5 +138,4 @@ def run_task_5():
     frappe.db.commit()
     result = execute_task(task_name)
     print(f"Result: {result}")
-
 

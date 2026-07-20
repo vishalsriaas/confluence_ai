@@ -90,6 +90,7 @@ def create_error(
     error_type: str,
     message: str,
     *,
+    company: str | None = None,
     source: str | None = None,
     task: str | None = None,
     task_batch: str | None = None,
@@ -99,9 +100,19 @@ def create_error(
     exc: Exception | None = None,
 ) -> str | None:
     try:
+        if not company and task:
+            company = frappe.db.get_value("AI Task", task, "company")
+        if not company and task_batch:
+            company = frappe.db.get_value("AI Task Batch", task_batch, "company")
+        if not company and agent:
+            company = frappe.db.get_value("AI Agent", agent, "company")
+        if not company and isinstance(payload, dict):
+            company = payload.get("company")
+
         doc = frappe.new_doc("AI Error Log")
         doc.update(
             {
+                "company": company,
                 "status": "Open",
                 "severity": "Error",
                 "error_type": error_type,
@@ -127,6 +138,7 @@ def record_provider_event(
     provider: str,
     operation: str,
     status: str,
+    company: str | None = None,
     agent: str | None = None,
     task: str | None = None,
     request: dict | None = None,
@@ -135,9 +147,15 @@ def record_provider_event(
     external_id: str | None = None,
 ) -> str | None:
     try:
+        if not company and task:
+            company = frappe.db.get_value("AI Task", task, "company")
+        if not company and agent:
+            company = frappe.db.get_value("AI Agent", agent, "company")
+
         doc = frappe.new_doc("AI Provider Event")
         doc.update(
             {
+                "company": company,
                 "status": status,
                 "provider": provider,
                 "operation": operation,

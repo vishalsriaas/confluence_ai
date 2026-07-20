@@ -30,14 +30,20 @@ def create_task_batch(**kwargs) -> dict:
         frappe.throw("Valid task_template is required")
 
     template_doc = frappe.get_doc("AI Task Template", template)
+    company = payload.get("company") or template_doc.get("company") or ""
+    target_agent = payload.get("target_agent")
+    if not company and target_agent:
+        company = frappe.db.get_value("AI Agent", target_agent, "company") or ""
+
     batch = frappe.new_doc("AI Task Batch")
     batch.update(
         {
+            "company": company,
             "status": "Queued",
             "source_system": source_system,
             "idempotency_key": idempotency_key,
             "task_template": template,
-            "target_agent": payload.get("target_agent"),
+            "target_agent": target_agent,
             "target_group": payload.get("target_group"),
             "priority": payload.get("priority") or template_doc.default_priority or "Normal",
             "deadline": payload.get("deadline"),
@@ -52,10 +58,11 @@ def create_task_batch(**kwargs) -> dict:
         record_id = record.get("external_record_id") or record.get("name") or record.get("id") or str(index)
         task.update(
             {
+                "company": company,
                 "status": "Queued",
                 "task_batch": batch.name,
                 "task_template": template,
-                "target_agent": payload.get("target_agent"),
+                "target_agent": target_agent,
                 "target_group": payload.get("target_group"),
                 "channel": record.get("channel") or payload.get("channel") or template_doc.default_channel or "WhatsApp",
                 "priority": record.get("priority") or payload.get("priority") or template_doc.default_priority or "Normal",

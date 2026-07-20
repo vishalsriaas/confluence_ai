@@ -165,6 +165,9 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
     target_agent = sales_selection.get("target_agent") or route.target_agent or None
     agent = frappe.get_doc("AI Agent", target_agent) if target_agent else None
     context = enrich_sales_context(context, route=route, agent=agent)
+    company = _resolve_task_company(route, payload, target_agent)
+    if company:
+        context["company"] = company
 
     # Idempotency: block duplicate tasks on same key
     idem_key = _build_idempotency_key(route, payload)
@@ -176,10 +179,11 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
     # Immediate tasks are always High priority to beat batch tasks in queue
     effective_priority = route.priority or "High"
 
-    batch = _create_batch(route, source_payload=payload, batch_label=None)
+    batch = _create_batch(route, source_payload=payload, batch_label=None, company=company, target_agent=target_agent)
 
     task = frappe.new_doc("AI Task")
     task.update({
+        "company": company,
         "status": "Queued",
         "task_batch": batch.name,
         "task_template": route.task_template,
@@ -219,7 +223,8 @@ def _dispatch_batch(route: "frappe.Document", payload: dict) -> dict:
         )
 
     batch_label = (route.batch_label or "").strip() or None
-    batch = _create_batch(route, source_payload=payload, batch_label=batch_label)
+    batch_company = _resolve_task_company(route, payload, route.target_agent or None)
+    batch = _create_batch(route, source_payload=payload, batch_label=batch_label, company=batch_company)
 
     # Batch tasks default to Normal priority
     effective_priority = route.priority or "Normal"
@@ -232,11 +237,15 @@ def _dispatch_batch(route: "frappe.Document", payload: dict) -> dict:
         target_agent = sales_selection.get("target_agent") or route.target_agent or None
         agent = frappe.get_doc("AI Agent", target_agent) if target_agent else None
         context = enrich_sales_context(context, route=route, agent=agent)
+        company = _resolve_task_company(route, record, target_agent)
+        if company:
+            context["company"] = company
         idem_key = _build_idempotency_key(route, record, batch_prefix=batch.name)
         record_id = record.get("external_record_id") or record.get("id") or str(index)
 
         task = frappe.new_doc("AI Task")
         task.update({
+            "company": company,
             "status": "Queued",
             "task_batch": batch.name,
             "task_template": route.task_template,
@@ -277,15 +286,19 @@ def _create_batch(
     route: "frappe.Document",
     source_payload: dict,
     batch_label: str | None,
+    company: str | None = None,
+    target_agent: str | None = None,
 ) -> "frappe.Document":
     """Create and return a new AI Task Batch linked to this route."""
+    company = company or _resolve_task_company(route, source_payload, target_agent or route.target_agent or None)
     batch = frappe.new_doc("AI Task Batch")
     batch.update({
+        "company": company,
         "status": "Queued",
         "source_system": route.source_system or route.route_name,
         "batch_label": batch_label or None,
         "task_template": route.task_template,
-        "target_agent": route.target_agent or None,
+        "target_agent": target_agent or route.target_agent or None,
         "target_group": route.target_group or None,
         "priority": route.priority or "Normal",
         "callback_url": route.callback_url or None,
@@ -293,6 +306,15 @@ def _create_batch(
     })
     batch.insert(ignore_permissions=True)
     return batch
+
+
+def _resolve_task_company(route: "frappe.Document", payload: dict, target_agent: str | None = None) -> str:
+    company = payload.get("company") or route.get("company") or ""
+    if not company and route.task_template:
+        company = frappe.db.get_value("AI Task Template", route.task_template, "company") or ""
+    if not company and target_agent:
+        company = frappe.db.get_value("AI Agent", target_agent, "company") or ""
+    return company
 
 
 def _build_idempotency_key(
