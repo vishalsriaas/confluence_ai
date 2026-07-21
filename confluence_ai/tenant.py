@@ -67,20 +67,31 @@ def get_current_company(user: str | None = None) -> str:
 	user = user or frappe.session.user
 	if user in {"Guest", None}:
 		return ""
-	assigned_company = get_user_assigned_company(user)
-	if assigned_company:
-		return assigned_company
-	return frappe.defaults.get_user_default(TENANT_DEFAULT_KEY, user=user) or ""
+	allowed_companies = get_user_allowed_companies(user)
+	selected_company = frappe.defaults.get_user_default(TENANT_DEFAULT_KEY, user=user) or ""
+	if allowed_companies:
+		if selected_company in allowed_companies:
+			return selected_company
+		return allowed_companies[0]
+	if not can_access_all_companies(user):
+		return ""
+	return selected_company
 
 
 def set_current_company(company: str | None) -> None:
 	company = (company or "").strip()
-	assigned_company = get_user_assigned_company()
-	if assigned_company:
-		if company and company != assigned_company:
-			frappe.throw("You are assigned to one company only and cannot switch company.")
-		frappe.defaults.set_user_default(TENANT_DEFAULT_KEY, assigned_company)
+	user = frappe.session.user
+	allowed_companies = get_user_allowed_companies()
+	if allowed_companies:
+		if not company:
+			frappe.defaults.set_user_default(TENANT_DEFAULT_KEY, allowed_companies[0])
+			return
+		if company not in allowed_companies:
+			frappe.throw("You are not allowed to access this company.")
+		frappe.defaults.set_user_default(TENANT_DEFAULT_KEY, company)
 		return
+	if not can_access_all_companies(user):
+		frappe.throw("No company is assigned to this user.")
 	if company:
 		if not frappe.db.exists("AI Company", {"name": company, "enabled": 1}):
 			frappe.throw(f"AI Company {company} does not exist or is disabled.")
@@ -91,6 +102,11 @@ def set_current_company(company: str | None) -> None:
 
 def default_company() -> str:
 	return get_current_company()
+
+
+def can_access_all_companies(user: str | None = None) -> bool:
+	user = user or frappe.session.user
+	return user == "Administrator" or "System Manager" in frappe.get_roles(user)
 
 
 def apply_company_to_doc(doc, method: str | None = None) -> None:
@@ -110,12 +126,15 @@ def apply_company_to_blank_doc(doc, method: str | None = None) -> None:
 		return
 	if not getattr(doc.meta, "has_field", lambda fieldname: False)(TENANT_FIELD):
 		return
-	assigned_company = get_user_assigned_company()
-	if assigned_company:
-		if doc.get(TENANT_FIELD) and doc.get(TENANT_FIELD) != assigned_company:
+	allowed_companies = get_user_allowed_companies()
+	if allowed_companies:
+		if doc.get(TENANT_FIELD) and doc.get(TENANT_FIELD) not in allowed_companies:
 			frappe.throw("You cannot change this record to another company.")
-		doc.set(TENANT_FIELD, assigned_company)
-		_validate_tenant_links_for_company(doc, assigned_company)
+		company = doc.get(TENANT_FIELD) or get_current_company()
+		if company not in allowed_companies:
+			company = allowed_companies[0]
+		doc.set(TENANT_FIELD, company)
+		_validate_tenant_links_for_company(doc, company)
 		return
 	if doc.get(TENANT_FIELD):
 		_validate_tenant_links_for_company(doc, doc.get(TENANT_FIELD))
@@ -150,9 +169,15 @@ def _validate_tenant_links_for_company(doc, company: str) -> None:
 
 def company_query_condition(user: str | None = None) -> str:
 	user = user or frappe.session.user
+	allowed_companies = get_user_allowed_companies(user)
 	company = get_current_company(user)
+	if allowed_companies:
+		if company in allowed_companies:
+			return f"`tab{{doctype}}`.`company` = {frappe.db.escape(company)}"
+		escaped_companies = ", ".join(frappe.db.escape(company) for company in allowed_companies)
+		return f"`tab{{doctype}}`.`company` in ({escaped_companies})"
 	if not company:
-		if user != "Administrator" and "System Manager" not in frappe.get_roles(user):
+		if not can_access_all_companies(user):
 			return "1 = 0"
 		return ""
 	escaped = frappe.db.escape(company)
@@ -174,20 +199,21 @@ def _condition_for(doctype: str, user: str | None = None) -> str:
 
 def ai_company_query_condition(user: str | None = None) -> str:
 	user = user or frappe.session.user
-	assigned_company = get_user_assigned_company(user)
-	if assigned_company:
-		return f"`tabAI Company`.`name` = {frappe.db.escape(assigned_company)}"
-	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+	allowed_companies = get_user_allowed_companies(user)
+	if allowed_companies:
+		escaped_companies = ", ".join(frappe.db.escape(company) for company in allowed_companies)
+		return f"`tabAI Company`.`name` in ({escaped_companies})"
+	if can_access_all_companies(user):
 		return ""
 	return "1 = 0"
 
 
 def ai_company_has_permission(doc, user: str | None = None, permission_type: str | None = None) -> bool | None:
 	user = user or frappe.session.user
-	assigned_company = get_user_assigned_company(user)
-	if assigned_company:
-		return permission_type == "read" and doc.name == assigned_company
-	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+	allowed_companies = get_user_allowed_companies(user)
+	if allowed_companies:
+		return permission_type == "read" and doc.name in allowed_companies
+	if can_access_all_companies(user):
 		return True
 	return False
 
@@ -362,9 +388,12 @@ def _validate_order_setting_links(row, company: str) -> None:
 
 
 def protect_order_confirmation_settings(doc, method: str | None = None) -> None:
-	assigned_company = get_user_assigned_company()
-	if not assigned_company:
+	allowed_companies = get_user_allowed_companies()
+	if not allowed_companies:
 		return
+	current_company = get_current_company()
+	if current_company not in allowed_companies:
+		current_company = allowed_companies[0]
 
 	old_values = _existing_order_settings_values()
 	for fieldname in _order_settings_scalar_fields():
@@ -373,11 +402,11 @@ def protect_order_confirmation_settings(doc, method: str | None = None) -> None:
 
 	child_fields = _order_settings_child_fields()
 	existing_rows = _existing_order_company_rows()
-	other_rows = [row for row in existing_rows if row.get(TENANT_FIELD) != assigned_company]
+	other_rows = [row for row in existing_rows if row.get(TENANT_FIELD) != current_company]
 	incoming_own_rows = [
-		row for row in (doc.get("company_settings") or []) if not row.get(TENANT_FIELD) or row.get(TENANT_FIELD) == assigned_company
+		row for row in (doc.get("company_settings") or []) if not row.get(TENANT_FIELD) or row.get(TENANT_FIELD) == current_company
 	]
-	existing_own_rows = [row for row in existing_rows if row.get(TENANT_FIELD) == assigned_company]
+	existing_own_rows = [row for row in existing_rows if row.get(TENANT_FIELD) == current_company]
 
 	if not incoming_own_rows and existing_own_rows:
 		incoming_own_rows = existing_own_rows
@@ -391,17 +420,19 @@ def protect_order_confirmation_settings(doc, method: str | None = None) -> None:
 
 	for row in incoming_own_rows:
 		row_data = {fieldname: row.get(fieldname) for fieldname in child_fields}
-		row_data[TENANT_FIELD] = assigned_company
-		_validate_order_setting_links(row_data, assigned_company)
+		row_data[TENANT_FIELD] = current_company
+		_validate_order_setting_links(row_data, current_company)
 		doc.append("company_settings", row_data)
 
 
 @frappe.whitelist()
 def get_company_options() -> dict:
-	assigned_company = get_user_assigned_company()
+	allowed_companies = get_user_allowed_companies()
 	filters = {"enabled": 1}
-	if assigned_company:
-		filters["name"] = assigned_company
+	if allowed_companies:
+		filters["name"] = ["in", allowed_companies]
+	elif not can_access_all_companies():
+		return {"current_company": "", "companies": [], "locked": True}
 
 	companies = frappe.get_all(
 		"AI Company",
@@ -412,23 +443,52 @@ def get_company_options() -> dict:
 	return {
 		"current_company": get_current_company(),
 		"companies": companies,
-		"locked": bool(assigned_company),
+		"locked": len(allowed_companies) == 1,
 	}
 
 
 @frappe.whitelist()
 def set_user_company(company: str | None = None) -> dict:
 	set_current_company(company)
-	return {"current_company": get_current_company(), "locked": bool(get_user_assigned_company())}
+	return {"current_company": get_current_company(), "locked": len(get_user_allowed_companies()) == 1}
 
 
 def get_user_assigned_company(user: str | None = None) -> str:
+	companies = get_user_allowed_companies(user)
+	return companies[0] if len(companies) == 1 else ""
+
+
+def get_user_allowed_companies(user: str | None = None) -> list[str]:
 	user = user or frappe.session.user
 	if user in {"Guest", None}:
-		return ""
-	if not frappe.db.has_column("User", USER_COMPANY_FIELD):
-		return ""
-	return frappe.db.get_value("User", user, USER_COMPANY_FIELD) or ""
+		return []
+
+	companies = []
+	if frappe.db.has_column("User", USER_COMPANY_FIELD):
+		user_company = frappe.db.get_value("User", user, USER_COMPANY_FIELD)
+		if user_company:
+			companies.append(user_company)
+
+	if frappe.db.exists("DocType", "User Permission"):
+		for row in frappe.get_all(
+			"User Permission",
+			filters={"user": user, "allow": "AI Company"},
+			fields=["for_value"],
+			limit_page_length=100,
+			ignore_permissions=True,
+		):
+			if row.for_value:
+				companies.append(row.for_value)
+
+	enabled = set(
+		frappe.get_all(
+			"AI Company",
+			filters={"name": ["in", companies], "enabled": 1},
+			pluck="name",
+			ignore_permissions=True,
+		)
+	) if companies else set()
+	return [company for company in dict.fromkeys(companies) if company in enabled]
 
 
 def set_user_assigned_company(user: str, company: str) -> dict:
@@ -443,6 +503,54 @@ def set_user_assigned_company(user: str, company: str) -> dict:
 	frappe.clear_cache(user=user)
 	frappe.db.commit()
 	return {"user": user, "company": company}
+
+
+@frappe.whitelist()
+def set_user_allowed_companies(user: str, companies) -> dict:
+	if not can_access_all_companies():
+		frappe.throw("Only System Manager can assign company access.")
+	if not user:
+		frappe.throw("User is required.")
+	if not frappe.db.exists("User", user):
+		frappe.throw(f"User {user} does not exist.")
+	if isinstance(companies, str):
+		text = companies.strip()
+		if text.startswith("["):
+			companies = json.loads(text)
+		else:
+			companies = [company.strip() for company in text.split(",") if company.strip()]
+	if not isinstance(companies, (list, tuple, set)):
+		frappe.throw("Companies must be a list or comma-separated string.")
+	companies = list(dict.fromkeys(companies or []))
+	if not companies:
+		frappe.throw("At least one company is required.")
+	for company in companies:
+		if not frappe.db.exists("AI Company", {"name": company, "enabled": 1}):
+			frappe.throw(f"AI Company {company} does not exist or is disabled.")
+
+	for permission in frappe.get_all(
+		"User Permission",
+		filters={"user": user, "allow": "AI Company"},
+		pluck="name",
+		ignore_permissions=True,
+	):
+		frappe.delete_doc("User Permission", permission, ignore_permissions=True)
+
+	if frappe.db.has_column("User", USER_COMPANY_FIELD):
+		frappe.db.set_value("User", user, USER_COMPANY_FIELD, companies[0] if len(companies) == 1 else "")
+
+	for company in companies:
+		permission = frappe.new_doc("User Permission")
+		permission.user = user
+		permission.allow = "AI Company"
+		permission.for_value = company
+		permission.apply_to_all_doctypes = 1
+		permission.insert(ignore_permissions=True)
+
+	frappe.defaults.set_user_default(TENANT_DEFAULT_KEY, companies[0], user=user)
+	frappe.clear_cache(user=user)
+	frappe.db.commit()
+	return {"user": user, "companies": companies}
 
 
 def _has_tenant_field(doctype: str) -> bool:
