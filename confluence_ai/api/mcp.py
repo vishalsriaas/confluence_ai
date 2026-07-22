@@ -145,23 +145,8 @@ def gateway() -> dict:
     }
 
 
-BUILTIN_TOOL_ALIASES = {
-    "sriaas_check_customer": "lookup_patient_sales_context",
-    "sriaas_get_patient_encounter_data": "lookup_patient_sales_context",
-    "sriaas_send_whatsapp_message": "send_whatsapp_message",
-    "sriaas_create_draft_patient_encounter": "create_draft_patient_encounter_from_sales",
-    "sriaas_update_crm_lead_status": "create_or_update_lead",
-}
-
-
-def _canonical_builtin_tool_name(tool_name: str | None) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(tool_name or "").strip().lower()).strip("_")
-    return BUILTIN_TOOL_ALIASES.get(normalized, tool_name or "")
-
-
 def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | None) -> dict | None:
     """Handle Confluence AI sales tools that need orchestration around configured MCP mappings."""
-    tool_name = _canonical_builtin_tool_name(tool_name)
     if tool_name not in {
         "search_sales_knowledge",
         "lookup_patient_sales_context",
@@ -169,7 +154,6 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "create_sales_followup",
         "log_sales_call_outcome",
         "create_draft_patient_encounter_from_sales",
-        "send_whatsapp_message",
         "send_mapped_whatsapp_template",
         "transfer_live_call",
     }:
@@ -201,10 +185,6 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         return sales_context.log_sales_call_outcome(arguments, task_id=task_id, agent=agent)
     if tool_name == "create_draft_patient_encounter_from_sales":
         return sales_context.create_draft_patient_encounter_from_sales(arguments, task_id=task_id, agent=agent)
-    if tool_name == "send_whatsapp_message":
-        from confluence_ai.services.whatsapp_mcp import send_whatsapp_message
-
-        return send_whatsapp_message(arguments, task_id=task_id)
     if tool_name == "send_mapped_whatsapp_template":
         from confluence_ai.services.whatsapp_templates import send_mapped_whatsapp_template
 
