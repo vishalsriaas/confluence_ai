@@ -1062,7 +1062,6 @@ def _build_patient_encounter_payload(
         "company": _default_company(server_name),
         "sr_encounter_type": "Order",
         "sr_encounter_place": "Online",
-        "sr_encounter_source": arguments.get("encounter_source") or "Vobiz Ai Call",
         "sr_lead_notes": notes[:1000],
         "sr_utm_source": arguments.get("source_system") or "Vobiz Inbound Sales",
         "status": "Open",
@@ -1080,6 +1079,7 @@ def _build_patient_encounter_payload(
         "previous_treatment": arguments.get("previous_treatment"),
         "address": arguments.get("address") or arguments.get("delivery_address"),
         "payment_mode": arguments.get("payment_mode"),
+        "sr_encounter_source": arguments.get("encounter_source"),
     }
     for key, value in extra_map.items():
         if value not in (None, "", [], {}):
