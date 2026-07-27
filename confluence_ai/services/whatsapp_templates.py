@@ -11,6 +11,15 @@ from frappe.utils.password import get_decrypted_password
 from confluence_ai.services.utils import as_json, create_error, parse_json_object, record_provider_event
 
 
+BLOCKED_MESSAGE_PATTERNS = (
+    "treatment details and information",
+    "details and follow-up",
+    "details and information",
+    "regarding the enquiry",
+    "requested details",
+)
+
+
 def send_mapped_whatsapp_template(
     arguments: dict,
     *,
@@ -21,6 +30,7 @@ def send_mapped_whatsapp_template(
     intent = str(arguments.get("intent") or arguments.get("template_intent") or "").strip()
     disease = str(arguments.get("disease_or_concern") or arguments.get("disease") or arguments.get("topic") or "").strip()
     message = str(arguments.get("message") or arguments.get("details") or arguments.get("content") or "").strip()
+    _validate_customer_ready_message(message)
 
     context = _task_context(task_id)
     called_number = _clean_phone(
@@ -76,6 +86,7 @@ def send_mapped_whatsapp_template(
                 "phone": payload.get("to"),
                 "template_name": mapping.template_name,
                 "intent": intent,
+                "message_preview": message[:300],
             },
             response=result,
         )
@@ -91,6 +102,16 @@ def send_mapped_whatsapp_template(
             exc=exc,
         )
         raise
+
+
+def _validate_customer_ready_message(message: str) -> None:
+    normalized = " ".join(str(message or "").lower().split())
+    if not normalized:
+        frappe.throw("WhatsApp message is required. Pass complete customer-facing text in message.")
+    if "[" in message or "]" in message:
+        frappe.throw("WhatsApp message contains placeholder brackets. Replace placeholders with confirmed customer details.")
+    if any(pattern in normalized for pattern in BLOCKED_MESSAGE_PATTERNS):
+        frappe.throw("WhatsApp message is generic. Pass the actual customer-facing information, not a label or placeholder.")
 
 
 def _send_template(mapping, payload: dict) -> dict:

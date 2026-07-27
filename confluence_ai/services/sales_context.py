@@ -1397,6 +1397,8 @@ def _clean_phone(phone: Any) -> str | None:
     if not text:
         return None
     digits = re.sub(r"\D", "", text)
+    if digits.startswith("00") and len(digits) > 10:
+        digits = digits[2:]
     if len(digits) >= 10:
         ten_digit = digits[-10:]
         if len(digits) == 10 or (digits.startswith("0") and len(digits) == 11):

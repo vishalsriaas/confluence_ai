@@ -199,36 +199,59 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
 def get_allowed_tools(task_id: str | None) -> list["frappe.Document"]:
     """Returns the list of allowed MCP tools dynamically scoped to the task's campaign route."""
     if not task_id or not frappe.db.exists("AI Task", task_id):
-        # Fallback: return all enabled tools if not scoped by task
-        tools_list = frappe.get_all("AI MCP Tool", filters={"enabled": 1})
-        return [frappe.get_doc("AI MCP Tool", t.name) for t in tools_list]
-
-    task = frappe.get_doc("AI Task", task_id)
-    if not task.task_batch:
-        tools_list = frappe.get_all("AI MCP Tool", filters={"enabled": 1})
-        return [frappe.get_doc("AI MCP Tool", t.name) for t in tools_list]
-
-    batch = frappe.get_doc("AI Task Batch", task.task_batch)
-    
-    # Resolve Event Route
-    route_id = frappe.db.get_value("AI Event Route", {"route_name": batch.batch_label or batch.source_system})
-    if not route_id:
-        route_id = frappe.db.get_value("AI Event Route", {"route_name": batch.source_system})
-        
-    if not route_id:
-        tools_list = frappe.get_all("AI MCP Tool", filters={"enabled": 1})
-        return [frappe.get_doc("AI MCP Tool", t.name) for t in tools_list]
-
-    route = frappe.get_doc("AI Event Route", route_id)
-    if not route.allowed_tools:
+        # Never expose every tenant/tool when a task cannot be authenticated.
         return []
 
+    task = frappe.get_doc("AI Task", task_id)
+    agent_name = task.assigned_agent or task.target_agent
+    agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
+
+    agent_tool_ids = []
+    if agent:
+        agent_tool_ids = [row.tool for row in (agent.allowed_mcp_tools or []) if row.tool]
+        if not agent_tool_ids and agent.allowed_tools:
+            tool_names = [name.strip() for name in agent.allowed_tools.split(",") if name.strip()]
+            if tool_names:
+                agent_tool_ids = frappe.get_all(
+                    "AI MCP Tool",
+                    filters={"enabled": 1, "tool_name": ["in", tool_names]},
+                    pluck="name",
+                )
+
+    route = None
+    if task.task_batch:
+        batch = frappe.get_doc("AI Task Batch", task.task_batch)
+        route_id = frappe.db.get_value("AI Event Route", {"route_name": batch.batch_label or batch.source_system})
+        if not route_id:
+            route_id = frappe.db.get_value("AI Event Route", {"route_name": batch.source_system})
+        if route_id:
+            route = frappe.get_doc("AI Event Route", route_id)
+
+    # Inbound batches use a generated label, so resolve their route from the
+    # stable task template + target agent instead of falling back to all tools.
+    if not route and task.task_template:
+        filters = {"enabled": 1, "task_template": task.task_template}
+        if agent_name:
+            filters["target_agent"] = agent_name
+        route_id = frappe.db.get_value("AI Event Route", filters, "name")
+        if route_id:
+            route = frappe.get_doc("AI Event Route", route_id)
+
+    if route:
+        route_tool_ids = [row.tool for row in (route.allowed_tools or []) if row.tool]
+        if not route_tool_ids:
+            return []
+        allowed_ids = [tool_id for tool_id in route_tool_ids if not agent_tool_ids or tool_id in agent_tool_ids]
+    else:
+        allowed_ids = agent_tool_ids
+
     tools = []
-    for r_tool in route.allowed_tools:
-        if frappe.db.exists("AI MCP Tool", r_tool.tool):
-            t_doc = frappe.get_doc("AI MCP Tool", r_tool.tool)
-            if t_doc.enabled:
-                tools.append(t_doc)
+    for tool_id in allowed_ids:
+        if not frappe.db.exists("AI MCP Tool", tool_id):
+            continue
+        tool = frappe.get_doc("AI MCP Tool", tool_id)
+        if tool.enabled:
+            tools.append(tool)
     return tools
 
 
