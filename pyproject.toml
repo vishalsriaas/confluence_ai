@@ -23,6 +23,9 @@ include-package-data = true
 where = ["."]
 include = ["confluence_ai*"]
 
+[tool.setuptools.package-data]
+confluence_ai = ["data/*.csv"]
+
 [tool.bench.frappe-dependencies]
 frappe = ">=15.0.0,<17.0.0"
 

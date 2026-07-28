@@ -6,6 +6,6 @@ Author-email: SRIAAS <webdevelopersriaas@gmail.com>
 License: MIT
 Requires-Python: >=3.10
 License-File: LICENSE
-License-File: LICENSE:Zone.Identifier
 Requires-Dist: requests
+Requires-Dist: livekit-api
 Dynamic: license-file

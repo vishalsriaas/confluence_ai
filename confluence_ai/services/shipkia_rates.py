@@ -1,0 +1,540 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import math
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+
+RATE_CARD_VERSION = "Rate Card 10 - June"
+RATE_CARD_SOURCE_FILENAME = "Latest June Shipkia Default rate card - Rate Card 10 (22).csv"
+RATE_CARD_PATH = (
+    Path(__file__).resolve().parents[1] / "data" / "shipkia_rate_card_10_june.csv"
+)
+GST_RATE = Decimal("18")
+VOLUMETRIC_DIVISOR = Decimal("5000")
+ZONES = ("A", "B", "C", "D", "E", "F")
+
+
+@dataclass(frozen=True)
+class RateRow:
+    courier_partner: str
+    service: str
+    movement: str
+    min_weight: str
+    max_weight_g: Decimal
+    zone_prices: dict[str, Decimal]
+    cod_minimum: Decimal
+    cod_percentage: Decimal
+    dph_divisor: Decimal
+
+    @property
+    def is_additional(self) -> bool:
+        return self.min_weight == "+"
+
+    @property
+    def min_weight_g(self) -> Decimal:
+        return Decimal("0") if self.is_additional else Decimal(self.min_weight)
+
+
+def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Calculate customer-facing ShipKia rates deterministically from Rate Card 10."""
+    try:
+        dead_weight_kg = _dead_weight_kg(arguments)
+        length, width, height = _dimensions(arguments)
+        payment_type = _payment_type(arguments)
+        movement = _movement(arguments)
+        zone = _zone(arguments)
+        order_value = _optional_decimal(arguments.get("order_value"), "order_value")
+    except ValueError as exc:
+        return {"status": "validation_error", "eligible_rates": [], "message": str(exc)}
+
+    if payment_type == "COD" and order_value is not None and order_value < 0:
+        return {
+            "status": "validation_error",
+            "eligible_rates": [],
+            "message": "COD order value cannot be negative.",
+        }
+
+    volumetric_weight_kg = (
+        (length * width * height / VOLUMETRIC_DIVISOR)
+        if length is not None and width is not None and height is not None
+        else None
+    )
+    chargeable_weight_kg = max(
+        dead_weight_kg,
+        volumetric_weight_kg if volumetric_weight_kg is not None else Decimal("0"),
+    )
+    chargeable_weight_g = (chargeable_weight_kg * Decimal("1000")).to_integral_value(
+        rounding=ROUND_CEILING
+    )
+    if chargeable_weight_g <= 0:
+        return {
+            "status": "validation_error",
+            "eligible_rates": [],
+            "message": "Shipment weight must be greater than zero.",
+        }
+
+    all_rows = load_rate_card()
+    requested_courier = str(arguments.get("courier") or "").strip()
+    requested_service = str(arguments.get("service") or "").strip()
+    requested_transport_mode = str(arguments.get("mode") or "").strip()
+    candidates = _service_rates(
+        all_rows,
+        movement=movement,
+        chargeable_weight_g=chargeable_weight_g,
+        payment_type=payment_type,
+        order_value=order_value,
+        zone=zone,
+        courier_filter=requested_courier,
+        service_filter=requested_service,
+        transport_mode=requested_transport_mode,
+    )
+
+    requested_selection_unavailable = bool(
+        (requested_courier or requested_service or requested_transport_mode) and not candidates
+    )
+    candidates.sort(key=_sort_key)
+    eligible_rates = candidates[:3]
+    card = rate_card_metadata()
+    response: dict[str, Any] = {
+        "status": (
+            "requested_service_unavailable"
+            if requested_selection_unavailable
+            else ("success" if eligible_rates else "no_eligible_rate")
+        ),
+        "rate_card": card,
+        "movement_type": movement,
+        "payment_type": payment_type,
+        "dead_weight_kg": _number(dead_weight_kg, 3),
+        "volumetric_weight_kg": (
+            _number(volumetric_weight_kg, 3) if volumetric_weight_kg is not None else None
+        ),
+        "chargeable_weight_kg": _number(chargeable_weight_kg, 3),
+        "chargeable_weight_g": int(chargeable_weight_g),
+        "dimensions_used": volumetric_weight_kg is not None,
+        "zone": zone,
+        "zone_required": zone is None and not requested_selection_unavailable,
+        "cod_order_value_required": payment_type == "COD" and order_value is None,
+        "requested_selection": {
+            "courier": requested_courier or None,
+            "service": requested_service or None,
+            "transport_mode": requested_transport_mode or None,
+        },
+        "requested_service_unavailable": requested_selection_unavailable,
+        "preferred_courier_unavailable": bool(requested_courier and not candidates),
+        "exact_service_unavailable": bool(requested_service and not candidates),
+        "transit_time_available": False,
+        "transit_time_note": (
+            "The active rate card has prices but no delivery-time or SLA data. Do not describe "
+            "an Air or Express-labelled option as the fastest or promise a delivery time."
+        ),
+        "eligible_rates": eligible_rates,
+    }
+
+    if requested_selection_unavailable:
+        response["available_services_for_requested_courier"] = _configured_services(
+            all_rows,
+            movement=movement,
+            courier_filter=requested_courier,
+        )
+        response["available_services_for_requested_service"] = _configured_services(
+            all_rows,
+            movement=movement,
+            service_filter=requested_service,
+        )
+        response["available_services_for_requested_mode"] = _configured_services(
+            all_rows,
+            movement=movement,
+            transport_mode=requested_transport_mode,
+        )
+        requested_label = " + ".join(
+            value
+            for value in (requested_courier, requested_service, requested_transport_mode)
+            if value
+        )
+        response["message"] = (
+            f"{requested_label} does not have a matching non-zero rate in the active ShipKia "
+            "rate card for these details. Tell the customer that the requested service is not "
+            "available in the current rate card. Do not rename a Standard service as Express, "
+            "and do not quote unrelated alternatives unless the customer asks for them."
+        )
+    elif not eligible_rates:
+        response["message"] = (
+            "No non-zero rate is configured for this movement, weight and courier selection. "
+            "Do not invent a rate."
+        )
+    elif zone is None:
+        response["message"] = (
+            "The rate card does not map pincodes to zones. Give only a qualified starting price "
+            "from the returned Zone A-F amounts and say the exact price depends on the approved "
+            "zone. Do not ask the customer to identify an internal zone and do not invent one."
+        )
+    elif response["cod_order_value_required"]:
+        response["message"] = (
+            "Present the shipping charge and COD formula, then ask only for the COD order value."
+        )
+    else:
+        response["message"] = (
+            "Present up to these three lowest-priced eligible options. Amounts include 18% GST "
+            "only where a total is returned."
+        )
+
+    if _is_speed_request(requested_transport_mode) and not requested_selection_unavailable:
+        response["speed_selection_note"] = (
+            "These options come only from active rate-card service names containing Air or "
+            "Express. They are not verified as fastest because the rate card has no transit SLA."
+        )
+
+    if volumetric_weight_kg is None:
+        response["weight_note"] = (
+            "Calculated using dead weight because dimensions were not supplied; dimensions can "
+            "change the final chargeable weight."
+        )
+    return response
+
+
+@lru_cache(maxsize=1)
+def load_rate_card() -> tuple[RateRow, ...]:
+    if not RATE_CARD_PATH.exists():
+        raise FileNotFoundError(f"ShipKia rate card is missing: {RATE_CARD_PATH}")
+
+    rows: list[RateRow] = []
+    with RATE_CARD_PATH.open("r", encoding="utf-8-sig", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            cleaned = {str(key or "").strip(): str(value or "").strip() for key, value in raw.items()}
+            rows.append(
+                RateRow(
+                    courier_partner=cleaned["Courier Partner"],
+                    service=cleaned["Couriers"],
+                    movement=cleaned["Mode"].upper(),
+                    min_weight=cleaned["Min weight"],
+                    max_weight_g=_decimal(cleaned["Max weight"], "Max weight"),
+                    zone_prices={
+                        zone: _decimal(cleaned[f"Zone {zone}"], f"Zone {zone}") for zone in ZONES
+                    },
+                    cod_minimum=_decimal(cleaned["COD Amount"], "COD Amount"),
+                    cod_percentage=_decimal(cleaned["COD Percentage"], "COD Percentage"),
+                    dph_divisor=_decimal(cleaned.get("DPH Divisor", "0"), "DPH Divisor"),
+                )
+            )
+    if not rows:
+        raise ValueError("ShipKia rate card contains no pricing rows.")
+    return tuple(rows)
+
+
+@lru_cache(maxsize=1)
+def rate_card_metadata() -> dict[str, Any]:
+    content = RATE_CARD_PATH.read_bytes()
+    rows = load_rate_card()
+    return {
+        "version": RATE_CARD_VERSION,
+        "source_filename": RATE_CARD_SOURCE_FILENAME,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "row_count": len(rows),
+        "gst_rate": 18,
+    }
+
+
+def _service_rates(
+    rows: tuple[RateRow, ...],
+    *,
+    movement: str,
+    chargeable_weight_g: Decimal,
+    payment_type: str,
+    order_value: Decimal | None,
+    zone: str | None,
+    courier_filter: str = "",
+    service_filter: str = "",
+    transport_mode: str = "",
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[RateRow]] = {}
+    for row in rows:
+        if row.movement != movement:
+            continue
+        if courier_filter and not _matches_courier(row, courier_filter):
+            continue
+        if service_filter and not _matches_service(row, service_filter):
+            continue
+        if transport_mode and not _matches_transport_mode(row, transport_mode):
+            continue
+        grouped.setdefault((row.courier_partner, row.service), []).append(row)
+
+    rates = []
+    for service_rows in grouped.values():
+        calculated = _calculate_service(
+            service_rows,
+            chargeable_weight_g=chargeable_weight_g,
+            payment_type=payment_type,
+            order_value=order_value,
+            zone=zone,
+        )
+        if calculated:
+            rates.append(calculated)
+    return rates
+
+
+def _configured_services(
+    rows: tuple[RateRow, ...],
+    *,
+    movement: str,
+    courier_filter: str = "",
+    service_filter: str = "",
+    transport_mode: str = "",
+) -> list[str]:
+    services = {
+        row.service
+        for row in rows
+        if row.movement == movement
+        and (not courier_filter or _matches_courier(row, courier_filter))
+        and (not service_filter or _matches_service(row, service_filter))
+        and (not transport_mode or _matches_transport_mode(row, transport_mode))
+    }
+    return sorted(services)
+
+
+def _calculate_service(
+    rows: list[RateRow],
+    *,
+    chargeable_weight_g: Decimal,
+    payment_type: str,
+    order_value: Decimal | None,
+    zone: str | None,
+) -> dict[str, Any] | None:
+    base_rows = [row for row in rows if not row.is_additional]
+    additional_rows = [row for row in rows if row.is_additional]
+    selected_row: RateRow | None = None
+    additional_row: RateRow | None = None
+    additional_units = 0
+
+    base_zero = sorted(
+        (row for row in base_rows if row.min_weight_g == 0),
+        key=lambda row: row.max_weight_g,
+    )
+    if additional_rows and base_zero:
+        selected_row = base_zero[0]
+        additional_row = sorted(additional_rows, key=lambda row: row.max_weight_g)[0]
+        if chargeable_weight_g > selected_row.max_weight_g:
+            additional_units = math.ceil(
+                (chargeable_weight_g - selected_row.max_weight_g) / additional_row.max_weight_g
+            )
+    else:
+        containing = [
+            row
+            for row in base_rows
+            if row.min_weight_g <= chargeable_weight_g <= row.max_weight_g
+        ]
+        if containing:
+            selected_row = min(containing, key=lambda row: row.max_weight_g)
+
+    if selected_row is None:
+        return None
+
+    zones = (zone,) if zone else ZONES
+    breakdowns: dict[str, dict[str, Any]] = {}
+    for selected_zone in zones:
+        shipping = selected_row.zone_prices[selected_zone]
+        if additional_units and additional_row:
+            shipping += Decimal(additional_units) * additional_row.zone_prices[selected_zone]
+        if shipping == 0:
+            continue
+        breakdowns[selected_zone] = _amount_breakdown(
+            shipping=shipping,
+            payment_type=payment_type,
+            order_value=order_value,
+            cod_minimum=selected_row.cod_minimum,
+            cod_percentage=selected_row.cod_percentage,
+        )
+
+    if not breakdowns:
+        return None
+
+    result: dict[str, Any] = {
+        "courier_partner": selected_row.courier_partner,
+        "service": selected_row.service,
+        "pricing_structure": "base_plus_additional" if additional_row else "explicit_weight_band",
+        "base_weight_g": int(selected_row.max_weight_g),
+        "additional_weight_unit_g": int(additional_row.max_weight_g) if additional_row else None,
+        "additional_units": additional_units,
+        "cod_minimum": _money(selected_row.cod_minimum),
+        "cod_percentage": _number(selected_row.cod_percentage, 3),
+        "dph_divisor_metadata": _number(selected_row.dph_divisor, 3),
+        "dph_included_in_charge": False,
+    }
+    if zone:
+        result.update(breakdowns[zone])
+    else:
+        result["zone_breakdowns"] = breakdowns
+    return result
+
+
+def _amount_breakdown(
+    *,
+    shipping: Decimal,
+    payment_type: str,
+    order_value: Decimal | None,
+    cod_minimum: Decimal,
+    cod_percentage: Decimal,
+) -> dict[str, Any]:
+    if payment_type == "COD" and order_value is None:
+        return {
+            "shipping_charge": _money(shipping),
+            "cod_charge": None,
+            "cod_formula": f"max({_money(cod_minimum)}, order value x {_number(cod_percentage, 3)}%)",
+            "gst": None,
+            "total": None,
+        }
+
+    cod_charge = Decimal("0")
+    if payment_type == "COD":
+        percentage_charge = (order_value or Decimal("0")) * cod_percentage / Decimal("100")
+        cod_charge = max(cod_minimum, percentage_charge)
+    subtotal = shipping + cod_charge
+    gst = subtotal * GST_RATE / Decimal("100")
+    return {
+        "shipping_charge": _money(shipping),
+        "cod_charge": _money(cod_charge),
+        "gst": _money(gst),
+        "total": _money(subtotal + gst),
+    }
+
+
+def _dead_weight_kg(arguments: dict[str, Any]) -> Decimal:
+    if arguments.get("dead_weight_g") not in (None, ""):
+        value = _decimal(arguments["dead_weight_g"], "dead_weight_g") / Decimal("1000")
+    else:
+        raw = arguments.get("dead_weight_kg", arguments.get("dead_weight"))
+        value = _decimal(raw, "dead_weight")
+        unit = str(arguments.get("weight_unit") or "kg").strip().lower()
+        if unit in {"g", "gram", "grams"}:
+            value /= Decimal("1000")
+        elif unit not in {"kg", "kilogram", "kilograms"}:
+            raise ValueError("weight_unit must be kg or g.")
+    if value <= 0:
+        raise ValueError("A dead weight greater than zero is required.")
+    return value
+
+
+def _dimensions(arguments: dict[str, Any]) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+    values = [arguments.get(key) for key in ("length", "width", "height")]
+    provided = [value not in (None, "") for value in values]
+    if any(provided) and not all(provided):
+        raise ValueError("Provide length, width and height together, in centimetres.")
+    if not any(provided):
+        return None, None, None
+    dimensions = tuple(_decimal(value, "dimension") for value in values)
+    if any(value <= 0 for value in dimensions):
+        raise ValueError("Package dimensions must be greater than zero.")
+    return dimensions
+
+
+def _payment_type(arguments: dict[str, Any]) -> str:
+    value = str(arguments.get("payment_type") or "").strip().upper()
+    if value in {"PREPAID", "PRE-PAID", "PAID"}:
+        return "Prepaid"
+    if value in {"COD", "CASH ON DELIVERY"}:
+        return "COD"
+    raise ValueError("payment_type must be Prepaid or COD.")
+
+
+def _movement(arguments: dict[str, Any]) -> str:
+    value = str(arguments.get("movement_type") or "FWD").strip().upper()
+    mapping = {
+        "FWD": "FWD",
+        "FORWARD": "FWD",
+        "FORWARD SHIPPING": "FWD",
+        "RTO": "RTO",
+        "RETURN TO ORIGIN": "RTO",
+        "DTO": "DTO",
+        "REVERSE": "DTO",
+        "REVERSE SHIPPING": "DTO",
+    }
+    if value not in mapping:
+        raise ValueError("movement_type must be Forward, RTO or DTO.")
+    return mapping[value]
+
+
+def _zone(arguments: dict[str, Any]) -> str | None:
+    value = str(arguments.get("zone") or arguments.get("shipping_zone") or "").strip().upper()
+    value = value.removeprefix("ZONE").strip()
+    if not value:
+        return None
+    if value not in ZONES:
+        raise ValueError("zone must be A, B, C, D, E or F.")
+    return value
+
+
+def _matches_courier(row: RateRow, requested: str) -> bool:
+    needle = _normal_text(requested)
+    return needle in _normal_text(row.courier_partner) or needle in _normal_text(row.service)
+
+
+def _matches_service(row: RateRow, requested: str) -> bool:
+    """Match only an exact service label from the active rate card."""
+    return _normal_text(row.service) == _normal_text(requested)
+
+
+def _matches_transport_mode(row: RateRow, requested: str) -> bool:
+    mode = _normal_text(requested)
+    service = _normal_text(row.service)
+    if mode in {"surface", "ground"}:
+        return "surface" in service
+    if mode in {"air", "air express"}:
+        return "air" in service
+    if mode in {"express", "express delivery"}:
+        return "express" in service
+    if _is_speed_request(mode):
+        return "air" in service or "express" in service
+    return mode in service
+
+
+def _is_speed_request(requested: str) -> bool:
+    return _normal_text(requested) in {
+        "fast",
+        "fast delivery",
+        "fastest",
+        "fastest delivery",
+        "priority",
+        "priority delivery",
+    }
+
+
+def _sort_key(rate: dict[str, Any]) -> tuple[Decimal, str]:
+    if "shipping_charge" in rate:
+        amount = Decimal(str(rate.get("total") or rate["shipping_charge"]))
+    else:
+        zone_values = [
+            Decimal(str(breakdown.get("total") or breakdown["shipping_charge"]))
+            for breakdown in rate["zone_breakdowns"].values()
+        ]
+        amount = sum(zone_values, Decimal("0")) / Decimal(len(zone_values))
+    return amount, str(rate["service"])
+
+
+def _normal_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _optional_decimal(value: Any, label: str) -> Decimal | None:
+    return None if value in (None, "") else _decimal(value, label)
+
+
+def _decimal(value: Any, label: str) -> Decimal:
+    try:
+        return Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{label} must be a valid number.") from None
+
+
+def _money(value: Decimal) -> float:
+    return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _number(value: Decimal, places: int) -> float:
+    quantum = Decimal("1").scaleb(-places)
+    return float(value.quantize(quantum, rounding=ROUND_HALF_UP))

@@ -147,6 +147,12 @@ def gateway() -> dict:
 
 def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | None) -> dict | None:
     """Handle Confluence AI sales tools that need orchestration around configured MCP mappings."""
+    from confluence_ai.services.shipkia_voice import execute_shipkia_tool
+
+    shipkia_result = execute_shipkia_tool(tool_name, arguments, task_id=task_id)
+    if shipkia_result is not None:
+        return shipkia_result
+
     if tool_name not in {
         "search_sales_knowledge",
         "lookup_patient_sales_context",

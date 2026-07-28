@@ -16,6 +16,10 @@ from confluence_ai.services.utils import as_json, create_error, parse_json_objec
 
 import string
 
+SHIPKIA_VOICE_AGENT = "agent-445"
+SHIPKIA_LIVEKIT_AGENT_NAME = "shipkia-voice-sales"
+
+
 class SafeFormatter(string.Formatter):
     def get_value(self, key, args, kwargs):
         if isinstance(key, str):
@@ -86,6 +90,71 @@ def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
 
 def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
+
+
+def _dispatch_summary(dispatches) -> list[dict[str, str]]:
+    summary = []
+    for dispatch in dispatches:
+        if isinstance(dispatch, dict):
+            state = dispatch.get("state") or {}
+            job = state.get("job") or {} if isinstance(state, dict) else {}
+            job_id = job.get("id") or job.get("job_id") if isinstance(job, dict) else ""
+            dispatch_id = dispatch.get("id", "")
+            agent_name = dispatch.get("agent_name", "")
+        else:
+            state = getattr(dispatch, "state", None)
+            job = getattr(state, "job", None) if state is not None else None
+            job_id = getattr(job, "id", "") or getattr(job, "job_id", "") if job else ""
+            dispatch_id = getattr(dispatch, "id", "")
+            agent_name = getattr(dispatch, "agent_name", "")
+        summary.append(
+            {
+                "id": str(dispatch_id or ""),
+                "agent_name": str(agent_name or ""),
+                "assigned_job": str(job_id or ""),
+            }
+        )
+    return summary
+
+
+def _removable_automatic_dispatch_ids(dispatches) -> list[str]:
+    return [
+        dispatch["id"]
+        for dispatch in _dispatch_summary(dispatches)
+        if dispatch["id"] and not dispatch["agent_name"] and not dispatch["assigned_job"]
+    ]
+
+
+def _shipkia_dispatch_conflict(
+    dispatches,
+    *,
+    expected_dispatch_id: str | None = None,
+) -> str | None:
+    summary = _dispatch_summary(dispatches)
+    if expected_dispatch_id is None:
+        return (
+            f"existing dispatches detected: {summary}"
+            if summary
+            else None
+        )
+    if len(summary) != 1:
+        return f"expected one dispatch but found {len(summary)}: {summary}"
+    dispatch = summary[0]
+    if dispatch["id"] != expected_dispatch_id:
+        return f"unexpected dispatch ID: {summary}"
+    if dispatch["agent_name"] != SHIPKIA_LIVEKIT_AGENT_NAME:
+        return f"unexpected dispatch agent: {summary}"
+    return None
+
+
+async def _delete_room_after_dispatch_conflict(lkapi: api.LiveKitAPI, room_name: str) -> None:
+    try:
+        await lkapi.room.delete_room(proto_room.DeleteRoomRequest(room=room_name))
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            "ShipKia Duplicate Dispatch Room Cleanup Failed",
+        )
 
 
 def _normalize_phone(value: object) -> str | None:
@@ -256,6 +325,10 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
     metadata = build_voice_metadata(task.name, payload)
     metadata_str = json.dumps(metadata)
     livekit_agent_name = _livekit_dispatch_name(agent, endpoints, payload)
+    enforce_single_shipkia_dispatch = (
+        agent_name == SHIPKIA_VOICE_AGENT
+        and livekit_agent_name == SHIPKIA_LIVEKIT_AGENT_NAME
+    )
 
     lkapi = api.LiveKitAPI(url, api_key, api_secret)
     try:
@@ -273,6 +346,32 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             "room_name": room_info.name,
             "metadata": room_info.metadata,
         }
+
+        if enforce_single_shipkia_dispatch:
+            existing_dispatches = await lkapi.agent_dispatch.list_dispatch(room_name)
+            removable_dispatch_ids = _removable_automatic_dispatch_ids(existing_dispatches)
+            unsafe_dispatches = [
+                dispatch
+                for dispatch in _dispatch_summary(existing_dispatches)
+                if dispatch["id"] not in removable_dispatch_ids
+            ]
+            if unsafe_dispatches:
+                await _delete_room_after_dispatch_conflict(lkapi, room_name)
+                raise ValueError(
+                    "ShipKia duplicate-dispatch guard blocked this call because an existing "
+                    f"dispatch was already assigned or named: {unsafe_dispatches}."
+                )
+            for dispatch_id in removable_dispatch_ids:
+                await lkapi.agent_dispatch.delete_dispatch(dispatch_id, room_name)
+            remaining_dispatches = await lkapi.agent_dispatch.list_dispatch(room_name)
+            conflict = _shipkia_dispatch_conflict(remaining_dispatches)
+            if conflict:
+                await _delete_room_after_dispatch_conflict(lkapi, room_name)
+                raise ValueError(
+                    "ShipKia duplicate-dispatch guard blocked this call because the automatic "
+                    f"dispatch could not be removed: {conflict}."
+                )
+            result_payload["removed_automatic_dispatch_count"] = len(removable_dispatch_ids)
 
         # 2. If it's a SIP call, place the participant before dispatching the agent.
         if operation == "outbound_call":
@@ -323,6 +422,20 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         dispatch_info = await lkapi.agent_dispatch.create_dispatch(dispatch_req)
         result_payload["dispatch_id"] = dispatch_info.id
         result_payload["livekit_agent_name"] = livekit_agent_name
+
+        if enforce_single_shipkia_dispatch:
+            active_dispatches = await lkapi.agent_dispatch.list_dispatch(room_name)
+            conflict = _shipkia_dispatch_conflict(
+                active_dispatches,
+                expected_dispatch_id=dispatch_info.id,
+            )
+            if conflict:
+                await _delete_room_after_dispatch_conflict(lkapi, room_name)
+                raise ValueError(
+                    "ShipKia duplicate-dispatch guard closed this call because "
+                    f"{conflict}. Only shipkia-voice-sales may join the room."
+                )
+            result_payload["dispatch_count"] = 1
 
         record_provider_event(
             provider=account.provider_type or "LiveKit",
