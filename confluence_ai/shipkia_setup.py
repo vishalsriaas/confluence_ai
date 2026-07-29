@@ -9,6 +9,7 @@ from pathlib import Path
 import frappe
 
 from confluence_ai.services.shipkia_voice import SHIPKIA_AGENT, SHIPKIA_COMPANY
+from confluence_ai.prompts.shipkia_voice import APPROVED_SALES_BENEFITS, PROMPT_REGISTRY
 
 
 SHIPKIA_CHANNEL = "channel-446"
@@ -44,8 +45,10 @@ TOOL_SPECS = {
             ("shipkia_pickup_pincode", "string", False, "Primary pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Customer delivery regions or zones."),
             ("shipkia_cod_required", "boolean", False, "Whether COD shipping is required."),
+            ("shipkia_current_provider_type", "string", False, "Direct Courier, Shipping Aggregator, Own Arrangement, Other or Not Shared."),
             ("shipkia_current_courier_partner", "string", False, "Current courier or aggregator."),
             ("shipkia_current_shipping_rate", "number", False, "Current shipping rate explicitly stated by customer."),
+            ("shipkia_current_rate_basis", "string", False, "Confirmed comparable weight, payment type, inclusions and route or zone."),
             ("shipkia_main_pain_point", "string", False, "High Rates, Pickup Issue, RTO Issue, Tracking Issue, COD Remittance, Support Issue, Integration Issue or Other."),
             ("shipkia_interested_services", "string", False, "Confirmed services the customer is interested in."),
             ("shipkia_chatbot_status", "string", False, "Not Started, In Progress, Qualified, Not Qualified, Converted or Human Required."),
@@ -68,8 +71,10 @@ TOOL_SPECS = {
             ("shipkia_pickup_pincode", "string", False, "Confirmed pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Confirmed delivery regions."),
             ("shipkia_cod_required", "boolean", False, "Confirmed COD requirement."),
+            ("shipkia_current_provider_type", "string", False, "Confirmed provider arrangement type."),
             ("shipkia_current_courier_partner", "string", False, "Confirmed current courier."),
             ("shipkia_current_shipping_rate", "number", False, "Confirmed current rate."),
+            ("shipkia_current_rate_basis", "string", False, "Confirmed comparable rate basis."),
             ("shipkia_main_pain_point", "string", False, "Confirmed main shipping problem."),
             ("shipkia_interested_services", "string", False, "Confirmed services of interest."),
             ("shipkia_chat_summary", "string", False, "Short progress summary."),
@@ -239,7 +244,8 @@ def _configure_agent(tool_docnames: list[str]) -> None:
     agent.primary_provider = "Gemini"
     agent.audio_name = "Puck"
     agent.enable_sales_context = 0
-    agent.system_prompt = _with_managed_shipkia_prompt(agent.system_prompt or "")
+    # Candidate prompts are registered in code and selected only for Voice Lab
+    # tasks. Do not overwrite the active production prompt during setup.
     agent.set("allowed_mcp_tools", [])
     by_name = {frappe.db.get_value("AI MCP Tool", name, "tool_name"): name for name in tool_docnames}
     for tool_name in TOOL_SPECS:
@@ -273,6 +279,15 @@ def _with_managed_shipkia_prompt(prompt: str) -> str:
         + _platform_usp_rules()
         + _rate_sales_rules()
     )
+
+
+def get_registered_shipkia_prompts() -> dict[str, str]:
+    """Expose immutable candidate prompts without mutating the production agent."""
+    return dict(PROMPT_REGISTRY)
+
+
+def get_approved_shipkia_sales_benefits() -> tuple[str, ...]:
+    return APPROVED_SALES_BENEFITS
 
 
 def _adaptive_language_rules() -> str:

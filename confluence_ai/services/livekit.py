@@ -238,6 +238,14 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
     except TypeError:
         system_prompt = agent.get_system_prompt() if agent else ""
     personality = agent.personality if agent else ""
+    prompt_version = str(payload.get("prompt_version") or "").strip()
+    if payload.get("local_browser_test") and prompt_version:
+        from confluence_ai.prompts.shipkia_voice import get_shipkia_voice_prompt
+
+        # Candidate prompts are intentionally available only to authenticated
+        # browser Voice Lab tasks. Production and telephony continue using the
+        # AI Agent's currently configured prompt.
+        system_prompt = get_shipkia_voice_prompt(prompt_version)
 
     if system_prompt:
         if "{{" in system_prompt:
@@ -293,6 +301,8 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         "personality": personality,
         "context": _voice_metadata_context(payload),
     }
+    if prompt_version:
+        metadata["prompt_version"] = prompt_version
     if stage_prompts:
         metadata["stage_prompts"] = stage_prompts
     return metadata

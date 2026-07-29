@@ -5,6 +5,10 @@ import secrets
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from confluence_ai.prompts.shipkia_voice import (
+    SHIPKIA_VOICE_PROMPT_VERSION,
+    get_shipkia_voice_prompt,
+)
 from confluence_ai.shipkia_setup import (
     LANGUAGE_PROMPT_MARKER,
     RATE_PROMPT_MARKER,
@@ -26,6 +30,21 @@ from confluence_ai.services.shipkia_voice import (
 
 
 class TestShipKiaVoice(FrappeTestCase):
+    def test_voice_v2_prompt_has_provider_rate_and_safe_benefit_flow(self):
+        prompt = get_shipkia_voice_prompt(SHIPKIA_VOICE_PROMPT_VERSION)
+
+        self.assertIn("Direct Courier", prompt)
+        self.assertIn("Shipping Aggregator", prompt)
+        self.assertIn("current rate for a comparable shipment", prompt)
+        self.assertIn("whether GST and COD charges are included", prompt)
+        self.assertIn("If it is equal or higher, say so honestly", prompt)
+        self.assertIn("Give no more than two benefits", prompt)
+        self.assertIn("eligible accounts", prompt)
+        self.assertIn("support and ticketing channels", prompt)
+        self.assertIn("can help reduce avoidable RTO", prompt)
+        self.assertIn("without ending or disappearing", prompt)
+        self.assertNotIn("guaranteed RTO reduction", prompt)
+
     def test_managed_prompt_sections_are_idempotent_and_capability_gated(self):
         original = "ShipKia voice prompt."
         once = _with_managed_shipkia_prompt(original)
