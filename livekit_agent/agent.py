@@ -14,12 +14,12 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
-    RoomOptions,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
 )
 from livekit.agents.llm import ChatMessage, function_tool
+from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins import google, silero
 
 from session_runtime import VoiceSessionRuntime
