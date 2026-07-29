@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -17,8 +18,10 @@ SHIPKIA_CRM_FIELDS = {
     "shipkia_pickup_pincode",
     "shipkia_delivery_zones",
     "shipkia_cod_required",
+    "shipkia_current_provider_type",
     "shipkia_current_courier_partner",
     "shipkia_current_shipping_rate",
+    "shipkia_current_rate_basis",
     "shipkia_main_pain_point",
     "shipkia_interested_services",
     "shipkia_chatbot_status",
@@ -331,7 +334,65 @@ def execute_shipkia_tool(
     handler = handlers.get(tool_name)
     if not handler:
         return None
+    sandbox_result = _simulate_voice_lab_mutation(tool_name, arguments or {}, task_id=task_id, agent=agent)
+    if sandbox_result is not None:
+        return sandbox_result
     return handler(arguments or {}, task_id=task_id, agent=agent or SHIPKIA_AGENT)
+
+
+def _simulate_voice_lab_mutation(
+    tool_name: str,
+    arguments: dict,
+    *,
+    task_id: str | None,
+    agent: str | None,
+) -> dict | None:
+    mutating_tools = {
+        "create_or_update_shipkia_lead",
+        "record_shipkia_call_progress",
+        "create_shipkia_followup",
+        "finalize_shipkia_call_outcome",
+    }
+    if tool_name not in mutating_tools or not task_id or not frappe.db.exists("AI Task", task_id):
+        return None
+
+    raw_context = frappe.db.get_value("AI Task", task_id, "context_json") or "{}"
+    try:
+        context = json.loads(raw_context)
+    except (TypeError, ValueError):
+        context = {}
+    if not isinstance(context, dict) or not context.get("voice_lab_session"):
+        return None
+
+    sandbox = context.get("voice_lab_sandbox", True)
+    sandbox = sandbox in (True, 1, "1", "true", "True", "yes")
+    if not sandbox and not context.get("voice_lab_manager_confirmed"):
+        result = {
+            "status": "permission_denied",
+            "message": "Voice Lab integration writes require explicit Manager confirmation.",
+        }
+        _record(tool_name, arguments, result, task_id=task_id, agent=agent)
+        return result
+    if not sandbox:
+        return None
+
+    result = {
+        "status": "simulated",
+        "sandbox": True,
+        "tool": tool_name,
+        "would_write": _redacted_simulated_arguments(arguments),
+        "message": "Sandbox simulation only; no CRM, follow-up, or outcome record was changed.",
+    }
+    _record(f"{tool_name}_sandbox", arguments, result, task_id=task_id, agent=agent)
+    return result
+
+
+def _redacted_simulated_arguments(arguments: dict) -> dict:
+    protected_fragments = ("password", "passcode", "otp", "token", "secret", "cvv", "pin")
+    return {
+        str(key): "[REDACTED]" if any(fragment in str(key).lower() for fragment in protected_fragments) else value
+        for key, value in arguments.items()
+    }
 
 
 def _matching_leads(phone: str) -> list[dict]:
@@ -472,6 +533,7 @@ def _record(
             if response.get("status")
             in {
                 "success",
+                "simulated",
                 "configuration_required",
                 "no_eligible_rate",
                 "requested_service_unavailable",

@@ -10,6 +10,7 @@ def after_install() -> None:
     ensure_companies()
     ensure_sales_defaults()
     ensure_order_confirmation_defaults()
+    ensure_shipkia_voice_fields()
 
 
 def after_migrate() -> None:
@@ -19,6 +20,52 @@ def after_migrate() -> None:
     ensure_companies()
     ensure_sales_defaults()
     ensure_order_confirmation_defaults()
+    ensure_shipkia_voice_fields()
+
+
+SHIPKIA_CRM_CUSTOM_FIELDS = (
+    {
+        "fieldname": "shipkia_current_provider_type",
+        "label": "ShipKia Current Provider Type",
+        "fieldtype": "Select",
+        "options": "\n".join(
+            (
+                "Direct Courier",
+                "Shipping Aggregator",
+                "Own Arrangement",
+                "Other",
+                "Not Shared",
+            )
+        ),
+        "insert_after": "shipkia_cod_required",
+        "description": "Customer-confirmed current courier or shipping arrangement.",
+    },
+    {
+        "fieldname": "shipkia_current_rate_basis",
+        "label": "ShipKia Current Rate Basis",
+        "fieldtype": "Small Text",
+        "options": "",
+        "insert_after": "shipkia_current_shipping_rate",
+        "description": "Confirmed comparable weight, payment type, charge inclusions, and route or zone.",
+    },
+)
+
+
+def ensure_shipkia_voice_fields() -> None:
+    """Create the Voice Lab CRM fields without disturbing unrelated CRM customizations."""
+    if not frappe.db.exists("DocType", "CRM Lead"):
+        return
+
+    changed = False
+    for definition in SHIPKIA_CRM_CUSTOM_FIELDS:
+        name = f"CRM Lead-{definition['fieldname']}"
+        field = frappe.get_doc("Custom Field", name) if frappe.db.exists("Custom Field", name) else frappe.new_doc("Custom Field")
+        field.update({"dt": "CRM Lead", **definition})
+        field.flags.ignore_permissions = True
+        field.save()
+        changed = True
+    if changed:
+        frappe.clear_cache(doctype="CRM Lead")
 
 
 def ensure_order_confirmation_defaults() -> None:
