@@ -32,13 +32,13 @@
     "expected": ["provider type Direct Courier", "provider Bluedart", "asks comparable rate"],
     "forbidden": ["calls it an aggregator"]
   },
-  {
-    "id": "provider-aggregator",
-    "title": "Discover a shipping aggregator",
-    "category": "provider",
-    "customer_turns": ["We use a shipping aggregator right now.", "It is Shiprocket."],
-    "expected": ["provider type Shipping Aggregator", "provider Shiprocket", "asks comparable rate"],
-    "forbidden": ["calls it a direct courier"]
+    {
+      "id": "provider-aggregator",
+      "title": "Preserve an unfamiliar shipping aggregator name",
+      "category": "provider",
+      "customer_turns": ["We use a shipping aggregator right now.", "It is ShipCart."],
+      "expected": ["provider type Shipping Aggregator", "provider ShipCart exactly", "asks comparable rate"],
+      "forbidden": ["calls it a direct courier", "changes ShipCart to Shiprocket"]
   },
   {
     "id": "provider-own-arrangement",
@@ -96,13 +96,22 @@
     "expected": ["payment type COD", "order value 2000", "uses returned COD charge"],
     "forbidden": ["omits COD from comparison", "guesses COD charge"]
   },
-  {
-    "id": "missing-zone",
-    "title": "Quote safely when approved zone is unavailable",
-    "category": "rate_tool",
-    "customer_turns": ["Pickup is 110001 and delivery is 400001, what is the rate?"],
-    "expected": ["does not ask customer for Zone A-F", "quotes qualified returned zone pricing"],
-    "forbidden": ["invented zone", "blocks all pricing"]
+    {
+      "id": "missing-zone",
+      "title": "Collect missing inputs and quote safely when the zone is unavailable",
+      "category": "rate_tool",
+      "customer_turns": [
+        "Pickup is 110001 and delivery is 400001, what is the rate?",
+        "The parcel is 600 grams.",
+        "It is prepaid."
+      ],
+      "expected": [
+        "asks for missing weight and payment type",
+        "waits for explicit answers before calculate_shipkia_rate",
+        "does not ask customer for Zone A-F",
+        "quotes qualified returned zone pricing"
+      ],
+      "forbidden": ["invents prepaid or COD", "invented zone", "blocks all pricing"]
   },
   {
     "id": "courier-constraint",

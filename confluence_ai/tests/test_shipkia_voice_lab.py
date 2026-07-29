@@ -13,7 +13,7 @@ from confluence_ai.api.shipkia_voice import (
     get_voice_test_run,
     submit_voice_test_feedback,
 )
-from confluence_ai.services.livekit import _upsert_voice_test_run
+from confluence_ai.services.livekit import _upsert_voice_test_run, handle_callback
 from confluence_ai.services.shipkia_voice import (
     cleanup_voice_test_runs,
     execute_shipkia_tool,
@@ -100,6 +100,42 @@ class TestShipKiaVoiceLab(FrappeTestCase):
         self.assertEqual(run.recovery_outcome, "Failed")
         self.assertIn("CUSTOMER:", run.transcript)
 
+    def test_user_initiated_browser_disconnect_completes_run_and_task(self):
+        response = self._create_run()
+        payload = {
+            "event": "call_ended",
+            "status": "failed",
+            "failure_code": "participant_disconnect",
+            "reason": "user_initiated",
+            "task": response["task"],
+            "transcript": "CUSTOMER: Thank you\nAGENT: You're welcome.",
+            "metrics": {
+                "duration_seconds": 23,
+                "failure_code": "participant_disconnect",
+                "close_reason": "user_initiated",
+            },
+        }
+
+        with (
+            patch(
+                "confluence_ai.services.vobiz.find_task_and_attempt",
+                return_value=(response["task"], None),
+            ),
+            patch("confluence_ai.services.livekit._upsert_livekit_call_log"),
+            patch("confluence_ai.services.livekit.frappe.db.commit"),
+        ):
+            result = handle_callback(payload)
+
+        run = frappe.get_doc("AI Voice Test Run", response["run_id"])
+        task = frappe.get_doc("AI Task", response["task"])
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(run.status, "Completed")
+        self.assertFalse(run.failure_code)
+        self.assertEqual(run.close_reason, "user_initiated")
+        self.assertEqual(task.status, "Completed")
+        self.assertEqual(task.telephony_status, "completed")
+        self.assertFalse(task.last_error)
+
     def test_feedback_api_saves_structured_review_and_redacts_secret(self):
         response = self._create_run()
         with patch("confluence_ai.api.shipkia_voice.frappe.db.commit"):
@@ -153,6 +189,7 @@ class TestShipKiaVoiceLab(FrappeTestCase):
         for required in (
             "direct courier",
             "shipping aggregator",
+            "shipcart",
             "rate-lower",
             "rate-equal",
             "rate-higher",

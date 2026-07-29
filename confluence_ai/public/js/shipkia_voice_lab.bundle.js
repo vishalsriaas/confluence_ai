@@ -5,6 +5,7 @@ frappe.provide("confluence_ai.voice_lab");
 let activeRoom = null;
 let pollTimer = null;
 let activeRunId = null;
+let activePromptVersion = null;
 let root = null;
 const transcriptTurns = [];
 
@@ -90,6 +91,7 @@ function markup() {
 
 async function loadCases() {
 	const response = await apiCall("list_voice_test_cases", {}, "GET");
+	activePromptVersion = response.message.prompt_version;
 	const select = root.querySelector('[data-field="test_case_id"]');
 	for (const testCase of response.message.cases || []) {
 		const option = document.createElement("option");
@@ -152,7 +154,7 @@ async function start() {
 		customer_name: root.querySelector('[data-field="customer_name"]').value,
 		customer_phone: root.querySelector('[data-field="customer_phone"]').value,
 		test_case_id: root.querySelector('[data-field="test_case_id"]').value,
-		prompt_version: "shipkia-voice-v2",
+		prompt_version: activePromptVersion,
 		sandbox: sandbox ? 1 : 0,
 		confirm_integration_writes: confirmed ? 1 : 0,
 	});
@@ -174,13 +176,14 @@ async function restart() {
 }
 
 async function disconnect(clearRun = false) {
-	if (pollTimer) window.clearInterval(pollTimer);
-	pollTimer = null;
+	if (clearRun && pollTimer) window.clearInterval(pollTimer);
+	if (clearRun) pollTimer = null;
 	if (activeRoom) {
 		await activeRoom.disconnect();
 		activeRoom = null;
 	}
 	if (clearRun) activeRunId = null;
+	else if (activeRunId) startPolling();
 	if (root) toggleRunActions(Boolean(activeRunId));
 }
 
@@ -199,6 +202,7 @@ async function pollRun() {
 	root.querySelector('[data-metric="tool"]').textContent = run.tool_p95_ms ? `${run.tool_p95_ms} ms` : "—";
 	root.querySelector('[data-metric="reconnects"]').textContent = run.reconnect_count || 0;
 	if (run.status === "Failed") setStatus(`Agent needs restart: ${run.failure_code || "unknown error"}`);
+	else if (["Completed", "Passed", "Needs Review"].includes(run.status)) setStatus(`Run ${run.status}`);
 }
 
 function startPolling() {

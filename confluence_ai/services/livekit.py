@@ -584,6 +584,26 @@ async def _find_sip_participant_identity(lkapi: api.LiveKitAPI, room_name: str) 
     return None
 
 
+def _is_intentional_participant_disconnect(payload: dict) -> bool:
+    """Return whether the browser participant deliberately ended the call."""
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    failure_code = str(payload.get("failure_code") or metrics.get("failure_code") or "")
+    close_reason = str(payload.get("reason") or metrics.get("close_reason") or "")
+    return failure_code.strip().lower() == "participant_disconnect" and (
+        close_reason.strip().lower() == "user_initiated"
+    )
+
+
+def _callback_failed(payload: dict, event_type_lower: str) -> bool:
+    if _is_intentional_participant_disconnect(payload):
+        return False
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    return (
+        event_type_lower in {"failed", "room_failed", "call_failed"}
+        or str(payload.get("status") or "").lower() == "failed"
+        or bool(payload.get("failure_code") or metrics.get("failure_code"))
+    )
+
 
 def handle_callback(payload: dict) -> dict:
     # 1. Match the webhook payload to a task and/or attempt
@@ -689,15 +709,13 @@ def handle_callback(payload: dict) -> dict:
             attempt_response["initiated_at"] = now()
 
     elif event_type_lower in successful_terminal_events | failed_terminal_events:
-        callback_failed = (
-            event_type_lower in failed_terminal_events
-            or str(payload.get("status") or "").lower() == "failed"
-            or bool(payload.get("failure_code"))
-        )
+        callback_failed = _callback_failed(payload, event_type_lower)
         if not callback_failed:
             task.status = "Completed"
+            task.last_error = ""
             if attempt:
                 attempt.status = "Succeeded"
+                attempt.error_message = ""
                 from confluence_ai.services.utils import now
                 attempt.ended_at = now()
         else:
@@ -752,6 +770,8 @@ def handle_callback(payload: dict) -> dict:
 
     # Always copy telephony status and Call UUID if present
     telephony_status = payload.get("status") or payload.get("telephony_status") or event_type
+    if _is_intentional_participant_disconnect(payload):
+        telephony_status = "completed"
     if telephony_status:
         task.telephony_status = telephony_status
         if attempt:
@@ -866,15 +886,17 @@ def _upsert_voice_test_run(payload: dict, task, event_type_lower: str) -> None:
             run.close_reason = metrics.get("close_reason") or run.close_reason
         run.failure_code = payload.get("failure_code") or run.failure_code
         run.close_reason = payload.get("reason") or run.close_reason
+        if _is_intentional_participant_disconnect(payload):
+            run.failure_code = ""
 
         if event_type_lower in {"room_started", "participant_joined", "agent_started", "initiated"}:
             run.status = "Running"
             run.started_at = run.started_at or now()
         elif event_type_lower in {"call_ended", "room_finished", "completed"}:
-            run.status = "Failed" if (payload.get("failure_code") or str(payload.get("status")).lower() == "failed") else "Completed"
+            run.status = "Failed" if _callback_failed(payload, event_type_lower) else "Completed"
             run.ended_at = run.ended_at or now()
         elif event_type_lower in {"failed", "room_failed", "call_failed"}:
-            run.status = "Failed"
+            run.status = "Failed" if _callback_failed(payload, event_type_lower) else "Completed"
             run.ended_at = run.ended_at or now()
         run.save(ignore_permissions=True)
     except Exception as exc:
@@ -952,12 +974,20 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         doc.last_payload_json = as_json(payload)
 
         status = str(payload.get("status") or livekit_event or "").lower()
-        callback_failed = (
-            status == "failed"
-            or event_type_lower in {"failed", "room_failed", "call_failed"}
-            or bool(payload.get("failure_code"))
-        )
-        if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"} and not callback_failed:
+        callback_failed = _callback_failed(payload, event_type_lower)
+        completed_statuses = {
+            "completed",
+            "call_ended",
+            "participant_left",
+            "room_finished",
+            "recording_ready",
+            "transcript_ready",
+        }
+        if _is_intentional_participant_disconnect(payload):
+            doc.status = "Completed"
+        elif (
+            status in completed_statuses or event_type_lower in completed_statuses
+        ) and not callback_failed:
             doc.status = "Completed"
         elif callback_failed:
             doc.status = "Failed"

@@ -10,6 +10,7 @@ from frappe.tests.utils import FrappeTestCase
 from confluence_ai.prompts.shipkia_voice import (
     SHIPKIA_VOICE_PROMPT_VERSION,
     get_shipkia_voice_prompt,
+    list_shipkia_voice_prompt_versions,
 )
 from confluence_ai.shipkia_setup import (
     LANGUAGE_PROMPT_MARKER,
@@ -33,9 +34,14 @@ from confluence_ai.services.shipkia_voice import (
 
 
 class TestShipKiaVoice(FrappeTestCase):
-    def test_voice_v2_prompt_has_provider_rate_and_safe_benefit_flow(self):
+    def test_voice_v3_prompt_has_provider_rate_and_safe_benefit_flow(self):
         prompt = get_shipkia_voice_prompt(SHIPKIA_VOICE_PROMPT_VERSION)
 
+        self.assertEqual(SHIPKIA_VOICE_PROMPT_VERSION, "shipkia-voice-v3")
+        self.assertEqual(
+            list_shipkia_voice_prompt_versions(),
+            ["shipkia-voice-v2", "shipkia-voice-v3"],
+        )
         self.assertIn("Direct Courier", prompt)
         self.assertIn("Shipping Aggregator", prompt)
         self.assertIn("current rate for a comparable shipment", prompt)
@@ -46,6 +52,10 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("support and ticketing channels", prompt)
         self.assertIn("can help reduce avoidable RTO", prompt)
         self.assertIn("without ending or disappearing", prompt)
+        self.assertIn("ShipCart remains ShipCart", prompt)
+        self.assertIn("explicitly confirm both weight and", prompt)
+        self.assertIn("A request for information is not consent to a callback", prompt)
+        self.assertIn("a simulated tool result did not schedule", prompt)
         self.assertNotIn("guaranteed RTO reduction", prompt)
 
     def test_managed_prompt_sections_are_idempotent_and_capability_gated(self):
