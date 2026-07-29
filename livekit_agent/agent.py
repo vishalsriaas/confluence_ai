@@ -14,13 +14,15 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
-    RoomInputOptions,
+    RoomOptions,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
 )
-from livekit.agents.llm import function_tool
+from livekit.agents.llm import ChatMessage, function_tool
 from livekit.plugins import google, silero
+
+from session_runtime import VoiceSessionRuntime
 
 
 load_dotenv(os.getenv("SHIPKIA_ENV_FILE", ".env.local"), override=False)
@@ -85,7 +87,7 @@ def compact_json(value: Any, max_chars: int = 3500) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "...TRUNCATED"
 
 
-def make_mcp_forwarder(tool_name: str, task_id: str):
+def make_mcp_forwarder(tool_name: str, task_id: str, runtime: VoiceSessionRuntime | None = None):
     async def forwarder(raw_arguments: dict[str, object]) -> str:
         arguments = dict(raw_arguments or {})
         key = (task_id, tool_name, json.dumps(arguments, sort_keys=True, default=str))
@@ -100,6 +102,7 @@ def make_mcp_forwarder(tool_name: str, task_id: str):
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         }
+        failed = False
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -110,6 +113,7 @@ def make_mcp_forwarder(tool_name: str, task_id: str):
                 ) as response:
                     body = await response.text()
                     if response.status != 200:
+                        failed = True
                         logger.error("MCP %s failed HTTP %s: %s", tool_name, response.status, body[:500])
                         return compact_json(
                             {
@@ -119,6 +123,7 @@ def make_mcp_forwarder(tool_name: str, task_id: str):
                         )
                     parsed = unwrap_frappe_response(json.loads(body))
                     if parsed.get("error"):
+                        failed = True
                         result = {
                             "status": "error",
                             "message": parsed["error"].get("message", "ShipKia tool failed."),
@@ -129,6 +134,7 @@ def make_mcp_forwarder(tool_name: str, task_id: str):
                     _TOOL_CACHE[key] = (now, text)
                     return text
         except Exception as exc:
+            failed = True
             logger.exception("MCP %s connection failed: %s", tool_name, exc)
             return compact_json(
                 {
@@ -136,11 +142,18 @@ def make_mcp_forwarder(tool_name: str, task_id: str):
                     "message": "The ShipKia system is temporarily unavailable. Do not repeat the question solely because saving failed.",
                 }
             )
+        finally:
+            if runtime:
+                runtime.record_tool_latency(tool_name, time.monotonic() - now, failed=failed)
 
     return forwarder
 
 
-async def fetch_tools(task_id: str | None, system_prompt: str) -> list:
+async def fetch_tools(
+    task_id: str | None,
+    system_prompt: str,
+    runtime: VoiceSessionRuntime | None = None,
+) -> list:
     if not task_id or not MCP_GATEWAY:
         logger.warning("MCP tools unavailable: task=%s gateway_configured=%s", task_id, bool(MCP_GATEWAY))
         return []
@@ -185,7 +198,7 @@ async def fetch_tools(task_id: str | None, system_prompt: str) -> list:
                 {"type": "object", "properties": {}, "required": []},
             ),
         }
-        tools.append(function_tool(make_mcp_forwarder(tool_name, task_id), raw_schema=raw_schema))
+        tools.append(function_tool(make_mcp_forwarder(tool_name, task_id, runtime), raw_schema=raw_schema))
         logger.info("Registered ShipKia tool: %s", tool_name)
     return tools
 
@@ -268,7 +281,18 @@ async def entrypoint(ctx: JobContext) -> None:
     system_prompt = str(metadata.get("system_prompt") or "")
     personality = str(metadata.get("personality") or "")
     context = metadata.get("context") if isinstance(metadata.get("context"), dict) else {}
-    tools = await fetch_tools(task_id, system_prompt)
+    prompt_version = str(metadata.get("prompt_version") or context.get("prompt_version") or "legacy")
+
+    async def emit_runtime_event(event: str, **extra: Any) -> None:
+        await post_confluence_event(task_id, ctx.room.name, event, prompt_version=prompt_version, **extra)
+
+    runtime = VoiceSessionRuntime(
+        emit=emit_runtime_event,
+        response_timeout_seconds=float(os.getenv("LIVEKIT_RESPONSE_TIMEOUT_SECONDS", "15")),
+        recovery_timeout_seconds=float(os.getenv("LIVEKIT_RECOVERY_TIMEOUT_SECONDS", "8")),
+        reconnect_grace_seconds=float(os.getenv("LIVEKIT_RECONNECT_GRACE_SECONDS", "20")),
+    )
+    tools = await fetch_tools(task_id, system_prompt, runtime)
 
     model_name = os.getenv(
         "GEMINI_LIVE_MODEL",
@@ -309,42 +333,95 @@ async def entrypoint(ctx: JobContext) -> None:
 
     call_done = asyncio.Event()
     participant_seen = bool(ctx.room.remote_participants)
+    close_reason = "maximum_call_duration"
 
     @ctx.room.on("participant_connected")
     def _participant_connected(participant):
         nonlocal participant_seen
         participant_seen = True
+        runtime.participant_connected()
         logger.info("Customer joined room: %s", participant.identity)
 
     @ctx.room.on("participant_disconnected")
     def _participant_disconnected(participant):
         logger.info("Customer left room: %s", participant.identity)
         if participant_seen and not ctx.room.remote_participants:
-            call_done.set()
+            async def end_after_grace() -> None:
+                nonlocal close_reason
+                close_reason = "participant_disconnect_timeout"
+                call_done.set()
+
+            runtime.participant_disconnected(end_after_grace)
 
     @session.on("close")
     def _session_closed(event):
+        nonlocal close_reason
+        close_reason = str(getattr(event, "reason", "unknown"))
         logger.info("Session closed: %s", getattr(event, "reason", "unknown"))
         call_done.set()
 
-    async def shutdown_callback() -> None:
-        await post_confluence_event(
-            task_id,
-            ctx.room.name,
-            "call_ended",
-            status="completed",
-            reason="local_livekit_session_ended",
+    @session.on("user_input_transcribed")
+    def _user_input_transcribed(event):
+        if getattr(event, "is_final", False):
+            runtime.add_user_turn(
+                getattr(event, "transcript", ""),
+                turn_id=f"user:{getattr(event, 'created_at', time.time())}",
+            )
+
+    @session.on("conversation_item_added")
+    def _conversation_item_added(event):
+        item = getattr(event, "item", None)
+        if not isinstance(item, ChatMessage) or str(item.role) != "assistant":
+            return
+        runtime.add_agent_turn(item.text_content or "", turn_id=getattr(item, "id", None))
+
+    @session.on("agent_state_changed")
+    def _agent_state_changed(event):
+        if getattr(event, "new_state", "") == "speaking":
+            runtime.mark_agent_speaking()
+        asyncio.create_task(
+            emit_runtime_event(
+                "agent_state",
+                old_state=str(getattr(event, "old_state", "")),
+                new_state=str(getattr(event, "new_state", "")),
+                metrics=runtime.metrics(),
+            )
         )
+
+    @session.on("error")
+    def _session_error(event):
+        runtime.record_error(getattr(event, "error", event))
+
+    async def recover_from_silence(customer_text: str) -> None:
+        reply = session.generate_reply(
+            instructions=(
+                "The customer is still connected and the previous response stalled. Apologize once for "
+                "the short delay, answer their latest request in one short natural turn, and continue "
+                f"the ShipKia conversation. Latest customer words: {customer_text}"
+            )
+        )
+        if hasattr(reply, "wait_for_playout"):
+            await reply.wait_for_playout()
+        else:
+            await reply
+
+    runtime.set_recovery_callback(recover_from_silence)
+
+    async def shutdown_callback() -> None:
+        await runtime.finish(close_reason)
 
     ctx.add_shutdown_callback(shutdown_callback)
     await session.start(
         agent=assistant,
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            audio_enabled=True,
-            video_enabled=False,
-            pre_connect_audio=True,
+        room_options=RoomOptions(
+            audio_input=True,
+            video_input=False,
+            audio_output=True,
+            text_output=True,
+            close_on_disconnect=False,
         ),
+        record=False,
     )
     await post_confluence_event(task_id, ctx.room.name, "agent_started", status="running")
 

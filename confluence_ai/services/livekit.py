@@ -603,6 +603,27 @@ def handle_callback(payload: dict) -> dict:
     # 3. Determine the type of event and process accordingly
     event_type = payload.get("event") or payload.get("event_type") or "status_update"
     event_type_lower = event_type.lower()
+    runtime_events = {
+        "transcript_checkpoint",
+        "agent_state",
+        "tool_completed",
+        "participant_reconnect_grace",
+        "participant_reconnected",
+        "participant_disconnect_timeout",
+        "agent_recovery_started",
+        "agent_recovery_succeeded",
+        "agent_recovery_failed",
+        "agent_error",
+    }
+    successful_terminal_events = {
+        "room_finished",
+        "call_ended",
+        "participant_left",
+        "recording_ready",
+        "transcript_ready",
+        "completed",
+    }
+    failed_terminal_events = {"failed", "room_failed", "call_failed"}
 
     # Load/initialize JSON payload trackers
     task_result = json.loads(task.result_json) if task.result_json else {}
@@ -618,10 +639,33 @@ def handle_callback(payload: dict) -> dict:
     if attempt:
         attempt_response["last_livekit_payload"] = payload
 
+    runtime_details = task_result.get("voice_runtime")
+    if not isinstance(runtime_details, dict):
+        runtime_details = {}
+    for key in ("prompt_version", "failure_code", "reason"):
+        if payload.get(key) is not None:
+            runtime_details[key] = payload.get(key)
+    if isinstance(payload.get("metrics"), dict):
+        runtime_details["metrics"] = payload["metrics"]
+    runtime_details["last_event"] = event_type
+    task_result["voice_runtime"] = runtime_details
+    if attempt:
+        attempt_response["voice_runtime"] = runtime_details
+
+    # Runtime checkpoints are deliberately persisted before the call finishes so
+    # a model error or browser disconnect cannot erase the completed conversation.
+    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
+    if transcript:
+        task_result["transcript"] = transcript
+        task.transcript = transcript
+        if attempt:
+            attempt_response["transcript"] = transcript
+            attempt.transcript = transcript
+
     _upsert_livekit_call_log(payload, task, attempt)
 
     # Update statuses
-    if event_type_lower in {"room_started", "participant_joined", "initiated"}:
+    if event_type_lower in {"room_started", "participant_joined", "initiated", "agent_started"}:
         task.status = "Running"
         if attempt:
             attempt.status = "Started"
@@ -633,8 +677,13 @@ def handle_callback(payload: dict) -> dict:
             from confluence_ai.services.utils import now
             attempt_response["initiated_at"] = now()
 
-    elif event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
-        if event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed"}:
+    elif event_type_lower in successful_terminal_events | failed_terminal_events:
+        callback_failed = (
+            event_type_lower in failed_terminal_events
+            or str(payload.get("status") or "").lower() == "failed"
+            or bool(payload.get("failure_code"))
+        )
+        if not callback_failed:
             task.status = "Completed"
             if attempt:
                 attempt.status = "Succeeded"
@@ -642,7 +691,12 @@ def handle_callback(payload: dict) -> dict:
                 attempt.ended_at = now()
         else:
             task.status = "Failed"
-            task.last_error = payload.get("error") or payload.get("error_message") or event_type
+            task.last_error = (
+                payload.get("error")
+                or payload.get("error_message")
+                or payload.get("failure_code")
+                or event_type
+            )
             if attempt:
                 attempt.status = "Failed"
                 attempt.error_message = task.last_error
@@ -669,15 +723,6 @@ def handle_callback(payload: dict) -> dict:
             except (ValueError, TypeError):
                 pass
 
-        # Update transcript if available
-        transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
-        if transcript:
-            task_result["transcript"] = transcript
-            task.transcript = transcript
-            if attempt:
-                attempt_response["transcript"] = transcript
-                attempt.transcript = transcript
-
         # Update recording_url if available
         recording_url = payload.get("recording_url") or payload.get("url") or payload.get("recording")
         if recording_url:
@@ -686,6 +731,13 @@ def handle_callback(payload: dict) -> dict:
             if attempt:
                 attempt_response["recording_url"] = recording_url
                 attempt.recording_url = recording_url
+    elif event_type_lower in runtime_events:
+        # A recoverable runtime event keeps the task active. The terminal
+        # call_ended checkpoint decides the final success/failure state.
+        if task.status not in {"Completed", "Failed", "Cancelled"}:
+            task.status = "Running"
+        if attempt and attempt.status not in {"Succeeded", "Failed", "Cancelled"}:
+            attempt.status = "Started"
 
     # Always copy telephony status and Call UUID if present
     telephony_status = payload.get("status") or payload.get("telephony_status") or event_type
@@ -828,11 +880,29 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         doc.last_payload_json = as_json(payload)
 
         status = str(payload.get("status") or livekit_event or "").lower()
-        if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
+        callback_failed = (
+            status == "failed"
+            or event_type_lower in {"failed", "room_failed", "call_failed"}
+            or bool(payload.get("failure_code"))
+        )
+        if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"} and not callback_failed:
             doc.status = "Completed"
-        elif status in {"failed", "room_failed", "call_failed"}:
+        elif callback_failed:
             doc.status = "Failed"
-        elif status in {"running", "room_started", "participant_joined", "initiated"}:
+        elif status in {
+            "running",
+            "room_started",
+            "participant_joined",
+            "initiated",
+            "agent_started",
+            "transcript_checkpoint",
+            "agent_state",
+            "tool_completed",
+            "participant_reconnect_grace",
+            "participant_reconnected",
+            "agent_recovery_started",
+            "agent_recovery_succeeded",
+        }:
             doc.status = "In Progress"
         elif not doc.status:
             doc.status = "Unknown"
