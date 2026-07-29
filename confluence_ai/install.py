@@ -52,7 +52,7 @@ SHIPKIA_CRM_CUSTOM_FIELDS = (
 
 
 def ensure_shipkia_voice_fields() -> None:
-    """Create the Voice Lab CRM fields without disturbing unrelated CRM customizations."""
+    """Create the ShipKia voice CRM fields without disturbing unrelated CRM customizations."""
     if not frappe.db.exists("DocType", "CRM Lead"):
         return
 

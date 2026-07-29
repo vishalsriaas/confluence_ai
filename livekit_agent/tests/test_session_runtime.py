@@ -16,8 +16,10 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.runtime = VoiceSessionRuntime(
             emit=emit,
             response_timeout_seconds=0.01,
+            playout_timeout_seconds=0.01,
             recovery_timeout_seconds=0.01,
             reconnect_grace_seconds=0.01,
+            false_interruption_timeout_seconds=0.01,
         )
 
     async def asyncTearDown(self) -> None:
@@ -27,6 +29,7 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.add_user_turn("My OTP is 123456", turn_id="user-1"))
         self.assertFalse(self.runtime.add_user_turn("My OTP is 123456", turn_id="user-1"))
         self.runtime.add_agent_turn("Please keep it private.", turn_id="agent-1")
+        self.runtime.complete_agent_playout("speech-1", interrupted=False)
         await asyncio.sleep(0)
 
         self.assertEqual(
@@ -36,8 +39,10 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.metrics()["turn_count"], 2)
 
     async def test_recovers_once_after_response_timeout(self) -> None:
-        async def recover(_customer_text: str) -> None:
+        async def recover(_customer_text: str, _reason: str) -> None:
+            self.runtime.track_agent_speech("speech-recovery")
             self.runtime.add_agent_turn("Sorry for the delay. How can I help?", turn_id="agent-recovery")
+            self.runtime.complete_agent_playout("speech-recovery", interrupted=False)
 
         self.runtime.set_recovery_callback(recover)
         self.runtime.add_user_turn("Are you there?", turn_id="user-timeout")
@@ -49,7 +54,7 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(metrics["failure_code"])
 
     async def test_marks_persistent_silence_as_model_timeout(self) -> None:
-        async def no_response(_customer_text: str) -> None:
+        async def no_response(_customer_text: str, _reason: str) -> None:
             return None
 
         self.runtime.set_recovery_callback(no_response)
@@ -92,8 +97,9 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.metrics()["reconnect_count"], 5)
 
     async def test_model_error_attempts_one_recovery_and_clears_transient_failure(self) -> None:
-        async def recover(_customer_text: str) -> None:
+        async def recover(_customer_text: str, _reason: str) -> None:
             self.runtime.add_agent_turn("I recovered and can continue.", turn_id="agent-model-recovery")
+            self.runtime.complete_agent_playout("speech-model-recovery", interrupted=False)
 
         self.runtime.set_recovery_callback(recover)
         self.runtime.add_user_turn("Please continue.", turn_id="user-before-error")
@@ -117,6 +123,80 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(expired)
         self.assertEqual(self.runtime.metrics()["failure_code"], "participant_disconnect")
+
+    async def test_agent_transcript_does_not_complete_response_before_playout(self) -> None:
+        recovery_reasons: list[str] = []
+
+        async def recover(_customer_text: str, reason: str) -> None:
+            recovery_reasons.append(reason)
+
+        self.runtime.set_recovery_callback(recover)
+        self.runtime.add_user_turn("Please tell me the rates.", turn_id="user-rates")
+        self.runtime.add_agent_turn("Our rates start from", turn_id="agent-partial")
+        await asyncio.sleep(0.03)
+
+        self.assertIn("response_timeout", recovery_reasons)
+        self.assertEqual(self.runtime.metrics()["completed_playout_count"], 0)
+
+    async def test_false_interruption_recovers_once_without_new_customer_turn(self) -> None:
+        recovery_reasons: list[str] = []
+
+        async def recover(_customer_text: str, reason: str) -> None:
+            recovery_reasons.append(reason)
+            self.runtime.track_agent_speech("speech-continued")
+            self.runtime.add_agent_turn("and you also get a dedicated manager.", turn_id="agent-continued")
+            self.runtime.complete_agent_playout("speech-continued", interrupted=False)
+
+        self.runtime.set_recovery_callback(recover)
+        self.runtime.add_user_turn("What else do I get?", turn_id="user-benefits")
+        self.runtime.track_agent_speech("speech-cut")
+        self.runtime.complete_agent_playout("speech-cut", interrupted=True)
+        await asyncio.sleep(0.04)
+
+        self.assertEqual(recovery_reasons, ["false_interruption"])
+        self.assertEqual(self.runtime.metrics()["false_interruption_recoveries"], 1)
+        self.assertEqual(self.runtime.metrics()["recovery_succeeded"], 1)
+
+    async def test_real_customer_barge_in_cancels_false_interruption_recovery(self) -> None:
+        recovery_reasons: list[str] = []
+
+        async def recover(_customer_text: str, reason: str) -> None:
+            recovery_reasons.append(reason)
+
+        runtime = VoiceSessionRuntime(
+            emit=self.runtime.emit,
+            response_timeout_seconds=0.1,
+            playout_timeout_seconds=0.1,
+            recovery_timeout_seconds=0.01,
+            reconnect_grace_seconds=0.01,
+            false_interruption_timeout_seconds=0.02,
+        )
+        runtime.set_recovery_callback(recover)
+        runtime.add_user_turn("Explain the benefits.", turn_id="user-one")
+        runtime.track_agent_speech("speech-one")
+        runtime.complete_agent_playout("speech-one", interrupted=True)
+        runtime.add_user_turn("Wait, tell me the rates first.", turn_id="user-two")
+        await asyncio.sleep(0.04)
+        await runtime.finish("test_finished")
+
+        self.assertEqual(recovery_reasons, [])
+        self.assertEqual(runtime.metrics()["interruption_count"], 1)
+
+    async def test_same_call_context_is_bounded_and_redacted(self) -> None:
+        self.runtime.add_user_turn("My OTP is 123456", turn_id="user-secret")
+        self.runtime.add_agent_turn("Understood.", turn_id="agent-secret")
+        self.runtime.add_user_turn("I need better rates.", turn_id="user-rates")
+
+        memory = self.runtime.same_call_context(
+            current_user_text="Also remember my OTP is 999999",
+            max_turns=2,
+            max_chars=500,
+        )
+
+        self.assertNotIn("123456", memory)
+        self.assertNotIn("999999", memory)
+        self.assertIn("I need better rates.", memory)
+        self.assertIn("[REDACTED]", memory)
 
 
 class TestRedaction(unittest.TestCase):

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 from dotenv import load_dotenv
+from google.genai import types as genai_types
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -33,6 +36,7 @@ logger = logging.getLogger("shipkia-livekit-agent")
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "shipkia-voice-sales")
 MCP_GATEWAY = os.getenv("MCP_SERVER_URL", "").strip()
 CONFLUENCE_CALLBACK = os.getenv("CONFLUENCE_LIVEKIT_WEBHOOK_URL", "").strip()
+CONSOLE_MCP_SCOPE = "livekit-console-sandbox"
 
 ALLOWED_TOOLS = {
     "lookup_shipkia_crm_lead",
@@ -45,6 +49,23 @@ ALLOWED_TOOLS = {
 }
 
 _TOOL_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
+
+
+def load_local_console_prompt() -> tuple[str, str]:
+    """Load the current versioned prompt for direct LiveKit Console sessions."""
+    prompt_path = (
+        Path(__file__).resolve().parents[1]
+        / "confluence_ai"
+        / "prompts"
+        / "shipkia_voice.py"
+    )
+    spec = importlib.util.spec_from_file_location("shipkia_voice_console_prompt", prompt_path)
+    if not spec or not spec.loader:
+        raise RuntimeError(f"Unable to load the local ShipKia prompt from {prompt_path}.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    prompt_version = str(module.SHIPKIA_VOICE_PROMPT_VERSION)
+    return str(module.get_shipkia_voice_prompt(prompt_version)), prompt_version
 
 
 def build_headers(task_id: str | None = None) -> dict[str, str]:
@@ -211,6 +232,7 @@ class ShipKiaAssistant(Agent):
         personality: str,
         context: dict,
         tools: list,
+        runtime: VoiceSessionRuntime,
     ) -> None:
         if not system_prompt.strip():
             raise RuntimeError("Confluence did not provide the ShipKia system prompt.")
@@ -234,12 +256,31 @@ class ShipKiaAssistant(Agent):
 - Follow the Confluence ShipKia prompt and known context exactly.
 - Never speak tool names, field names, JSON, metadata, record IDs, or implementation details.
 - Speak naturally in short turns and ask only one useful question at a time.
+- Finish each spoken sentence and complete the current thought before going silent.
 - Remember every clear answer in this call and never ask it again unless the customer corrects it.
 - Use tools only for confirmed information. Never guess a CRM value, serviceability result, zone, or rate.
 - If saving fails, acknowledge internally and continue naturally; do not repeatedly ask the customer for the same answer.
 - Never send a message or invoke a messaging channel from this voice worker.
 """
+        self._runtime = runtime
         super().__init__(instructions=instructions, tools=tools)
+
+    async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
+        memory = self._runtime.same_call_context(
+            current_user_text=new_message.text_content or "",
+        )
+        if not memory:
+            return
+        turn_ctx.add_message(
+            role="system",
+            content=(
+                "Same-call memory from the current room follows. Treat confirmed customer answers "
+                "as already known, do not ask them again, and use corrections from later turns. "
+                "This memory is only for the current call:\n"
+                f"{memory}"
+            ),
+        )
+        self._runtime.record_memory_injection(memory)
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -282,30 +323,71 @@ async def entrypoint(ctx: JobContext) -> None:
     personality = str(metadata.get("personality") or "")
     context = metadata.get("context") if isinstance(metadata.get("context"), dict) else {}
     prompt_version = str(metadata.get("prompt_version") or context.get("prompt_version") or "legacy")
+    if not system_prompt.strip() and not task_id:
+        system_prompt, prompt_version = load_local_console_prompt()
+        context = {
+            **context,
+            "local_livekit_console": 1,
+            "prompt_version": prompt_version,
+        }
+        logger.warning(
+            "Confluence dispatch metadata is absent; using local console prompt version=%s "
+            "with the read-only Console MCP scope.",
+            prompt_version,
+        )
 
     async def emit_runtime_event(event: str, **extra: Any) -> None:
+        if not task_id:
+            return
         await post_confluence_event(task_id, ctx.room.name, event, prompt_version=prompt_version, **extra)
 
     runtime = VoiceSessionRuntime(
         emit=emit_runtime_event,
         response_timeout_seconds=float(os.getenv("LIVEKIT_RESPONSE_TIMEOUT_SECONDS", "15")),
+        playout_timeout_seconds=float(os.getenv("LIVEKIT_PLAYOUT_TIMEOUT_SECONDS", "30")),
         recovery_timeout_seconds=float(os.getenv("LIVEKIT_RECOVERY_TIMEOUT_SECONDS", "8")),
         reconnect_grace_seconds=float(os.getenv("LIVEKIT_RECONNECT_GRACE_SECONDS", "20")),
+        false_interruption_timeout_seconds=float(
+            os.getenv("LIVEKIT_FALSE_INTERRUPTION_RECOVERY_SECONDS", "2.5")
+        ),
     )
-    tools = await fetch_tools(task_id, system_prompt, runtime)
+    tools = await fetch_tools(task_id or CONSOLE_MCP_SCOPE, system_prompt, runtime)
+    if not tools:
+        failure_message = (
+            "ShipKia MCP tools are unavailable. Ensure the Frappe bench is responding on port "
+            "8000 before starting a LiveKit call."
+        )
+        logger.error("%s room=%s task=%s", failure_message, ctx.room.name, task_id)
+        await emit_runtime_event(
+            "agent_startup_failed",
+            status="failed",
+            failure_code="mcp_unavailable",
+            error=failure_message,
+        )
+        raise RuntimeError(failure_message)
 
     model_name = os.getenv(
         "GEMINI_LIVE_MODEL",
         "gemini-live-2.5-flash-native-audio",
     )
     voice = os.getenv("GEMINI_LIVE_VOICE", metadata.get("audio_name") or "Puck")
+    realtime_input_config = genai_types.RealtimeInputConfig(
+        automatic_activity_detection=genai_types.AutomaticActivityDetection(
+            disabled=False,
+            start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
+            end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+            prefix_padding_ms=int(os.getenv("GEMINI_VAD_PREFIX_PADDING_MS", "300")),
+            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "700")),
+        )
+    )
     model = google.realtime.RealtimeModel(
         model=model_name,
         voice=voice,
         vertexai=True,
         project=os.getenv("GOOGLE_CLOUD_PROJECT"),
         location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
-        temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.65")),
+        temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.35")),
+        realtime_input_config=realtime_input_config,
     )
     logger.info(
         "Starting ShipKia session room=%s task=%s model=%s voice=%s tools=%s",
@@ -321,7 +403,17 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
             turn_detection="realtime_llm",
-            interruption={"enabled": True, "discard_audio_if_uninterruptible": False},
+            interruption={
+                "enabled": True,
+                "min_duration": float(
+                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.7")
+                ),
+                "resume_false_interruption": True,
+                "false_interruption_timeout": float(
+                    os.getenv("LIVEKIT_FALSE_INTERRUPTION_TIMEOUT_SECONDS", "2.0")
+                ),
+                "discard_audio_if_uninterruptible": True,
+            },
         ),
     )
     assistant = ShipKiaAssistant(
@@ -329,6 +421,7 @@ async def entrypoint(ctx: JobContext) -> None:
         personality=personality,
         context=context,
         tools=tools,
+        runtime=runtime,
     )
 
     call_done = asyncio.Event()
@@ -376,6 +469,30 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         runtime.add_agent_turn(item.text_content or "", turn_id=getattr(item, "id", None))
 
+    @session.on("speech_created")
+    def _speech_created(event):
+        handle = getattr(event, "speech_handle", None)
+        if handle is None:
+            return
+        speech_id = str(getattr(handle, "id", ""))
+        source = str(getattr(event, "source", "generate_reply"))
+        runtime.track_agent_speech(speech_id, source=source)
+        logger.info("Agent speech created id=%s source=%s", speech_id, source)
+
+        def speech_done(completed_handle) -> None:
+            interrupted = bool(getattr(completed_handle, "interrupted", False))
+            runtime.complete_agent_playout(
+                getattr(completed_handle, "id", speech_id),
+                interrupted=interrupted,
+            )
+            logger.info(
+                "Agent speech finished id=%s interrupted=%s",
+                getattr(completed_handle, "id", speech_id),
+                interrupted,
+            )
+
+        handle.add_done_callback(speech_done)
+
     @session.on("agent_state_changed")
     def _agent_state_changed(event):
         if getattr(event, "new_state", "") == "speaking":
@@ -393,12 +510,25 @@ async def entrypoint(ctx: JobContext) -> None:
     def _session_error(event):
         runtime.record_error(getattr(event, "error", event))
 
-    async def recover_from_silence(customer_text: str) -> None:
+    async def recover_from_silence(customer_text: str, reason: str) -> None:
+        memory = runtime.same_call_context(current_user_text=customer_text)
+        if reason == "false_interruption":
+            recovery_direction = (
+                "The previous speech was cut off by brief microphone activity, but the customer did "
+                "not begin a real new turn. Continue and finish the interrupted thought naturally. "
+                "Do not greet again, restart the whole answer, or apologize."
+            )
+        else:
+            recovery_direction = (
+                "The customer is still connected and the previous response stalled. Apologize once "
+                "for the short delay, answer their latest request in one short natural turn, and "
+                "continue the ShipKia conversation."
+            )
         reply = session.generate_reply(
             instructions=(
-                "The customer is still connected and the previous response stalled. Apologize once for "
-                "the short delay, answer their latest request in one short natural turn, and continue "
-                f"the ShipKia conversation. Latest customer words: {customer_text}"
+                f"{recovery_direction}\n"
+                f"Latest customer words: {customer_text or '[no new customer words]'}\n"
+                f"Same-call memory:\n{memory or '[no earlier turns]'}"
             )
         )
         if hasattr(reply, "wait_for_playout"):

@@ -239,14 +239,6 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         system_prompt = agent.get_system_prompt() if agent else ""
     personality = agent.personality if agent else ""
     prompt_version = str(payload.get("prompt_version") or "").strip()
-    if payload.get("local_browser_test") and prompt_version:
-        from confluence_ai.prompts.shipkia_voice import get_shipkia_voice_prompt
-
-        # Candidate prompts are intentionally available only to authenticated
-        # browser Voice Lab tasks. Production and telephony continue using the
-        # AI Agent's currently configured prompt.
-        system_prompt = get_shipkia_voice_prompt(prompt_version)
-
     if system_prompt:
         if "{{" in system_prompt:
             try:
@@ -585,7 +577,7 @@ async def _find_sip_participant_identity(lkapi: api.LiveKitAPI, room_name: str) 
 
 
 def _is_intentional_participant_disconnect(payload: dict) -> bool:
-    """Return whether the browser participant deliberately ended the call."""
+    """Return whether the participant deliberately ended the call."""
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
     failure_code = str(payload.get("failure_code") or metrics.get("failure_code") or "")
     close_reason = str(payload.get("reason") or metrics.get("close_reason") or "")
@@ -683,7 +675,7 @@ def handle_callback(payload: dict) -> dict:
         attempt_response["voice_runtime"] = runtime_details
 
     # Runtime checkpoints are deliberately persisted before the call finishes so
-    # a model error or browser disconnect cannot erase the completed conversation.
+    # a model error or participant disconnect cannot erase the completed conversation.
     transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
     if transcript:
         task_result["transcript"] = transcript
@@ -693,8 +685,6 @@ def handle_callback(payload: dict) -> dict:
             attempt.transcript = transcript
 
     _upsert_livekit_call_log(payload, task, attempt)
-    _upsert_voice_test_run(payload, task, event_type_lower)
-
     # Update statuses
     if event_type_lower in {"room_started", "participant_joined", "initiated", "agent_started"}:
         task.status = "Running"
@@ -846,69 +836,6 @@ def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: s
     except Exception as exc:
         create_error("Order Confirmation Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
         return {"status": "failed", "error": str(exc)}
-
-
-def _upsert_voice_test_run(payload: dict, task, event_type_lower: str) -> None:
-    if not frappe.db.exists("DocType", "AI Voice Test Run"):
-        return
-    run_name = frappe.db.get_value("AI Voice Test Run", {"task": task.name}, "name")
-    if not run_name:
-        return
-
-    try:
-        from confluence_ai.services.utils import now
-
-        run = frappe.get_doc("AI Voice Test Run", run_name)
-        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-        if payload.get("prompt_version"):
-            run.prompt_version = payload["prompt_version"]
-        if payload.get("room_name") or payload.get("room"):
-            run.room_name = payload.get("room_name") or payload.get("room")
-        transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
-        if transcript:
-            run.transcript = transcript
-        if metrics:
-            run.metrics_json = as_json(metrics)
-            run.duration_seconds = int(metrics.get("duration_seconds") or 0)
-            run.response_p95_ms = _nearest_rank_p95(metrics.get("response_latencies_ms"))
-            run.tool_p95_ms = _nearest_rank_p95(metrics.get("tool_latencies_ms"))
-            run.reconnect_count = int(metrics.get("reconnect_count") or 0)
-            attempted = int(metrics.get("recovery_attempted") or 0)
-            succeeded = int(metrics.get("recovery_succeeded") or 0)
-            run.recovery_outcome = (
-                "Not Needed"
-                if not attempted
-                else "Recovered"
-                if succeeded >= attempted
-                else "Failed"
-            )
-            run.failure_code = metrics.get("failure_code") or run.failure_code
-            run.close_reason = metrics.get("close_reason") or run.close_reason
-        run.failure_code = payload.get("failure_code") or run.failure_code
-        run.close_reason = payload.get("reason") or run.close_reason
-        if _is_intentional_participant_disconnect(payload):
-            run.failure_code = ""
-
-        if event_type_lower in {"room_started", "participant_joined", "agent_started", "initiated"}:
-            run.status = "Running"
-            run.started_at = run.started_at or now()
-        elif event_type_lower in {"call_ended", "room_finished", "completed"}:
-            run.status = "Failed" if _callback_failed(payload, event_type_lower) else "Completed"
-            run.ended_at = run.ended_at or now()
-        elif event_type_lower in {"failed", "room_failed", "call_failed"}:
-            run.status = "Failed" if _callback_failed(payload, event_type_lower) else "Completed"
-            run.ended_at = run.ended_at or now()
-        run.save(ignore_permissions=True)
-    except Exception as exc:
-        create_error("Voice Test Run Callback", str(exc), source="livekit", task=task.name, exc=exc)
-
-
-def _nearest_rank_p95(values) -> int:
-    samples = sorted(int(value) for value in (values or []) if value is not None)
-    if not samples:
-        return 0
-    rank = max(1, (95 * len(samples) + 99) // 100)
-    return samples[rank - 1]
 
 
 def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:

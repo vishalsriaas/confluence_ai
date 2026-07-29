@@ -14,7 +14,6 @@ from confluence_ai.prompts.shipkia_voice import APPROVED_SALES_BENEFITS, PROMPT_
 
 SHIPKIA_CHANNEL = "channel-446"
 SHIPKIA_AGENT_NAME = "shipkia-voice-sales"
-SHIPKIA_TEMPLATE_KEY = "shipkia-local-voice-test"
 SHIPKIA_TOKEN_KEY = "shipkia-voice-local"
 RATE_PROMPT_MARKER = "## ACTIVE SHIPKIA RATE CARD 10 RULES"
 USP_PROMPT_MARKER = "## SHIPKIA PLATFORM USPs"
@@ -168,7 +167,6 @@ def configure_shipkia_voice(
     _validate_core_records()
     tool_names = _ensure_tools()
     token_value = _ensure_access_token()
-    template_name = _ensure_task_template()
     _configure_agent(tool_names)
     secret_paths = _write_local_secrets(
         token_value=token_value,
@@ -185,7 +183,6 @@ def configure_shipkia_voice(
         "voice": "Puck",
         "model": "gemini-live-2.5-flash-native-audio",
         "tools": tool_names,
-        "task_template": template_name,
         "secret_directory": secret_paths["directory"],
         "env_file": secret_paths["env_file"],
         "google_credentials": secret_paths["google_credentials"],
@@ -244,8 +241,8 @@ def _configure_agent(tool_docnames: list[str]) -> None:
     agent.primary_provider = "Gemini"
     agent.audio_name = "Puck"
     agent.enable_sales_context = 0
-    # Candidate prompts are registered in code and selected only for Voice Lab
-    # tasks. Do not overwrite the active production prompt during setup.
+    # Versioned prompts are registered in code for direct Console evaluation.
+    # Do not overwrite the active production prompt during setup.
     agent.set("allowed_mcp_tools", [])
     by_name = {frappe.db.get_value("AI MCP Tool", name, "tool_name"): name for name in tool_docnames}
     for tool_name in TOOL_SPECS:
@@ -449,44 +446,12 @@ def _ensure_access_token() -> str:
     token.company = SHIPKIA_COMPANY
     token.token_key = SHIPKIA_TOKEN_KEY
     token.token_name = "ShipKia Local Voice Worker"
-    token.scope = "mcp,webhook,local_voice_test"
+    token.scope = "mcp,webhook"
     token.source_system = "shipkia-livekit-local"
     if not docname:
         token.token_secret = secrets.token_urlsafe(36)
     token.save(ignore_permissions=True)
     return f"{token.token_key}:{token.get_password('token_secret')}"
-
-
-def _ensure_task_template() -> str:
-    docname = frappe.db.get_value("AI Task Template", {"template_key": SHIPKIA_TEMPLATE_KEY}, "name")
-    template = frappe.get_doc("AI Task Template", docname) if docname else frappe.new_doc("AI Task Template")
-    template.update(
-        {
-            "enabled": 1,
-            "company": SHIPKIA_COMPANY,
-            "template_key": SHIPKIA_TEMPLATE_KEY,
-            "template_name": "ShipKia Local Voice Test",
-            "task_type": "ShipKia Voice",
-            "description": "Developer-mode browser voice test for the ShipKia LiveKit worker.",
-            "objective_prompt": "Run the configured ShipKia calling prompt and save confirmed onboarding details.",
-            "input_schema_json": json.dumps(
-                {
-                    "type": "object",
-                    "properties": {
-                        "customer_phone": {"type": "string"},
-                        "customer_name": {"type": "string"},
-                    },
-                    "required": ["customer_phone"],
-                }
-            ),
-            "default_context_json": "{}",
-            "default_channel": "Voice",
-            "default_priority": "Normal",
-            "default_timeout_seconds": 900,
-        }
-    )
-    template.save(ignore_permissions=True)
-    return template.name
 
 
 def _write_local_secrets(
@@ -531,7 +496,12 @@ def _write_local_secrets(
         "GOOGLE_CLOUD_LOCATION": "us-central1",
         "GEMINI_LIVE_MODEL": "gemini-live-2.5-flash-native-audio",
         "GEMINI_LIVE_VOICE": "Puck",
-        "GEMINI_TEMPERATURE": "0.65",
+        "GEMINI_TEMPERATURE": "0.35",
+        "GEMINI_VAD_PREFIX_PADDING_MS": "300",
+        "GEMINI_VAD_SILENCE_DURATION_MS": "700",
+        "LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS": "0.7",
+        "LIVEKIT_FALSE_INTERRUPTION_TIMEOUT_SECONDS": "2.0",
+        "LIVEKIT_FALSE_INTERRUPTION_RECOVERY_SECONDS": "2.5",
         "CONFLUENCE_BASE_URL": base_url,
         "MCP_SERVER_URL": f"{base_url}/api/method/confluence_ai.api.mcp.gateway",
         "MCP_BEARER_TOKEN": token_value,

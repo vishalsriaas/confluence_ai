@@ -4,6 +4,11 @@ from types import SimpleNamespace
 
 import frappe
 
+from confluence_ai.api.mcp import (
+    LIVEKIT_CONSOLE_SANDBOX_TASK,
+    LIVEKIT_CONSOLE_TOOLS,
+    get_allowed_tools,
+)
 from confluence_ai.services.mcp import assert_tool_allowed
 
 
@@ -14,3 +19,21 @@ class TestMCPPermissions(unittest.TestCase):
         fake_frappe.PermissionError = frappe.PermissionError
         with self.assertRaises(frappe.PermissionError):
             assert_tool_allowed("create_patient_note", agent="agent-1")
+
+    @patch("confluence_ai.api.mcp.frappe.get_doc")
+    @patch("confluence_ai.api.mcp.frappe.get_all")
+    def test_livekit_console_scope_exposes_only_safe_read_tools(self, get_all, get_doc):
+        tool_ids = {
+            "MCP-PINCODE": LIVEKIT_CONSOLE_TOOLS[0],
+            "MCP-RATE": LIVEKIT_CONSOLE_TOOLS[1],
+        }
+        get_all.return_value = list(tool_ids)
+        get_doc.side_effect = lambda _doctype, name: SimpleNamespace(tool_name=tool_ids[name])
+
+        tools = get_allowed_tools(LIVEKIT_CONSOLE_SANDBOX_TASK)
+
+        self.assertEqual([tool.tool_name for tool in tools], list(LIVEKIT_CONSOLE_TOOLS))
+        self.assertEqual(
+            get_all.call_args.kwargs["filters"]["tool_name"],
+            ["in", list(LIVEKIT_CONSOLE_TOOLS)],
+        )

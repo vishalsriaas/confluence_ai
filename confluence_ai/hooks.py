@@ -33,7 +33,6 @@ tenant_doctypes = [
     "AI Task Batch",
     "AI Task Template",
     "AI Tool Permission",
-    "AI Voice Test Run",
     "AI Webhook Event",
     "AI WhatsApp Template Map",
     "Order Confirmation Workflow",
@@ -74,9 +73,6 @@ scheduler_events = {
             "confluence_ai.services.order_confirmation.process_due_workflows",
         ],
     },
-    "daily": [
-        "confluence_ai.services.shipkia_voice.cleanup_voice_test_runs",
-    ],
 }
 
 doc_events = {
@@ -118,7 +114,6 @@ permission_query_conditions = {
     "AI Task Batch": "confluence_ai.tenant.ai_task_batch_query_condition",
     "AI Task Template": "confluence_ai.tenant.ai_task_template_query_condition",
     "AI Tool Permission": "confluence_ai.tenant.ai_tool_permission_query_condition",
-    "AI Voice Test Run": "confluence_ai.tenant.ai_voice_test_run_query_condition",
     "AI Webhook Event": "confluence_ai.tenant.ai_webhook_event_query_condition",
     "AI WhatsApp Template Map": "confluence_ai.tenant.ai_whatsapp_template_map_query_condition",
     "Order Confirmation Workflow": "confluence_ai.tenant.order_confirmation_workflow_query_condition",

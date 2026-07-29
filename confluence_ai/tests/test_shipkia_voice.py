@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import secrets
 from unittest.mock import patch
 
@@ -26,7 +25,6 @@ from confluence_ai.services.livekit import (
 from confluence_ai.services.shipkia_voice import (
     calculate_shipkia_rate,
     create_or_update_shipkia_lead,
-    execute_shipkia_tool,
     lookup_pincode_serviceability,
     lookup_shipkia_crm_lead,
     normalize_phone,
@@ -55,7 +53,6 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("ShipCart remains ShipCart", prompt)
         self.assertIn("explicitly confirm both weight and", prompt)
         self.assertIn("A request for information is not consent to a callback", prompt)
-        self.assertIn("a simulated tool result did not schedule", prompt)
         self.assertNotIn("guaranteed RTO reduction", prompt)
 
     def test_managed_prompt_sections_are_idempotent_and_capability_gated(self):
@@ -195,42 +192,6 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertTrue(lookup["found"])
         self.assertEqual(lookup["lead"], first["lead"])
 
-    def test_voice_lab_sandbox_simulates_mutations(self):
-        context = json.dumps({"voice_lab_session": 1, "voice_lab_sandbox": 1})
-        with (
-            patch("confluence_ai.services.shipkia_voice.frappe.db.exists", return_value=True),
-            patch("confluence_ai.services.shipkia_voice.frappe.db.get_value", return_value=context),
-            patch("confluence_ai.services.shipkia_voice._record") as record,
-        ):
-            result = execute_shipkia_tool(
-                "record_shipkia_call_progress",
-                {
-                    "phone": "+919876543210",
-                    "shipkia_current_provider_type": "Direct Courier",
-                    "shipkia_current_rate_basis": "500 g prepaid, GST included",
-                },
-                task_id="TASK-VOICE-LAB",
-            )
-
-        self.assertEqual(result["status"], "simulated")
-        self.assertTrue(result["sandbox"])
-        self.assertIn("shipkia_current_provider_type", result["would_write"])
-        record.assert_called_once()
-
-    def test_voice_lab_integration_requires_manager_confirmation(self):
-        context = json.dumps({"voice_lab_session": 1, "voice_lab_sandbox": 0})
-        with (
-            patch("confluence_ai.services.shipkia_voice.frappe.db.exists", return_value=True),
-            patch("confluence_ai.services.shipkia_voice.frappe.db.get_value", return_value=context),
-            patch("confluence_ai.services.shipkia_voice._record"),
-        ):
-            result = execute_shipkia_tool(
-                "create_shipkia_followup",
-                {"phone": "+919876543210", "followup_reason": "Onboarding"},
-                task_id="TASK-VOICE-LAB",
-            )
-
-        self.assertEqual(result["status"], "permission_denied")
 
     def test_rate_card_calculates_prepaid_zone_rate(self):
         serviceability = lookup_pincode_serviceability(

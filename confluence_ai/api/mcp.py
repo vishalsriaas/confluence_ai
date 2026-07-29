@@ -8,6 +8,12 @@ from confluence_ai.services.utils import as_json, create_error, get_request_json
 from confluence_ai.services.mcp import assert_tool_allowed
 
 
+LIVEKIT_CONSOLE_SANDBOX_TASK = "livekit-console-sandbox"
+LIVEKIT_CONSOLE_TOOLS = (
+    "lookup_pincode_serviceability",
+    "calculate_shipkia_rate",
+)
+
 
 
 
@@ -107,7 +113,8 @@ def gateway() -> dict:
                     "error": {"code": -32602, "message": error_message}
                 }
             
-            builtin_result = execute_builtin_sales_tool(tool.tool_name, arguments, task_id)
+            execution_task_id = None if task_id == LIVEKIT_CONSOLE_SANDBOX_TASK else task_id
+            builtin_result = execute_builtin_sales_tool(tool.tool_name, arguments, execution_task_id)
             if builtin_result is not None:
                 return {
                     "jsonrpc": "2.0",
@@ -204,6 +211,21 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
 
 def get_allowed_tools(task_id: str | None) -> list["frappe.Document"]:
     """Returns the list of allowed MCP tools dynamically scoped to the task's campaign route."""
+    if task_id == LIVEKIT_CONSOLE_SANDBOX_TASK:
+        tool_ids = frappe.get_all(
+            "AI MCP Tool",
+            filters={
+                "enabled": 1,
+                "tool_name": ["in", list(LIVEKIT_CONSOLE_TOOLS)],
+            },
+            pluck="name",
+        )
+        tools_by_name = {
+            tool.tool_name: tool
+            for tool in (frappe.get_doc("AI MCP Tool", tool_id) for tool_id in tool_ids)
+        }
+        return [tools_by_name[name] for name in LIVEKIT_CONSOLE_TOOLS if name in tools_by_name]
+
     if not task_id or not frappe.db.exists("AI Task", task_id):
         # Never expose every tenant/tool when a task cannot be authenticated.
         return []
