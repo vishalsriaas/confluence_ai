@@ -24,7 +24,7 @@ where = ["."]
 include = ["confluence_ai*"]
 
 [tool.setuptools.package-data]
-confluence_ai = ["data/*.csv"]
+confluence_ai = ["data/*.csv", "evals/*.json"]
 
 [tool.bench.frappe-dependencies]
 frappe = ">=15.0.0,<17.0.0"

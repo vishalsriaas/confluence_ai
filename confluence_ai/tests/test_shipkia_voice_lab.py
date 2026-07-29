@@ -8,11 +8,16 @@ from frappe.tests.utils import FrappeTestCase
 
 from confluence_ai.api.shipkia_voice import (
     _create_voice_test_session,
+    _load_test_cases,
     _redact,
     get_voice_test_run,
     submit_voice_test_feedback,
 )
 from confluence_ai.services.livekit import _upsert_voice_test_run
+from confluence_ai.services.shipkia_voice import (
+    cleanup_voice_test_runs,
+    execute_shipkia_tool,
+)
 
 
 class TestShipKiaVoiceLab(FrappeTestCase):
@@ -124,3 +129,116 @@ class TestShipKiaVoiceLab(FrappeTestCase):
         self.assertNotIn("123", redacted)
         self.assertNotIn("abc123", redacted)
         self.assertEqual(redacted.count("[REDACTED]"), 2)
+
+    def test_fixed_evaluation_suite_has_24_required_scenarios(self):
+        cases = _load_test_cases()
+        self.assertEqual(len(cases), 24)
+        self.assertEqual(len({case["id"] for case in cases}), 24)
+        categories = {case["category"] for case in cases}
+        self.assertTrue(
+            {
+                "opening",
+                "crm_context",
+                "language",
+                "provider",
+                "rate_comparison",
+                "rate_tool",
+                "claims",
+                "off_topic",
+                "conversation",
+                "reliability",
+            }.issubset(categories)
+        )
+        corpus = json.dumps(cases).lower()
+        for required in (
+            "direct courier",
+            "shipping aggregator",
+            "rate-lower",
+            "rate-equal",
+            "rate-higher",
+            "dedicated-manager",
+            "ticketing-support",
+            "qualified-rto",
+            "harmless-off-topic",
+            "unsafe-off-topic",
+            "silence-model-recovery",
+            "disconnect-reconnect",
+        ):
+            self.assertIn(required, corpus)
+
+    def test_sandbox_session_makes_zero_crm_or_followup_changes(self):
+        response = self._create_run()
+        task = frappe.get_doc("AI Task", response["task"])
+        phone = json.loads(task.context_json)["customer_phone"]
+        before_leads = len(
+            frappe.get_all("CRM Lead", filters={"mobile_no": phone}, pluck="name")
+        )
+        before_followups = frappe.db.count("AI Sales Follow Up", {"phone": phone})
+
+        progress = execute_shipkia_tool(
+            "record_shipkia_call_progress",
+            {
+                "phone": phone,
+                "shipkia_current_provider_type": "Shipping Aggregator",
+                "shipkia_current_courier_partner": "Test Provider",
+                "shipkia_current_shipping_rate": 50,
+                "shipkia_current_rate_basis": "500 g prepaid, GST included",
+            },
+            task_id=task.name,
+        )
+        followup = execute_shipkia_tool(
+            "create_shipkia_followup",
+            {"phone": phone, "followup_reason": "Sandbox onboarding"},
+            task_id=task.name,
+        )
+
+        self.assertEqual(progress["status"], "simulated")
+        self.assertEqual(followup["status"], "simulated")
+        self.assertEqual(
+            len(frappe.get_all("CRM Lead", filters={"mobile_no": phone}, pluck="name")),
+            before_leads,
+        )
+        self.assertEqual(
+            frappe.db.count("AI Sales Follow Up", {"phone": phone}),
+            before_followups,
+        )
+
+    def test_retention_scrubs_run_and_linked_task_copies(self):
+        response = self._create_run()
+        run = frappe.get_doc("AI Voice Test Run", response["run_id"])
+        run.transcript = "CUSTOMER: secret shipment detail"
+        run.feedback_notes = "OTP is 123456"
+        run.scores_json = '{"sales_flow": 2}'
+        run.issue_tags = "secret-request"
+        run.save(ignore_permissions=True)
+        task = frappe.get_doc("AI Task", response["task"])
+        task.transcript = run.transcript
+        task.result_json = json.dumps(
+            {
+                "transcript": run.transcript,
+                "last_livekit_payload": {
+                    "customer_phone": run.customer_phone,
+                    "transcript": run.transcript,
+                },
+                "metrics": {"duration_seconds": 10},
+            }
+        )
+        task.save(ignore_permissions=True)
+        frappe.db.sql(
+            "update `tabAI Voice Test Run` set creation = date_sub(now(), interval 31 day) where name = %s",
+            run.name,
+        )
+
+        with patch("confluence_ai.services.shipkia_voice.frappe.db.commit"):
+            result = cleanup_voice_test_runs(30)
+
+        run.reload()
+        task.reload()
+        self.assertEqual(result["cleaned"], 1)
+        self.assertFalse(run.transcript)
+        self.assertFalse(run.feedback_notes)
+        self.assertFalse(run.customer_phone)
+        self.assertTrue(run.retention_cleaned_at)
+        self.assertFalse(task.transcript)
+        self.assertNotIn("secret shipment detail", task.result_json)
+        self.assertEqual(json.loads(task.result_json)["metrics"]["duration_seconds"], 10)

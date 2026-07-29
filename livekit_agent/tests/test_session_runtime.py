@@ -74,6 +74,37 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(expired)
         self.assertEqual(self.runtime.metrics()["reconnect_count"], 1)
 
+    async def test_five_consecutive_disconnect_rejoins_preserve_session(self) -> None:
+        expiries = 0
+
+        async def on_expired() -> None:
+            nonlocal expiries
+            expiries += 1
+
+        for _attempt in range(5):
+            self.runtime.participant_disconnected(on_expired)
+            await asyncio.sleep(0)
+            self.runtime.participant_connected()
+            await asyncio.sleep(0)
+
+        await asyncio.sleep(0.02)
+        self.assertEqual(expiries, 0)
+        self.assertEqual(self.runtime.metrics()["reconnect_count"], 5)
+
+    async def test_model_error_attempts_one_recovery_and_clears_transient_failure(self) -> None:
+        async def recover(_customer_text: str) -> None:
+            self.runtime.add_agent_turn("I recovered and can continue.", turn_id="agent-model-recovery")
+
+        self.runtime.set_recovery_callback(recover)
+        self.runtime.add_user_turn("Please continue.", turn_id="user-before-error")
+        self.runtime.record_error("temporary realtime model error")
+        await asyncio.sleep(0.03)
+
+        metrics = self.runtime.metrics()
+        self.assertEqual(metrics["recovery_attempted"], 1)
+        self.assertEqual(metrics["recovery_succeeded"], 1)
+        self.assertFalse(metrics["failure_code"])
+
     async def test_disconnect_expiry_sets_failure(self) -> None:
         expired = False
 
@@ -92,3 +123,4 @@ class TestRedaction(unittest.TestCase):
     def test_redacts_common_spoken_secrets(self) -> None:
         self.assertEqual(redact_sensitive_text("password: hello123"), "password: [REDACTED]")
         self.assertEqual(redact_sensitive_text("card pin is 1111"), "card pin is [REDACTED]")
+        self.assertEqual(redact_sensitive_text("card number is 4111111111111111"), "card number is [REDACTED]")

@@ -25,6 +25,7 @@
   "recovery_outcome",
   "failure_code",
   "close_reason",
+  "retention_cleaned_at",
   "transcript_section",
   "transcript",
   "metrics_json",
@@ -153,6 +154,12 @@
    "fieldname": "close_reason",
    "fieldtype": "Small Text",
    "label": "Close Reason"
+  },
+  {
+   "fieldname": "retention_cleaned_at",
+   "fieldtype": "Datetime",
+   "label": "Retention Cleaned At",
+   "read_only": 1
   },
   {
    "fieldname": "transcript_section",

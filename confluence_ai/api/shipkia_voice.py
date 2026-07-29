@@ -26,7 +26,8 @@ from confluence_ai.shipkia_setup import (
 
 ALLOWED_VERDICTS = {"Pass", "Fail", "Needs Work"}
 _SECRET_PATTERN = re.compile(
-    r"(?i)\b(otp|password|passcode|cvv|card pin|payment pin|api[_ -]?key|access[_ -]?token)"
+    r"(?i)\b(otp|password|passcode|cvv|card pin|payment pin|upi pin|card number|"
+    r"credit card|debit card|bank account number|api[_ -]?key|access[_ -]?token)"
     r"(\s*(?:is|:|=|-)\s*)\S+"
 )
 

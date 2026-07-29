@@ -13,7 +13,8 @@ DisconnectCallback = Callable[[], Awaitable[None]]
 
 _SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\b(otp|one[- ]time password|password|passcode|cvv|card pin|payment pin)"
+        r"(?i)\b(otp|one[- ]time password|password|passcode|cvv|card pin|payment pin|"
+        r"upi pin|card number|credit card|debit card|bank account number)"
         r"(\s*(?:is|:|-)\s*)\S+"
     ),
     re.compile(r"(?i)\b(api[_ -]?key|api[_ -]?secret|access[_ -]?token)(\s*(?:is|:|=|-)\s*)\S+"),
@@ -124,6 +125,8 @@ class VoiceSessionRuntime:
         self._spawn(self._emit_checkpoint("transcript_checkpoint"))
         if recovered:
             self.recovery_succeeded += 1
+            if self.failure_code in {"model_error", "model_timeout"}:
+                self.failure_code = ""
             self._spawn(self.emit("agent_recovery_succeeded", metrics=self.metrics()))
         return True
 
@@ -182,6 +185,42 @@ class VoiceSessionRuntime:
                 metrics=self.metrics(),
             )
         )
+        if (
+            self._recovery_callback
+            and self._last_user_text
+            and self.recovery_attempted == 0
+        ):
+            self._cancel_watchdog()
+            self.recovery_attempted += 1
+
+            async def recover() -> None:
+                await self.emit(
+                    "agent_recovery_started",
+                    failure_code=code,
+                    customer_text=self._last_user_text,
+                    metrics=self.metrics(),
+                )
+                try:
+                    await self._recovery_callback(self._last_user_text)
+                    await asyncio.sleep(self.recovery_timeout_seconds)
+                except Exception as exc:
+                    self.failure_code = "model_error"
+                    await self.emit(
+                        "agent_recovery_failed",
+                        failure_code=self.failure_code,
+                        error=redact_sensitive_text(exc)[:1000],
+                        metrics=self.metrics(),
+                    )
+                    return
+                if self.recovery_succeeded < self.recovery_attempted:
+                    self.failure_code = "model_error"
+                    await self.emit(
+                        "agent_recovery_failed",
+                        failure_code=self.failure_code,
+                        metrics=self.metrics(),
+                    )
+
+            self._spawn(recover())
 
     def metrics(self) -> dict[str, Any]:
         return {
@@ -238,6 +277,14 @@ class VoiceSessionRuntime:
             except asyncio.CancelledError:
                 return
             if self._last_agent_turn >= user_turn:
+                return
+            if self.recovery_attempted:
+                self.failure_code = "model_timeout"
+                await self.emit(
+                    "agent_recovery_failed",
+                    failure_code=self.failure_code,
+                    metrics=self.metrics(),
+                )
                 return
             self.recovery_attempted += 1
             await self.emit(

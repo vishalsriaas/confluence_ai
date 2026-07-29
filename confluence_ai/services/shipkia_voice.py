@@ -395,6 +395,124 @@ def _redacted_simulated_arguments(arguments: dict) -> dict:
     }
 
 
+def cleanup_voice_test_runs(retention_days: int = 30) -> dict:
+    """Scrub expired Voice Lab content while retaining aggregate reliability metrics."""
+    if not frappe.db.exists("DocType", "AI Voice Test Run"):
+        return {"status": "skipped", "reason": "doctype_missing", "cleaned": 0}
+    retention_days = max(1, int(retention_days or 30))
+    cutoff = frappe.utils.add_days(frappe.utils.now_datetime(), -retention_days)
+    rows = frappe.get_all(
+        "AI Voice Test Run",
+        filters={"creation": ("<=", cutoff), "retention_cleaned_at": ("is", "not set")},
+        fields=["name", "task"],
+        limit_page_length=10000,
+    )
+    cleaned = 0
+    for row in rows:
+        run = frappe.get_doc("AI Voice Test Run", row.name)
+        if any(
+            (
+                run.transcript,
+                run.feedback_notes,
+                run.scores_json,
+                run.issue_tags,
+                run.customer_name,
+                run.customer_phone,
+            )
+        ):
+            run.update(
+                {
+                    "transcript": "",
+                    "feedback_notes": "",
+                    "scores_json": "",
+                    "issue_tags": "",
+                    "customer_name": "",
+                    "customer_phone": "",
+                }
+            )
+            run.save(ignore_permissions=True)
+            cleaned += 1
+        if row.task and frappe.db.exists("AI Task", row.task):
+            _scrub_voice_task(row.task)
+        run.retention_cleaned_at = frappe.utils.now_datetime()
+        run.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"status": "success", "cleaned": cleaned, "retention_days": retention_days}
+
+
+def _scrub_voice_task(task_name: str) -> None:
+    task = frappe.get_doc("AI Task", task_name)
+    task.transcript = ""
+    task.result_json = _scrub_json_text(task.result_json)
+    task.save(ignore_permissions=True)
+
+    for attempt_name in frappe.get_all(
+        "AI Task Attempt",
+        filters={"task": task_name},
+        pluck="name",
+        limit_page_length=1000,
+    ):
+        attempt = frappe.get_doc("AI Task Attempt", attempt_name)
+        attempt.transcript = ""
+        attempt.response_json = _scrub_json_text(attempt.response_json)
+        attempt.save(ignore_permissions=True)
+
+    if frappe.db.exists("DocType", "AI Call Log"):
+        for call_name in frappe.get_all(
+            "AI Call Log",
+            filters={"task": task_name},
+            pluck="name",
+            limit_page_length=1000,
+        ):
+            call = frappe.get_doc("AI Call Log", call_name)
+            call.transcript = ""
+            call.transcript_summary = ""
+            for fieldname in (
+                "last_payload_json",
+                "initiated_payload_json",
+                "status_payload_json",
+                "recording_payload_json",
+                "transcript_payload_json",
+            ):
+                call.set(fieldname, _scrub_json_text(call.get(fieldname)))
+            call.save(ignore_permissions=True)
+
+
+def _scrub_json_text(value: object) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return ""
+    return json.dumps(_scrub_voice_payload(parsed), separators=(",", ":"), default=str)
+
+
+def _scrub_voice_payload(value):
+    sensitive_keys = {
+        "transcript",
+        "transcript_text",
+        "text",
+        "customer_text",
+        "feedback_notes",
+        "notes",
+        "scores_json",
+        "issue_tags",
+        "customer_phone",
+        "customer_name",
+        "phone",
+    }
+    if isinstance(value, dict):
+        return {
+            key: _scrub_voice_payload(item)
+            for key, item in value.items()
+            if str(key).lower() not in sensitive_keys
+        }
+    if isinstance(value, list):
+        return [_scrub_voice_payload(item) for item in value]
+    return value
+
+
 def _matching_leads(phone: str) -> list[dict]:
     variants = _phone_variants(phone)
     rows = frappe.get_all(

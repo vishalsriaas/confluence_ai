@@ -74,6 +74,9 @@ scheduler_events = {
             "confluence_ai.services.order_confirmation.process_due_workflows",
         ],
     },
+    "daily": [
+        "confluence_ai.services.shipkia_voice.cleanup_voice_test_runs",
+    ],
 }
 
 doc_events = {

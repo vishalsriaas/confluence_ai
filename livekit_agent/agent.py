@@ -356,8 +356,9 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("close")
     def _session_closed(event):
         nonlocal close_reason
-        close_reason = str(getattr(event, "reason", "unknown"))
-        logger.info("Session closed: %s", getattr(event, "reason", "unknown"))
+        reason = getattr(event, "reason", "unknown")
+        close_reason = str(getattr(reason, "value", reason))
+        logger.info("Session closed: %s", close_reason)
         call_done.set()
 
     @session.on("user_input_transcribed")
