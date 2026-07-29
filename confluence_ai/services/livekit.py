@@ -673,6 +673,7 @@ def handle_callback(payload: dict) -> dict:
             attempt.transcript = transcript
 
     _upsert_livekit_call_log(payload, task, attempt)
+    _upsert_voice_test_run(payload, task, event_type_lower)
 
     # Update statuses
     if event_type_lower in {"room_started", "participant_joined", "initiated", "agent_started"}:
@@ -825,6 +826,67 @@ def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: s
     except Exception as exc:
         create_error("Order Confirmation Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
         return {"status": "failed", "error": str(exc)}
+
+
+def _upsert_voice_test_run(payload: dict, task, event_type_lower: str) -> None:
+    if not frappe.db.exists("DocType", "AI Voice Test Run"):
+        return
+    run_name = frappe.db.get_value("AI Voice Test Run", {"task": task.name}, "name")
+    if not run_name:
+        return
+
+    try:
+        from confluence_ai.services.utils import now
+
+        run = frappe.get_doc("AI Voice Test Run", run_name)
+        metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+        if payload.get("prompt_version"):
+            run.prompt_version = payload["prompt_version"]
+        if payload.get("room_name") or payload.get("room"):
+            run.room_name = payload.get("room_name") or payload.get("room")
+        transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
+        if transcript:
+            run.transcript = transcript
+        if metrics:
+            run.metrics_json = as_json(metrics)
+            run.duration_seconds = int(metrics.get("duration_seconds") or 0)
+            run.response_p95_ms = _nearest_rank_p95(metrics.get("response_latencies_ms"))
+            run.tool_p95_ms = _nearest_rank_p95(metrics.get("tool_latencies_ms"))
+            run.reconnect_count = int(metrics.get("reconnect_count") or 0)
+            attempted = int(metrics.get("recovery_attempted") or 0)
+            succeeded = int(metrics.get("recovery_succeeded") or 0)
+            run.recovery_outcome = (
+                "Not Needed"
+                if not attempted
+                else "Recovered"
+                if succeeded >= attempted
+                else "Failed"
+            )
+            run.failure_code = metrics.get("failure_code") or run.failure_code
+            run.close_reason = metrics.get("close_reason") or run.close_reason
+        run.failure_code = payload.get("failure_code") or run.failure_code
+        run.close_reason = payload.get("reason") or run.close_reason
+
+        if event_type_lower in {"room_started", "participant_joined", "agent_started", "initiated"}:
+            run.status = "Running"
+            run.started_at = run.started_at or now()
+        elif event_type_lower in {"call_ended", "room_finished", "completed"}:
+            run.status = "Failed" if (payload.get("failure_code") or str(payload.get("status")).lower() == "failed") else "Completed"
+            run.ended_at = run.ended_at or now()
+        elif event_type_lower in {"failed", "room_failed", "call_failed"}:
+            run.status = "Failed"
+            run.ended_at = run.ended_at or now()
+        run.save(ignore_permissions=True)
+    except Exception as exc:
+        create_error("Voice Test Run Callback", str(exc), source="livekit", task=task.name, exc=exc)
+
+
+def _nearest_rank_p95(values) -> int:
+    samples = sorted(int(value) for value in (values or []) if value is not None)
+    if not samples:
+        return 0
+    rank = max(1, (95 * len(samples) + 99) // 100)
+    return samples[rank - 1]
 
 
 def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:

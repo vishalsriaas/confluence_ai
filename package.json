@@ -1,0 +1,13 @@
+{
+  "name": "confluence-ai-assets",
+  "private": true,
+  "scripts": {
+    "build": "esbuild confluence_ai/public/js/shipkia_voice_lab.bundle.js --bundle --minify --sourcemap --target=es2017 --outfile=confluence_ai/public/dist/js/shipkia_voice_lab.bundle.js"
+  },
+  "dependencies": {
+    "livekit-client": "2.21.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}

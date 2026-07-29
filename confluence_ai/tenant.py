@@ -310,6 +310,10 @@ def ai_tool_permission_query_condition(user: str | None = None) -> str:
 	return _condition_for("AI Tool Permission", user)
 
 
+def ai_voice_test_run_query_condition(user: str | None = None) -> str:
+	return _condition_for("AI Voice Test Run", user)
+
+
 def ai_webhook_event_query_condition(user: str | None = None) -> str:
 	return _condition_for("AI Webhook Event", user)
 

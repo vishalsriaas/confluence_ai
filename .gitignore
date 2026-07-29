@@ -10,3 +10,6 @@ venv/
 *.log
 livekit_agent/.livekit/
 livekit_agent/console-recordings/
+node_modules/
+confluence_ai/public/node_modules
+confluence_ai/public/dist/
