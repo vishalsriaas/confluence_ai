@@ -173,6 +173,15 @@ _RATE_CONTROL_PROPERTIES = {
             "rate calculation and never forwarded to the pricing backend."
         ),
     },
+    "order_value_status": {
+        "type": "string",
+        "enum": ["Shared", "Not Shared"],
+        "description": (
+            "Use Shared with a numeric order_value. Use Not Shared only when a customer who selected "
+            "COD explicitly refuses to share order value; the voice worker will return a clearly "
+            "labelled Prepaid-basis fallback."
+        ),
+    },
 }
 _RATE_LOCAL_PROPERTIES = {
     **_RATE_QUALIFICATION_PROPERTIES,
@@ -210,6 +219,14 @@ _REFUSAL_VALUES = {
     "don't want to share",
 }
 _PAYMENT_REFUSAL_VALUES = _REFUSAL_VALUES | {"unknown", "not applicable"}
+_BOTH_PAYMENT_VALUES = {
+    "both",
+    "dono",
+    "prepaid and cod",
+    "prepaid aur cod",
+    "cod and prepaid",
+    "cod aur prepaid",
+}
 _RATE_FIELD_LABELS = {
     "business_name": "business or brand name",
     "business_type": "business type",
@@ -221,6 +238,7 @@ _RATE_FIELD_LABELS = {
     "delivery_pincode": "6-digit delivery pincode",
     "dead_weight": "shipment weight",
     "payment_type": "Prepaid or COD payment mode",
+    "order_value": "COD order value",
 }
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097f]")
 _WORD_RE = re.compile(r"[a-z]+(?:'[a-z]+)?")
@@ -461,7 +479,12 @@ def _merge_remembered_rate_arguments(
         and _normalized_text(current["payment_type"])
         != _normalized_text(remembered["payment_type"])
     )
-    if payment_changed and "order_value" not in current:
+    if payment_changed:
+        remembered.pop("order_value", None)
+        remembered.pop("order_value_status", None)
+    if _has_value(current, "order_value"):
+        remembered.pop("order_value_status", None)
+    elif _normalized_text(current.get("order_value_status")) == "not shared":
         remembered.pop("order_value", None)
 
     supplied = {
@@ -652,14 +675,71 @@ def _prepare_rate_arguments(
         )
 
     payment_defaulted = payment_type in _PAYMENT_REFUSAL_VALUES
-    if payment_type not in {"prepaid", "pre-paid", "paid", "cod", "cash on delivery"} and not payment_defaulted:
+    payment_selected_both = payment_type in _BOTH_PAYMENT_VALUES
+    payment_is_cod = payment_type in {"cod", "cash on delivery"}
+    if (
+        payment_type not in {"prepaid", "pre-paid", "paid", "cod", "cash on delivery"}
+        and not payment_defaulted
+        and not payment_selected_both
+    ):
         return (
             None,
             {},
             _rate_gate_response(
                 "shipment_details_required",
                 "payment_type",
-                "The payment mode must be Prepaid, COD, or an explicit refusal.",
+                "The payment mode must be Prepaid, COD, Both, or an explicit refusal.",
+            ),
+        )
+
+    order_value_status = _normalized_text(arguments.get("order_value_status"))
+    if order_value_status and order_value_status not in {"shared", "not shared"}:
+        return (
+            None,
+            {},
+            {
+                "status": "invalid_arguments",
+                "invalid_fields": ["order_value_status"],
+                "message": "order_value_status must be Shared or Not Shared.",
+            },
+        )
+
+    if _has_value(arguments, "order_value"):
+        try:
+            if float(arguments["order_value"]) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return (
+                None,
+                {},
+                _rate_gate_response(
+                    "shipment_details_required",
+                    "order_value",
+                    "A valid COD order value of zero or more is required.",
+                ),
+            )
+
+    cod_order_value_refused = (
+        payment_is_cod
+        and order_value_status == "not shared"
+        and not _has_value(arguments, "order_value")
+    )
+    if (
+        payment_is_cod
+        and not _has_value(arguments, "order_value")
+        and not cod_order_value_refused
+    ):
+        return (
+            None,
+            {},
+            _rate_gate_response(
+                "shipment_details_required",
+                "order_value",
+                (
+                    "COD is selected, but order value is not present in local call state. Ask only "
+                    "for the COD order value. Do not quote a rate, say the route is unavailable, or "
+                    "offer other rates before this is handled."
+                ),
             ),
         )
 
@@ -668,7 +748,22 @@ def _prepare_rate_arguments(
         for key, value in arguments.items()
         if key in backend_argument_names
     }
+    payment_basis_reason = ""
     if payment_defaulted:
+        payment_basis_reason = "payment_type_refused"
+        forwarded["payment_type"] = "Prepaid"
+        forwarded.pop("order_value", None)
+    elif payment_selected_both:
+        payment_basis_reason = "both_selected"
+        forwarded["payment_type"] = "Prepaid"
+        forwarded.pop("order_value", None)
+    elif cod_order_value_refused:
+        payment_basis_reason = "cod_order_value_refused"
+        forwarded["payment_type"] = "Prepaid"
+        forwarded.pop("order_value", None)
+    elif payment_is_cod:
+        forwarded["payment_type"] = "COD"
+    else:
         forwarded["payment_type"] = "Prepaid"
 
     return (
@@ -676,6 +771,9 @@ def _prepare_rate_arguments(
         {
             "qualification_ended_by_refusal": refusal_reached,
             "payment_basis_defaulted": payment_defaulted,
+            "payment_selected_both": payment_selected_both,
+            "cod_order_value_refused": cod_order_value_refused,
+            "payment_basis_reason": payment_basis_reason,
         },
         None,
     )
@@ -688,10 +786,11 @@ def _augment_rate_tool_schema(input_schema: dict[str, Any]) -> tuple[dict[str, A
     properties.update(copy.deepcopy(_RATE_LOCAL_PROPERTIES))
 
     payment_schema = properties.setdefault("payment_type", {"type": "string"})
-    payment_schema["enum"] = ["Prepaid", "COD", "Not Shared"]
+    payment_schema["enum"] = ["Prepaid", "COD", "Both", "Not Shared"]
     payment_schema["description"] = (
-        "Customer-stated Prepaid or COD. Use Not Shared only after the customer explicitly refuses; "
-        "the voice worker will calculate and label a Prepaid-basis fallback."
+        "Customer-stated Prepaid, COD, or Both. Use Both when the customer says both/dono or selects "
+        "Prepaid and COD together; the voice worker uses Prepaid. Use Not Shared only after the "
+        "customer explicitly refuses payment type; the worker labels a Prepaid-basis fallback."
     )
     schema["required"] = []
     schema["additionalProperties"] = False
@@ -1020,21 +1119,27 @@ def _voice_safe_unknown_zone_result(
             for breakdown in zone_breakdowns.values():
                 if not isinstance(breakdown, dict):
                     continue
-                total = breakdown.get("total")
-                if isinstance(total, bool):
+                amount = breakdown.get("total")
+                amount_basis = "gst_inclusive_total"
+                if amount is None:
+                    amount = breakdown.get("shipping_charge")
+                    amount_basis = "shipping_charge_before_cod_and_gst"
+                if isinstance(amount, bool):
                     continue
                 try:
-                    numeric_total = float(total)
+                    numeric_amount = float(amount)
                 except (TypeError, ValueError):
                     continue
-                if not math.isfinite(numeric_total) or numeric_total < 0:
+                if not math.isfinite(numeric_amount) or numeric_amount < 0:
                     continue
-                candidates.append((numeric_total, breakdown))
+                safe_breakdown = copy.deepcopy(breakdown)
+                safe_breakdown["amount_basis"] = amount_basis
+                candidates.append((numeric_amount, safe_breakdown))
 
         if candidates:
-            numeric_total, breakdown = min(candidates, key=lambda item: item[0])
+            numeric_amount, breakdown = min(candidates, key=lambda item: item[0])
             safe_rate["starting_rate_breakdown"] = copy.deepcopy(breakdown)
-            sortable_rates.append((numeric_total, safe_rate))
+            sortable_rates.append((numeric_amount, safe_rate))
         safe_rates.append(safe_rate)
 
     safe_result = {
@@ -1078,15 +1183,25 @@ def _voice_safe_unknown_zone_result(
             "courier_partner": cheapest.get("courier_partner"),
             "service": cheapest.get("service"),
             "breakdown": copy.deepcopy(cheapest["starting_rate_breakdown"]),
+            "amount_basis": cheapest["starting_rate_breakdown"].get("amount_basis"),
             "chargeable_weight_g": result.get("chargeable_weight_g"),
             "payment_type": result.get("payment_type"),
         }
-        safe_result["message"] = (
-            "Reply politely and directly in one short sentence. State the supplied pincode route, "
-            "weight/payment basis, exact service and only verified_starting_rate as a "
-            "GST-inclusive 'starting from' amount. Do not explain zones or route validation, list "
-            "alternatives, recap, or ask a follow-up question."
-        )
+        if cheapest["starting_rate_breakdown"].get("amount_basis") == "gst_inclusive_total":
+            safe_result["message"] = (
+                "Reply politely and directly in one short sentence. State the supplied pincode "
+                "route, weight/payment basis, exact service and only verified_starting_rate as a "
+                "GST-inclusive 'starting from' amount. Do not explain zones or route validation, "
+                "list alternatives, recap, or ask a follow-up question."
+            )
+        else:
+            safe_result["message"] = (
+                "A verified shipping starting charge exists even though an exact COD-inclusive "
+                "total is unavailable. State only the returned service and shipping_charge as the "
+                "starting shipping amount, followed by the returned COD formula. Do not call it "
+                "GST-inclusive, say the route or rate is unavailable, offer other rates, or invent "
+                "an exact total."
+            )
     else:
         safe_result["message"] = (
             "No verified GST-inclusive starting total is available for this route result. "
@@ -1385,6 +1500,7 @@ def make_mcp_forwarder(
                 "payment_basis_defaulted": bool(
                     rate_metadata.get("payment_basis_defaulted")
                 ),
+                "payment_basis_reason": rate_metadata.get("payment_basis_reason", ""),
                 "route_validation_note_required": bool(
                     rate_metadata.get("route_validation_note_required")
                 ),
@@ -1506,19 +1622,37 @@ def make_mcp_forwarder(
                             **result,
                             "ask_monthly_shipment_volume_now": False,
                         }
+                    payment_basis_reason = str(
+                        rate_metadata.get("payment_basis_reason") or ""
+                    )
                     if (
                         tool_name == "calculate_shipkia_rate"
-                        and rate_metadata.get("payment_basis_defaulted")
+                        and payment_basis_reason
                         and isinstance(result, dict)
                     ):
+                        if payment_basis_reason == "both_selected":
+                            payment_basis_note = (
+                                "The customer selected both Prepaid and COD. Present only the "
+                                "returned Prepaid rate, clearly labelled Prepaid. Do not ask for "
+                                "order value, add a COD calculation, or call this a refusal."
+                            )
+                        elif payment_basis_reason == "cod_order_value_refused":
+                            payment_basis_note = (
+                                "The customer selected COD but explicitly refused order value. "
+                                "Accept that refusal and present only the returned Prepaid-basis "
+                                "rate. Do not ask for order value again or claim a COD-inclusive total."
+                            )
+                        else:
+                            payment_basis_note = (
+                                "The customer did not share Prepaid or COD. Present these as "
+                                "Prepaid-basis rates and explain that COD charges are additional."
+                            )
                         result = {
                             **result,
                             "payment_basis_defaulted": True,
                             "payment_basis": "Prepaid",
-                            "payment_basis_note": (
-                                "The customer did not share Prepaid or COD. Present these as "
-                                "Prepaid-basis rates and explain that COD charges are additional."
-                            ),
+                            "payment_basis_reason": payment_basis_reason,
+                            "payment_basis_note": payment_basis_note,
                         }
                     text = compact_json(result)
                     _TOOL_CACHE[key] = (now, text)
@@ -1602,7 +1736,12 @@ async def fetch_tools(
                 "call is a local state checkpoint: it does not request backend pricing and returns "
                 "the actual next missing field. If that field was answered earlier in the same-call "
                 "transcript, silently call again with the earlier answer instead of asking twice. "
-                "Ask payment mode once; use Not Shared only after an explicit refusal. For later "
+                "Ask payment mode once. Use payment_type=Both when the customer says both/dono; "
+                "the worker will calculate Prepaid. For COD, call once with COD and no invented "
+                "order value; the local response will require only order value before pricing. "
+                "After a numeric value, call again with order_value. If the customer refuses it, "
+                "use order_value_status=Not Shared and the worker will calculate a labelled "
+                "Prepaid fallback. Use payment_type=Not Shared only after payment-type refusal. For later "
                 "normal-rate or flat-rate requests in the same call, omit unchanged fields; the "
                 "voice worker reuses them and must not ask the customer again. "
                 "For a normal-rate request, omit zone unless the customer voluntarily supplies an "
@@ -1616,7 +1755,8 @@ async def fetch_tools(
                 "for the first generic flat request, More Options only when alternatives are "
                 "requested, and Selected Service with the exact service after a selection. Never "
                 "ask for monthly shipment volume; include it only if volunteered. If the customer "
-                "changes only a pickup or delivery place without giving its new pincode, set the "
+                "changes only a pickup or delivery place without explicitly giving its new six-digit "
+                "pincode, never infer one from the city name; set the "
                 "matching pickup_location_changed or delivery_location_changed flag and ask only "
                 "for that new pincode."
             )
@@ -1688,9 +1828,17 @@ class ShipKiaAssistant(Agent):
   remaining optional qualification, and continue with only the missing shipment inputs.
 - "I do not know" handles only the current qualification field; it is not permission to skip the
   remaining sequence. Never treat silence or an unrelated answer as a refusal.
-- Pickup pincode, delivery pincode, and weight are mandatory. Ask payment mode once; if the customer
-  explicitly refuses it, use payment_type="Not Shared" and describe the tool result only as a
-  Prepaid-basis rate with additional COD charges when applicable.
+- Pickup pincode, delivery pincode, and weight are mandatory. A pincode must be an explicitly
+  supplied six-digit customer or CRM value; never invent one from a city such as Delhi or Mumbai.
+  Ask payment mode once. If the customer says both/dono or selects Prepaid and COD together, use
+  payment_type="Both"; give only the returned Prepaid rate and do not ask for order value.
+- If the customer selects COD, checkpoint payment_type="COD". Before any price, ask only for the
+  missing order value. After a numeric answer, call with order_value and give the exact verified COD
+  result. Never say the route or rate is unavailable merely because order value was missing, and
+  never offer other rates in that turn. If the customer explicitly refuses order value, use
+  order_value_status="Not Shared" and clearly present the returned fallback as Prepaid basis.
+- If the customer explicitly refuses payment type itself, use payment_type="Not Shared" and describe
+  the tool result only as a Prepaid-basis rate with additional COD charges when applicable.
 - If calculate_shipkia_rate returns qualification_required or shipment_details_required, first
   inspect the same-call memory. When its next missing field was already answered, silently call the
   tool again with that answer and do not speak or ask it again. Ask only when that field was genuinely
