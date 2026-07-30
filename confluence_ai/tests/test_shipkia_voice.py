@@ -53,7 +53,38 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("ShipCart remains ShipCart", prompt)
         self.assertIn("explicitly confirm both weight and", prompt)
         self.assertIn("A request for information is not consent to a callback", prompt)
+        self.assertEqual(prompt.count("Namaste! Main ShipKia ka assistant hoon"), 1)
+        self.assertIn("answered-fields checklist", prompt)
+        self.assertIn("detail supplied inside a", prompt)
+        self.assertIn("multi-detail answer", prompt)
+        self.assertIn("brand or business name", prompt)
+        self.assertIn("handled question again", prompt)
+        self.assertIn("shipping challenge the next qualification priority", prompt)
+        self.assertIn("Aapko shipping operations mein abhi sabse badi challenge", prompt)
+        self.assertIn("relevant solution using only approved ShipKia capabilities", prompt)
+        self.assertIn("6-digit pickup pincode", prompt)
+        self.assertIn("Both pickup_pincode and delivery_pincode are mandatory", prompt)
+        self.assertIn("even when the requested service appears", prompt)
+        self.assertIn("https://auth.shipkia.com/signup", prompt)
+        self.assertIn("Do not push, repeatedly offer, or assume a scheduled sales call", prompt)
+        self.assertIn("hard price floor", prompt)
+        self.assertIn("switch from a quoted GST-inclusive total", prompt)
+        self.assertIn("use calculate_shipkia_rate.flat_rate_options", prompt)
+        self.assertIn("calculate_shipkia_rate.flat_additional_rate_options", prompt)
+        self.assertIn("shipment charge remains zone-dependent", prompt)
+        self.assertIn("Never call a lowest, average, starting", prompt)
+        self.assertIn("production task provides a customer phone", prompt)
         self.assertNotIn("guaranteed RTO reduction", prompt)
+
+    def test_voice_v3_prompt_distinguishes_complete_and_additional_flat_rates(self):
+        prompt = get_shipkia_voice_prompt("shipkia-voice-v3")
+
+        self.assertIn("use calculate_shipkia_rate.flat_rate_options", prompt)
+        self.assertIn("calculate_shipkia_rate.flat_additional_rate_options", prompt)
+        self.assertIn("shipment charge remains zone-dependent", prompt)
+        self.assertIn("never describe a flat additional-weight component", prompt)
+        self.assertIn("If Shadowfax Surface 5 KG is returned", prompt)
+        self.assertIn("do not rename SURFACE as", prompt)
 
     def test_managed_prompt_sections_are_idempotent_and_capability_gated(self):
         original = "ShipKia voice prompt."
@@ -73,6 +104,19 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("reply naturally in English", once)
         self.assertIn("reply in natural conversational Hinglish", once)
         self.assertIn("Do not translate, repeat, or paraphrase", once)
+        self.assertEqual(once.count("Namaste! Main ShipKia ka assistant hoon"), 1)
+        self.assertIn("answered-fields checklist", once)
+        self.assertIn("flat_rate_options", once)
+        self.assertIn("brand/business name", once)
+        self.assertIn("main shipping challenge the next qualification priority", once)
+        self.assertIn("Aapko shipping operations mein abhi sabse", once)
+        self.assertIn("6-digit pickup pincode", once)
+        self.assertIn("Never call the rate tool or quote a rate before both pincodes", once)
+        self.assertIn("https://auth.shipkia.com/signup", once)
+        self.assertIn("Do not push, repeatedly offer, or assume a scheduled sales call", once)
+        self.assertIn("hard price", once)
+        self.assertIn("quoted GST-inclusive total", once)
+        self.assertIn("Direct Console remains read-only", once)
 
     def test_shipkia_dispatch_guard_rejects_automatic_or_duplicate_dispatches(self):
         self.assertIsNone(_shipkia_dispatch_conflict([]))
@@ -122,14 +166,15 @@ class TestShipKiaVoice(FrappeTestCase):
             ),
         )
 
-    def test_rate_sales_prompt_asks_current_rate_and_speaks_verified_starting_price(self):
+    def test_rate_sales_prompt_prioritizes_request_and_speaks_verified_price(self):
         prompt = _with_managed_shipkia_prompt("ShipKia voice prompt.")
 
-        self.assertIn("current-rate-first approach", prompt)
-        self.assertIn("Aap abhi similar shipment ke liye approximately kitna rate", prompt)
+        self.assertIn("customer-request-first approach", prompt)
+        self.assertIn("Do not require a", prompt)
+        self.assertIn("current rate before giving the requested ShipKia rate", prompt)
         self.assertIn('ShipKia rates ₹{amount} se start hote hain', prompt)
         self.assertIn("does not share or does not have a current rate", prompt)
-        self.assertIn("shipment volume is known", prompt)
+        self.assertIn("monthly shipment volume", prompt)
         self.assertIn("avoidable RTO reduce karne mein", prompt)
         self.assertIn("Never add an arbitrary margin", prompt)
         self.assertIn("Never quote a remembered or universal starting rate", prompt)
@@ -152,18 +197,22 @@ class TestShipKiaVoice(FrappeTestCase):
             {
                 "phone": phone,
                 "customer_name": "Local Voice Test",
+                "organization": "Example Brand",
                 "shipkia_business_type": "D2C",
                 "shipkia_monthly_shipments": 125,
                 "shipkia_current_provider_type": "Shipping Aggregator",
                 "shipkia_current_courier_partner": "Example Aggregator",
                 "shipkia_current_shipping_rate": 42.5,
                 "shipkia_current_rate_basis": "500 g prepaid, GST included, Delhi to Mumbai",
+                "shipkia_interested_services": "Flat rates, Onboarding",
+                "shipkia_chat_summary": "Customer wants a flat-rate comparison.",
             },
             agent="agent-445",
         )
         second = create_or_update_shipkia_lead(
             {
                 "phone": phone.replace("+91", ""),
+                "organization": "",
                 "shipkia_business_type": "",
                 "shipkia_main_pain_point": "High Rates",
             },
@@ -177,6 +226,7 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertEqual(first["lead"], second["lead"])
 
         lead = frappe.get_doc("CRM Lead", first["lead"])
+        self.assertEqual(lead.organization, "Example Brand")
         self.assertEqual(lead.shipkia_business_type, "D2C")
         self.assertEqual(lead.shipkia_monthly_shipments, 125)
         self.assertEqual(lead.shipkia_current_provider_type, "Shipping Aggregator")
@@ -187,6 +237,8 @@ class TestShipKiaVoice(FrappeTestCase):
             "500 g prepaid, GST included, Delhi to Mumbai",
         )
         self.assertEqual(lead.shipkia_main_pain_point, "High Rates")
+        self.assertIn("Flat rates", lead.shipkia_interested_services)
+        self.assertEqual(lead.shipkia_chat_summary, "Customer wants a flat-rate comparison.")
 
         lookup = lookup_shipkia_crm_lead({"phone": phone}, agent="agent-445")
         self.assertTrue(lookup["found"])
@@ -230,8 +282,133 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         self.assertEqual(rate["status"], "success")
         self.assertTrue(rate["zone_required"])
+        self.assertFalse(rate["eligible_rates"][0]["is_flat_rate"])
+        self.assertIsNone(rate["eligible_rates"][0]["flat_rate_breakdown"])
+        self.assertFalse(rate["eligible_rates"][0]["additional_rate_is_flat"])
+        self.assertIsNone(rate["eligible_rates"][0]["flat_additional_rate_breakdown"])
+        self.assertFalse(rate["flat_rate_available"])
+        self.assertEqual(rate["flat_rate_options"], [])
+        self.assertFalse(rate["flat_additional_rate_available"])
+        self.assertEqual(rate["flat_additional_rate_options"], [])
         self.assertEqual(rate["eligible_rates"][0]["zone_breakdowns"]["A"]["shipping_charge"], 27.5)
         self.assertEqual(rate["eligible_rates"][0]["zone_breakdowns"]["F"]["shipping_charge"], 51.7)
+
+    def test_rate_card_detects_ekart_surface_500g_all_zone_flat_rate(self):
+        rate = calculate_shipkia_rate(
+            {
+                "dead_weight": 0.5,
+                "payment_type": "Prepaid",
+                "service": "E-Kart SURFACE",
+            },
+            agent="agent-445",
+        )
+
+        self.assertEqual(rate["status"], "success")
+        self.assertFalse(rate["zone_required"])
+        self.assertTrue(rate["flat_rate_available"])
+        self.assertEqual(len(rate["eligible_rates"]), 1)
+        option = rate["eligible_rates"][0]
+        self.assertEqual(option["service"], "E-Kart SURFACE")
+        self.assertTrue(option["is_flat_rate"])
+        self.assertEqual(option["flat_rate_breakdown"]["shipping_charge"], 64.9)
+        self.assertEqual(option["flat_rate_breakdown"]["gst"], 11.68)
+        self.assertEqual(option["flat_rate_breakdown"]["total"], 76.58)
+        self.assertEqual(set(option["zone_breakdowns"]), set("ABCDEF"))
+        self.assertTrue(
+            all(
+                breakdown == option["flat_rate_breakdown"]
+                for breakdown in option["zone_breakdowns"].values()
+            )
+        )
+        self.assertEqual(
+            [flat_option["service"] for flat_option in rate["flat_rate_options"]],
+            ["E-Kart SURFACE"],
+        )
+
+    def test_generic_500g_result_exposes_flat_option_without_replacing_cheapest_rates(self):
+        rate = calculate_shipkia_rate(
+            {
+                "dead_weight": 0.5,
+                "payment_type": "Prepaid",
+            },
+            agent="agent-445",
+        )
+
+        self.assertTrue(rate["zone_required"])
+        self.assertEqual(
+            [option["service"] for option in rate["eligible_rates"]],
+            ["Shree Maruti Surface", "Amazon Shipping Standard", "Delhivery Surface"],
+        )
+        self.assertEqual(
+            [option["service"] for option in rate["flat_rate_options"]],
+            ["E-Kart SURFACE"],
+        )
+        self.assertEqual(
+            rate["flat_rate_options"][0]["flat_rate_breakdown"]["total"],
+            76.58,
+        )
+        self.assertNotIn("zone_breakdowns", rate["flat_rate_options"][0])
+        self.assertTrue(rate["flat_additional_rate_available"])
+        self.assertEqual(
+            [option["service"] for option in rate["flat_additional_rate_options"]],
+            ["Shadowfax Surface 5 KG", "E-Kart EXPRESS"],
+        )
+        shadowfax = rate["flat_additional_rate_options"][0]
+        self.assertEqual(shadowfax["courier_partner"], "Shadowfax")
+        self.assertEqual(shadowfax["applies_after_weight_g"], 10000)
+        self.assertEqual(shadowfax["additional_weight_unit_g"], 1000)
+        self.assertEqual(
+            shadowfax["flat_additional_rate_breakdown"]["shipping_charge"],
+            9.9,
+        )
+        self.assertEqual(shadowfax["flat_additional_rate_breakdown"]["gst"], 1.78)
+        self.assertEqual(shadowfax["flat_additional_rate_breakdown"]["total"], 11.68)
+        self.assertEqual(
+            rate["flat_additional_rate_options"][1]["additional_weight_unit_g"],
+            500,
+        )
+
+    def test_shadowfax_flat_additional_rate_does_not_mark_base_as_flat(self):
+        rate = calculate_shipkia_rate(
+            {
+                "dead_weight": 0.5,
+                "payment_type": "Prepaid",
+                "service": "Shadowfax Surface 5 KG",
+            },
+            agent="agent-445",
+        )
+
+        self.assertEqual(rate["status"], "success")
+        self.assertTrue(rate["zone_required"])
+        self.assertFalse(rate["flat_rate_available"])
+        self.assertEqual(rate["flat_rate_options"], [])
+        self.assertTrue(rate["flat_additional_rate_available"])
+        self.assertEqual(len(rate["eligible_rates"]), 1)
+        option = rate["eligible_rates"][0]
+        self.assertFalse(option["is_flat_rate"])
+        self.assertIsNone(option["flat_rate_breakdown"])
+        self.assertTrue(option["additional_rate_is_flat"])
+        self.assertEqual(
+            option["zone_breakdowns"]["A"]["shipping_charge"],
+            86.9,
+        )
+        self.assertEqual(
+            option["zone_breakdowns"]["F"]["shipping_charge"],
+            207.9,
+        )
+        additional = rate["flat_additional_rate_options"][0]
+        self.assertEqual(additional["service"], "Shadowfax Surface 5 KG")
+        self.assertEqual(additional["applies_after_weight_g"], 10000)
+        self.assertEqual(additional["additional_weight_unit_g"], 1000)
+        self.assertEqual(
+            additional["flat_additional_rate_breakdown"],
+            {
+                "shipping_charge": 9.9,
+                "cod_charge": 0.0,
+                "gst": 1.78,
+                "total": 11.68,
+            },
+        )
 
     def test_rate_card_uses_volumetric_weight_and_additional_slabs(self):
         rate = calculate_shipkia_rate(

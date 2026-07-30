@@ -885,13 +885,108 @@ def _route_key(arguments: dict[str, object]) -> tuple[str, str] | None:
     return pickup, delivery
 
 
+def _voice_safe_customer_zone_result(
+    result: dict[str, Any],
+    *,
+    route_basis: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    zone = str(result.get("zone") or "").strip().upper()
+    eligible_rates = result.get("eligible_rates")
+    if not zone or not isinstance(eligible_rates, list):
+        return result
+
+    candidates: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    for raw_rate in eligible_rates:
+        if not isinstance(raw_rate, dict):
+            continue
+        breakdown = {
+            key: copy.deepcopy(raw_rate[key])
+            for key in (
+                "shipping_charge",
+                "cod_charge",
+                "cod_formula",
+                "gst",
+                "total",
+            )
+            if key in raw_rate
+        }
+        amount = breakdown.get("total")
+        if amount is None:
+            amount = breakdown.get("shipping_charge")
+        if isinstance(amount, bool):
+            continue
+        try:
+            numeric_amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric_amount) or numeric_amount < 0:
+            continue
+        candidates.append((numeric_amount, raw_rate, breakdown))
+
+    if not candidates:
+        return result
+
+    _, cheapest, breakdown = min(candidates, key=lambda item: item[0])
+    safe_result = {
+        key: copy.deepcopy(result[key])
+        for key in (
+            "status",
+            "movement_type",
+            "payment_type",
+            "chargeable_weight_g",
+            "cod_order_value_required",
+            "requested_selection",
+            "requested_service_unavailable",
+            "preferred_courier_unavailable",
+            "exact_service_unavailable",
+            "speed_selection_note",
+        )
+        if key in result
+    }
+    safe_result.update(
+        {
+            "zone": zone,
+            "customer_supplied_zone": True,
+            "route_basis": copy.deepcopy(route_basis or {}),
+            "verified_zone_rate_available": True,
+            "verified_zone_rate": {
+                "courier_partner": copy.deepcopy(cheapest.get("courier_partner")),
+                "service": copy.deepcopy(cheapest.get("service")),
+                "breakdown": breakdown,
+                "chargeable_weight_g": result.get("chargeable_weight_g"),
+                "payment_type": result.get("payment_type"),
+            },
+            "eligible_rates": [],
+            "ask_more_rate_options_now": False,
+            "ask_followup_question_now": False,
+        }
+    )
+    if safe_result.get("cod_order_value_required"):
+        safe_result["message"] = (
+            "The customer supplied an approved zone. Reply politely and directly with only the "
+            "returned verified_zone_rate shipping charge for that zone and its COD formula. Ask "
+            "only for order value when an exact COD-inclusive total is required. Do not list other "
+            "services, add a route caveat, recap, or ask an unrelated question."
+        )
+    else:
+        safe_result["message"] = (
+            "The customer supplied an approved zone. Reply politely and directly in one short "
+            "sentence with only the returned verified_zone_rate, including its exact service, "
+            "weight/payment basis and GST-inclusive total. Do not list alternatives, add a route "
+            "caveat, recap, or ask a follow-up question."
+        )
+    return safe_result
+
+
 def _voice_safe_unknown_zone_result(
     result: dict[str, Any],
     *,
     route_basis: dict[str, object] | None = None,
     route_validation_note_required: bool = True,
 ) -> dict[str, Any]:
-    if result.get("zone") is not None or not result.get("zone_required"):
+    if result.get("zone") is not None:
+        return _voice_safe_customer_zone_result(result, route_basis=route_basis)
+    if not result.get("zone_required"):
         return result
 
     eligible_rates = result.get("eligible_rates")
@@ -972,7 +1067,9 @@ def _voice_safe_unknown_zone_result(
             "eligible_rates_are_starting_only": True,
             "exact_route_rate_available": False,
             "route_basis": copy.deepcopy(route_basis or {}),
-            "route_validation_note_required": route_validation_note_required,
+            "route_validation_note_required": False,
+            "ask_more_rate_options_now": False,
+            "ask_followup_question_now": False,
         }
     )
     if sortable_rates:
@@ -984,22 +1081,12 @@ def _voice_safe_unknown_zone_result(
             "chargeable_weight_g": result.get("chargeable_weight_g"),
             "payment_type": result.get("payment_type"),
         }
-        if route_validation_note_required:
-            safe_result["message"] = (
-                "State the supplied pickup and delivery pincodes plus the returned weight and "
-                "payment basis, then give only verified_starting_rate as a GST-inclusive "
-                "'starting from' amount. Add one short sentence that the final courier price will "
-                "be confirmed after route validation. Both pincodes are already supplied; do not "
-                "ask for them again. Never mention zones, mapping availability, or internal "
-                "pricing areas."
-            )
-        else:
-            safe_result["message"] = (
-                "For this already-established pincode route, give only verified_starting_rate as "
-                "a GST-inclusive 'starting from' amount with its service, weight and payment "
-                "basis. Do not repeat any route-validation limitation, mention zones or mapping, "
-                "or ask for either pincode again."
-            )
+        safe_result["message"] = (
+            "Reply politely and directly in one short sentence. State the supplied pincode route, "
+            "weight/payment basis, exact service and only verified_starting_rate as a "
+            "GST-inclusive 'starting from' amount. Do not explain zones or route validation, list "
+            "alternatives, recap, or ask a follow-up question."
+        )
     else:
         safe_result["message"] = (
             "No verified GST-inclusive starting total is available for this route result. "
@@ -1007,7 +1094,7 @@ def _voice_safe_unknown_zone_result(
             "mentioning zones or mapping, and do not ask for either pincode again."
         )
 
-    safe_result["eligible_rates"] = safe_rates
+    safe_result["eligible_rates"] = [cheapest] if sortable_rates else []
     for key in (
         "flat_rate_available",
         "flat_rate_options",
@@ -1517,7 +1604,11 @@ async def fetch_tools(
                 "transcript, silently call again with the earlier answer instead of asking twice. "
                 "Ask payment mode once; use Not Shared only after an explicit refusal. For later "
                 "normal-rate or flat-rate requests in the same call, omit unchanged fields; the "
-                "voice worker reuses them and must not ask the customer again. Set "
+                "voice worker reuses them and must not ask the customer again. "
+                "For a normal-rate request, omit zone unless the customer voluntarily supplies an "
+                "approved Zone A, B, C, D, E or F. Without zone, return only the verified lowest "
+                "starting rate. With a customer-supplied zone, return only the verified lowest "
+                "rate for that zone. Never ask the customer to identify a zone. Set "
                 "rate_request_type=Flat for a flat-rate request. Never use flat_rate_options or "
                 "flat_additional_rate_options as a service name. A service follow-up after a flat "
                 "answer remains flat; set normal_rates_explicitly_requested=true only when the "
@@ -1577,7 +1668,9 @@ class ShipKiaAssistant(Agent):
 ## Voice runtime rules
 - Follow the Confluence ShipKia prompt and known context exactly.
 - Never speak tool names, field names, JSON, metadata, record IDs, or implementation details.
-- Speak naturally in short turns and ask only one useful question at a time.
+- Be consistently courteous, calm and respectful. Speak naturally in short turns and ask only one
+  useful question at a time. Do not sound abrupt, lecture the customer, over-explain, recap known
+  details, or add an unrelated question.
 - The per-turn response-language lock added to the conversation is authoritative. For English,
   speak only natural English with no Hindi, Hinglish or Devanagari. For Hinglish, speak natural
   conversational Hinglish using Latin script only, with no Devanagari and no duplicate English
@@ -1616,9 +1709,13 @@ class ShipKiaAssistant(Agent):
   the rate tool yet; set pickup_location_changed=true or delivery_location_changed=true and ask
   only for that location's 6-digit pincode.
 - A normal result marked as a starting rate must be described with the supplied pincode pair,
-  returned weight and payment basis. Never tell the customer that a zone or pincode mapping is
-  unknown, never ask them for an internal zone, and never expose Zone A-F. If route validation was
-  already explained for the same pincode pair, do not repeat that limitation.
+  returned weight and payment basis in one direct, polite sentence. Give only the single returned
+  verified lowest GST-inclusive "starting from" rate. Do not list alternatives, add a route or
+  zone explanation, or ask a follow-up question. Never ask the customer for an internal zone.
+- If the customer voluntarily states an approved Zone A, B, C, D, E or F, pass that exact zone to
+  calculate_shipkia_rate and give only the single returned verified lowest rate for that zone.
+  Clearly identify the supplied zone, exact service, weight/payment basis and GST-inclusive total.
+  Do not offer alternatives or ask another question after giving it.
 - For an explicit flat-rate request, call calculate_shipkia_rate with rate_request_type="Flat".
   Never send flat_rate_options or flat_additional_rate_options as the service. For the first
   generic request use flat_response_scope="Best" and speak only the one returned complete flat

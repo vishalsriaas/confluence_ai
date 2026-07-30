@@ -100,7 +100,23 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
         (requested_courier or requested_service or requested_transport_mode) and not candidates
     )
     candidates.sort(key=_sort_key)
+    flat_rate_options = [
+        _flat_rate_option_summary(rate)
+        for rate in candidates
+        if rate["is_flat_rate"]
+    ][:3]
+    flat_additional_rate_options = sorted(
+        (
+            _flat_additional_rate_option_summary(rate)
+            for rate in candidates
+            if rate["additional_rate_is_flat"]
+        ),
+        key=_flat_additional_rate_sort_key,
+    )[:3]
     eligible_rates = candidates[:3]
+    all_eligible_rates_flat = bool(eligible_rates) and all(
+        rate["is_flat_rate"] for rate in eligible_rates
+    )
     card = rate_card_metadata()
     response: dict[str, Any] = {
         "status": (
@@ -119,7 +135,11 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
         "chargeable_weight_g": int(chargeable_weight_g),
         "dimensions_used": volumetric_weight_kg is not None,
         "zone": zone,
-        "zone_required": zone is None and not requested_selection_unavailable,
+        "zone_required": (
+            zone is None
+            and not requested_selection_unavailable
+            and not all_eligible_rates_flat
+        ),
         "cod_order_value_required": payment_type == "COD" and order_value is None,
         "requested_selection": {
             "courier": requested_courier or None,
@@ -134,6 +154,10 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
             "The active rate card has prices but no delivery-time or SLA data. Do not describe "
             "an Air or Express-labelled option as the fastest or promise a delivery time."
         ),
+        "flat_rate_available": bool(flat_rate_options),
+        "flat_rate_options": flat_rate_options,
+        "flat_additional_rate_available": bool(flat_additional_rate_options),
+        "flat_additional_rate_options": flat_additional_rate_options,
         "eligible_rates": eligible_rates,
     }
 
@@ -169,6 +193,11 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
             "No non-zero rate is configured for this movement, weight and courier selection. "
             "Do not invent a rate."
         )
+    elif zone is None and all_eligible_rates_flat:
+        response["message"] = (
+            "Every returned option has one verified amount across complete Zones A-F. Present the "
+            "flat_rate_breakdown without an approved-zone qualification."
+        )
     elif zone is None:
         response["message"] = (
             "The rate card does not map pincodes to zones. Give only a qualified starting price "
@@ -189,6 +218,21 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
         response["speed_selection_note"] = (
             "These options come only from active rate-card service names containing Air or "
             "Express. They are not verified as fastest because the rate card has no transit SLA."
+        )
+
+    if flat_rate_options:
+        response["flat_rate_note"] = (
+            "flat_rate_options contains only services whose complete Zone A-F amount breakdown is "
+            "identical. Use these options when the customer explicitly asks for a flat rate; do "
+            "not describe any other option as flat."
+        )
+
+    if flat_additional_rate_options:
+        response["flat_additional_rate_note"] = (
+            "flat_additional_rate_options contains additional-weight charges that are identical "
+            "across complete Zones A-F. These are not complete flat shipment rates because the "
+            "base charge can still depend on the approved zone. State the configured base slab "
+            "and the verified per-unit additional charge."
         )
 
     if volumetric_weight_kg is None:
@@ -335,15 +379,14 @@ def _calculate_service(
     if selected_row is None:
         return None
 
-    zones = (zone,) if zone else ZONES
-    breakdowns: dict[str, dict[str, Any]] = {}
-    for selected_zone in zones:
+    all_zone_breakdowns: dict[str, dict[str, Any]] = {}
+    for selected_zone in ZONES:
         shipping = selected_row.zone_prices[selected_zone]
         if additional_units and additional_row:
             shipping += Decimal(additional_units) * additional_row.zone_prices[selected_zone]
         if shipping == 0:
             continue
-        breakdowns[selected_zone] = _amount_breakdown(
+        all_zone_breakdowns[selected_zone] = _amount_breakdown(
             shipping=shipping,
             payment_type=payment_type,
             order_value=order_value,
@@ -351,9 +394,11 @@ def _calculate_service(
             cod_percentage=selected_row.cod_percentage,
         )
 
-    if not breakdowns:
+    if not all_zone_breakdowns or (zone and zone not in all_zone_breakdowns):
         return None
 
+    flat_rate_breakdown = _verified_flat_rate_breakdown(all_zone_breakdowns)
+    flat_additional_rate_breakdown = _verified_flat_additional_rate_breakdown(additional_row)
     result: dict[str, Any] = {
         "courier_partner": selected_row.courier_partner,
         "service": selected_row.service,
@@ -365,12 +410,79 @@ def _calculate_service(
         "cod_percentage": _number(selected_row.cod_percentage, 3),
         "dph_divisor_metadata": _number(selected_row.dph_divisor, 3),
         "dph_included_in_charge": False,
+        "is_flat_rate": flat_rate_breakdown is not None,
+        "flat_rate_breakdown": flat_rate_breakdown,
+        "additional_rate_is_flat": flat_additional_rate_breakdown is not None,
+        "flat_additional_rate_breakdown": flat_additional_rate_breakdown,
     }
     if zone:
-        result.update(breakdowns[zone])
+        result.update(all_zone_breakdowns[zone])
     else:
-        result["zone_breakdowns"] = breakdowns
+        result["zone_breakdowns"] = all_zone_breakdowns
     return result
+
+
+def _verified_flat_rate_breakdown(
+    breakdowns: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if set(breakdowns) != set(ZONES):
+        return None
+    first = breakdowns[ZONES[0]]
+    if any(breakdowns[zone] != first for zone in ZONES[1:]):
+        return None
+    return dict(first)
+
+
+def _flat_rate_option_summary(rate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "courier_partner": rate["courier_partner"],
+        "service": rate["service"],
+        "pricing_structure": rate["pricing_structure"],
+        "base_weight_g": rate["base_weight_g"],
+        "additional_weight_unit_g": rate["additional_weight_unit_g"],
+        "additional_units": rate["additional_units"],
+        "is_flat_rate": True,
+        "flat_rate_breakdown": rate["flat_rate_breakdown"],
+    }
+
+
+def _verified_flat_additional_rate_breakdown(
+    additional_row: RateRow | None,
+) -> dict[str, Any] | None:
+    if additional_row is None:
+        return None
+    shipping = additional_row.zone_prices[ZONES[0]]
+    if shipping <= 0 or any(
+        additional_row.zone_prices[zone] != shipping for zone in ZONES[1:]
+    ):
+        return None
+    return _amount_breakdown(
+        shipping=shipping,
+        payment_type="Prepaid",
+        order_value=None,
+        cod_minimum=Decimal("0"),
+        cod_percentage=Decimal("0"),
+    )
+
+
+def _flat_additional_rate_option_summary(rate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "courier_partner": rate["courier_partner"],
+        "service": rate["service"],
+        "pricing_structure": rate["pricing_structure"],
+        "applies_after_weight_g": rate["base_weight_g"],
+        "additional_weight_unit_g": rate["additional_weight_unit_g"],
+        "additional_rate_is_flat": True,
+        "flat_additional_rate_breakdown": rate["flat_additional_rate_breakdown"],
+    }
+
+
+def _flat_additional_rate_sort_key(option: dict[str, Any]) -> tuple[float, str]:
+    breakdown = option["flat_additional_rate_breakdown"]
+    return (
+        float(breakdown["shipping_charge"]),
+        str(option["service"]).casefold(),
+    )
 
 
 def _amount_breakdown(

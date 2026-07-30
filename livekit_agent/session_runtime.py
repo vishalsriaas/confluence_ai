@@ -40,6 +40,7 @@ class VoiceSessionRuntime:
         recovery_timeout_seconds: float = 8,
         reconnect_grace_seconds: float = 20,
         false_interruption_timeout_seconds: float = 2.5,
+        native_false_interruption_resume: bool = False,
     ) -> None:
         self.emit = emit
         self.response_timeout_seconds = response_timeout_seconds
@@ -47,6 +48,7 @@ class VoiceSessionRuntime:
         self.recovery_timeout_seconds = recovery_timeout_seconds
         self.reconnect_grace_seconds = reconnect_grace_seconds
         self.false_interruption_timeout_seconds = false_interruption_timeout_seconds
+        self.native_false_interruption_resume = native_false_interruption_resume
         self.started_monotonic = time.monotonic()
         self.started_at = time.time()
         self.turns: list[dict[str, Any]] = []
@@ -193,7 +195,10 @@ class VoiceSessionRuntime:
                     metrics=self.metrics(),
                 )
             )
-            if self._last_user_turn <= speech_turn:
+            if (
+                not self.native_false_interruption_resume
+                and self._last_user_turn <= speech_turn
+            ):
                 self._schedule_interruption_recovery(
                     clean_id,
                     speech_turn,

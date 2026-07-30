@@ -182,6 +182,32 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovery_reasons, [])
         self.assertEqual(runtime.metrics()["interruption_count"], 1)
 
+    async def test_native_false_interruption_resume_does_not_also_regenerate(self) -> None:
+        recovery_reasons: list[str] = []
+
+        async def recover(_customer_text: str, reason: str) -> None:
+            recovery_reasons.append(reason)
+
+        runtime = VoiceSessionRuntime(
+            emit=self.runtime.emit,
+            response_timeout_seconds=0.1,
+            playout_timeout_seconds=0.1,
+            recovery_timeout_seconds=0.01,
+            reconnect_grace_seconds=0.01,
+            false_interruption_timeout_seconds=0.01,
+            native_false_interruption_resume=True,
+        )
+        runtime.set_recovery_callback(recover)
+        runtime.add_user_turn("Please continue.", turn_id="user-one")
+        runtime.track_agent_speech("speech-one")
+        runtime.complete_agent_playout("speech-one", interrupted=True)
+        await asyncio.sleep(0.03)
+        await runtime.finish("test_finished")
+
+        self.assertEqual(recovery_reasons, [])
+        self.assertEqual(runtime.metrics()["interruption_count"], 1)
+        self.assertEqual(runtime.metrics()["false_interruption_recoveries"], 0)
+
     async def test_same_call_context_is_bounded_and_redacted(self) -> None:
         self.runtime.add_user_turn("My OTP is 123456", turn_id="user-secret")
         self.runtime.add_agent_turn("Understood.", turn_id="agent-secret")
@@ -197,6 +223,20 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("999999", memory)
         self.assertIn("I need better rates.", memory)
         self.assertIn("[REDACTED]", memory)
+
+    async def test_same_call_memory_keeps_one_multi_detail_customer_answer(self) -> None:
+        answer = (
+            "My brand is North Star, we are a D2C business doing 600 shipments monthly, "
+            "and high rates are our main challenge."
+        )
+        self.assertTrue(self.runtime.add_user_turn(answer, turn_id="qualification-details"))
+        self.assertFalse(self.runtime.add_user_turn(answer, turn_id="qualification-details"))
+
+        memory = self.runtime.same_call_context()
+
+        self.assertEqual(memory.count("North Star"), 1)
+        self.assertIn("600 shipments monthly", memory)
+        self.assertIn("high rates are our main challenge", memory)
 
 
 class TestRedaction(unittest.TestCase):
