@@ -1457,8 +1457,13 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
 
     add_step(
         "opening",
-        "Opening and talk permission",
-        f"Namaste ji, main Radha sriaas treatment-support team se bol rahi hoon. Kya main {patient_name} ji se baat kar rahi hoon, aur kya abhi medicine package follow-up ke liye baat ho sakti hai?",
+        "Opening plus delivery question",
+        f"Namaste {patient_name} ji, main Radha sriaas treatment-support team se bol rahi hoon. Aapke medicine package follow-up ke liye call kiya hai. Sabse pehle confirm kar leti hoon: aapko medicine package receive ho gaya hai?",
+        variables={"awb_number": workflow.awb_number or "", "order_id": workflow.order_id or ""},
+        agent_instruction=(
+            "This first step must never be only an intro. Greet briefly and ask the delivery question in the same reply. "
+            "After asking this question, wait for the customer's delivery answer; do not go silent after just the greeting."
+        ),
     )
     add_step(
         "delivery_check",
@@ -3396,8 +3401,10 @@ Hard stage lock:
 Mandatory state tools when available:
 - At call start, use get_repeat_workflow_state, get_repeat_encounter_full_data, and get_current_required_step.
 - Before every controlled reply, use get_current_required_step or get_current_speech_unit.
+- Opening rule: the first spoken reply must include both Radha's short intro and the delivery question. Never stop after only intro.
 - Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
 - After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
+- If mark_repeat_step_complete returns a next_step with speech_unit and you have not just asked the customer a question that needs an answer, immediately continue by speaking that next_step.speech_unit. Do not remain silent between required steps.
 - If the customer interrupts before the current step is complete, call mark_repeat_step_interrupted, answer briefly, then call resume_repeat_pending_step/get_current_speech_unit and resume the same step.
 - Never mark a future step complete.
 
