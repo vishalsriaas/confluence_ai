@@ -1,0 +1,712 @@
+{
+ "actions": [],
+ "autoname": "format:rfu-{####}",
+ "creation": "2026-07-29 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "workflow_type",
+  "enabled",
+  "timer_status",
+  "company",
+  "idempotency_key",
+  "patient_encounter",
+  "patient_name",
+  "patient_mobile",
+  "awb_number",
+  "order_id",
+  "workflow_section",
+  "scenario_key",
+  "agent_1",
+  "agent_2",
+  "livekit_channel_account_fallback",
+  "voice_task_template",
+  "default_knowledge_document",
+  "medicine_summary_field_names",
+  "call_tool_section",
+  "outbound_phone_number",
+  "voice_channel_account",
+  "voice_channel_source",
+  "mcp_tools_enabled",
+  "mcp_tools_used_json",
+  "voice_room_name",
+  "voice_room_sid",
+  "sip_call_sid",
+  "voice_dispatch_id",
+  "voice_task",
+  "agent_2_task",
+  "task_batch",
+  "state_machine_section",
+  "journey_stages",
+  "step_runs",
+  "settings_snapshot_section",
+  "retry_delay_minutes",
+  "voice_call_timeout_minutes",
+  "agent_2_delay_days",
+  "schedule_agent_2_only_after_conversation",
+  "shipkia_tracking_enabled",
+  "shipkia_prefetch_before_call",
+  "shipkia_tracking_api_url",
+  "diet_chart_whatsapp_enabled",
+  "diet_chart_prefetch_before_call",
+  "diet_chart_auto_send_before_call",
+  "diet_chart_dept_field_names",
+  "diet_chart_public_file_base_url",
+  "diet_chart_whatsapp_channel_account",
+  "diet_chart_whatsapp_template_map",
+  "diet_chart_whatsapp_remote_mcp_server",
+  "diet_chart_whatsapp_method",
+  "diet_chart_whatsapp_send_strategy",
+  "diet_chart_whatsapp_template_name",
+  "diet_chart_whatsapp_template_language",
+  "diet_chart_whatsapp_template_method",
+  "diet_chart_template_header_values_json",
+  "diet_chart_template_body_values_json",
+  "diet_chart_template_button_values_json",
+  "outcome_logging_required",
+  "idempotency_key_field_names",
+  "phone_field_names",
+  "awb_field_names",
+  "timer_section",
+  "active_call_timeout_at",
+  "next_scheduled_call_time",
+  "next_scheduled_call_stage",
+  "next_call_time",
+  "retry_count",
+  "max_retry_count",
+  "agent_2_scheduled_at",
+  "result_section",
+  "primary_outcome",
+  "sub_outcome",
+  "customer_summary",
+  "agent_notes",
+  "next_action",
+  "call_log",
+  "last_error",
+  "payload_section",
+  "source_payload_json",
+  "encounter_json",
+  "context_json",
+  "medicine_summary_json",
+  "shipkia_result_json",
+  "diet_chart_dept",
+  "diet_chart_knowledge_document",
+  "diet_chart_pdf_file",
+  "diet_chart_summary_json",
+  "diet_chart_whatsapp_result_json",
+  "structured_details_json"
+ ],
+ "fields": [
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nCall Queued\nCall Running\nRetry Queued\nCompleted\nUnclear Conversation\nAgent 2 Scheduled\nAgent 2 Queued\nAgent 2 Pending Config\nMissed After Retries\nFailed\nCancelled"
+  },
+  {
+   "default": "Call Instance",
+   "description": "Use Scenario Config to keep reusable settings for a scenario_key. Normal n8n-created call records stay as Call Instance.",
+   "fieldname": "workflow_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Workflow Type",
+   "options": "Call Instance\nScenario Config"
+  },
+  {
+   "default": "1",
+   "description": "Only enabled Scenario Config records are used as reusable workflow settings.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "timer_status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Timer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company"
+  },
+  {
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "unique": 1
+  },
+  {
+   "fieldname": "patient_encounter",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Encounter"
+  },
+  {
+   "fieldname": "patient_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Name"
+  },
+  {
+   "fieldname": "patient_mobile",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Patient Mobile"
+  },
+  {
+   "fieldname": "awb_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "AWB Number"
+  },
+  {
+   "fieldname": "order_id",
+   "fieldtype": "Data",
+   "label": "Order ID"
+  },
+  {
+   "fieldname": "workflow_section",
+   "fieldtype": "Section Break",
+   "label": "Workflow Scenario"
+  },
+  {
+   "description": "Optional scenario/config key from n8n. Useful when SRIAAS runs multiple repeat follow-up scenarios.",
+   "fieldname": "scenario_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Scenario Key"
+  },
+  {
+   "fieldname": "agent_1",
+   "fieldtype": "Link",
+   "label": "Agent 1",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "agent_2",
+   "fieldtype": "Link",
+   "label": "Agent 2",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "livekit_channel_account_fallback",
+   "fieldtype": "Link",
+   "label": "LiveKit Channel Account Fallback",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "default_knowledge_document",
+   "fieldtype": "Link",
+   "label": "Default Knowledge Document",
+   "options": "AI Knowledge Document"
+  },
+  {
+   "fieldname": "medicine_summary_field_names",
+   "fieldtype": "Small Text",
+   "label": "Medicine Summary Field Names"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "call_tool_section",
+   "fieldtype": "Section Break",
+   "label": "Call & Tool Data"
+  },
+  {
+   "fieldname": "outbound_phone_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Outbound Phone Number"
+  },
+  {
+   "description": "Actual AI Channel Account selected for this workflow call. Prefer this fixed workflow value over later agent/default changes.",
+   "fieldname": "voice_channel_account",
+   "fieldtype": "Link",
+   "label": "Voice Channel Account",
+   "options": "AI Channel Account"
+  },
+  {
+   "description": "Shows whether the channel came from workflow override, settings fallback, or Agent 1.",
+   "fieldname": "voice_channel_source",
+   "fieldtype": "Data",
+   "label": "Voice Channel Source"
+  },
+  {
+   "description": "Comma-separated MCP tools available for this workflow.",
+   "fieldname": "mcp_tools_enabled",
+   "fieldtype": "Small Text",
+   "label": "MCP Tools Enabled"
+  },
+  {
+   "description": "Audit log of repeat follow-up MCP tools actually used by the active agent.",
+   "fieldname": "mcp_tools_used_json",
+   "fieldtype": "Code",
+   "label": "MCP Tools Used JSON",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voice_room_name",
+   "fieldtype": "Data",
+   "label": "LiveKit Room Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voice_room_sid",
+   "fieldtype": "Data",
+   "label": "LiveKit Room SID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sip_call_sid",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "SIP Call SID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voice_dispatch_id",
+   "fieldtype": "Data",
+   "label": "LiveKit Dispatch ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voice_task",
+   "fieldtype": "Link",
+   "label": "Agent 1 Voice Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "agent_2_task",
+   "fieldtype": "Link",
+   "label": "Agent 2 Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "task_batch",
+   "fieldtype": "Link",
+   "label": "Task Batch",
+   "options": "AI Task Batch"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "state_machine_section",
+   "fieldtype": "Section Break",
+   "label": "State Machine"
+  },
+  {
+   "description": "UI/audit copy of the multi-call journey stages. Runtime source-of-truth is synchronized from Compact Voice Context JSON.",
+   "fieldname": "journey_stages",
+   "fieldtype": "Table",
+   "label": "Journey Stages",
+   "options": "AI Repeat Follow Up Journey Stage",
+   "read_only": 1
+  },
+  {
+   "description": "UI/audit copy of the current call's ordered step state machine. Required medicine steps are generated from drug_prescription.",
+   "fieldname": "step_runs",
+   "fieldtype": "Table",
+   "label": "Step Runs",
+   "options": "AI Repeat Follow Up Step Run",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "settings_snapshot_section",
+   "fieldtype": "Section Break",
+   "label": "Settings Snapshot"
+  },
+  {
+   "default": "60",
+   "fieldname": "retry_delay_minutes",
+   "fieldtype": "Int",
+   "label": "Retry Delay Minutes"
+  },
+  {
+   "default": "5",
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "default": "7",
+   "fieldname": "agent_2_delay_days",
+   "fieldtype": "Int",
+   "label": "Agent 2 Delay Days"
+  },
+  {
+   "default": "1",
+   "fieldname": "schedule_agent_2_only_after_conversation",
+   "fieldtype": "Check",
+   "label": "Schedule Agent 2 Only After Successful Conversation"
+  },
+  {
+   "default": "1",
+   "fieldname": "shipkia_tracking_enabled",
+   "fieldtype": "Check",
+   "label": "Shipkia Tracking Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Fetch compact tracking status before starting the voice call so the agent has order status even if live MCP tools are unavailable.",
+   "fieldname": "shipkia_prefetch_before_call",
+   "fieldtype": "Check",
+   "label": "Prefetch Shipkia Before Call"
+  },
+  {
+   "default": "https://shipkia.com/api/track.php",
+   "fieldname": "shipkia_tracking_api_url",
+   "fieldtype": "Data",
+   "label": "Shipkia Tracking API URL"
+  },
+  {
+   "default": "1",
+   "fieldname": "diet_chart_whatsapp_enabled",
+   "fieldtype": "Check",
+   "label": "Diet Chart WhatsApp Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Resolve and store the matching diet chart before starting the voice call.",
+   "fieldname": "diet_chart_prefetch_before_call",
+   "fieldtype": "Check",
+   "label": "Prefetch Diet Chart Before Call"
+  },
+  {
+   "default": "0",
+   "description": "If enabled, Confluence sends the matched diet chart PDF before starting the voice call.",
+   "fieldname": "diet_chart_auto_send_before_call",
+   "fieldtype": "Check",
+   "label": "Auto Send Diet Chart Before Call"
+  },
+  {
+   "description": "Copied from Settings when the workflow is created; can be changed per workflow/scenario.",
+   "fieldname": "diet_chart_dept_field_names",
+   "fieldtype": "Small Text",
+   "label": "Diet Chart Department Field Names"
+  },
+  {
+   "fieldname": "diet_chart_public_file_base_url",
+   "fieldtype": "Data",
+   "label": "Diet Chart Public File Base URL"
+  },
+  {
+   "fieldname": "diet_chart_whatsapp_channel_account",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Channel Account"
+  },
+  {
+   "description": "Optional UI-managed AI WhatsApp Template Map used for diet chart sends.",
+   "fieldname": "diet_chart_whatsapp_template_map",
+   "fieldtype": "Link",
+   "label": "Diet Chart WhatsApp Template Map",
+   "options": "AI WhatsApp Template Map"
+  },
+  {
+   "fieldname": "diet_chart_whatsapp_remote_mcp_server",
+   "fieldtype": "Link",
+   "label": "Diet Chart Remote WhatsApp Server",
+   "options": "AI MCP Server"
+  },
+  {
+   "fieldname": "diet_chart_whatsapp_method",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Send Method"
+  },
+  {
+   "default": "Free-form then Template",
+   "fieldname": "diet_chart_whatsapp_send_strategy",
+   "fieldtype": "Select",
+   "label": "Diet Chart WhatsApp Send Strategy",
+   "options": "Free-form Document\nTemplate Document\nFree-form then Template"
+  },
+  {
+   "fieldname": "diet_chart_whatsapp_template_name",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Name"
+  },
+  {
+   "default": "en",
+   "fieldname": "diet_chart_whatsapp_template_language",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Language"
+  },
+  {
+   "default": "wa_chat_hub.api.runtime.send_template_message",
+   "fieldname": "diet_chart_whatsapp_template_method",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Method"
+  },
+  {
+   "fieldname": "diet_chart_template_header_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Header Values JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "diet_chart_template_body_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Body Values JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "diet_chart_template_button_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Button Values JSON",
+   "options": "JSON"
+  },
+  {
+   "default": "1",
+   "fieldname": "outcome_logging_required",
+   "fieldtype": "Check",
+   "label": "Outcome Logging Required Before Close"
+  },
+  {
+   "description": "Copied from Settings when the workflow is created; can be changed per workflow/scenario.",
+   "fieldname": "idempotency_key_field_names",
+   "fieldtype": "Small Text",
+   "label": "Idempotency Key Field Names"
+  },
+  {
+   "description": "Copied from Settings when the workflow is created; can be changed per workflow/scenario.",
+   "fieldname": "phone_field_names",
+   "fieldtype": "Small Text",
+   "label": "Phone Field Names"
+  },
+  {
+   "description": "Copied from Settings when the workflow is created; can be changed per workflow/scenario.",
+   "fieldname": "awb_field_names",
+   "fieldtype": "Small Text",
+   "label": "AWB Field Names"
+  },
+  {
+   "fieldname": "timer_section",
+   "fieldtype": "Section Break",
+   "label": "Timers"
+  },
+  {
+   "fieldname": "active_call_timeout_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Active Call Timeout At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_scheduled_call_time",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Next Scheduled Call Time",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_scheduled_call_stage",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Next Scheduled Call Stage",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_call_time",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Next Agent 1 Call Time"
+  },
+  {
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Agent 1 Attempt Count"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_retry_count",
+   "fieldtype": "Int",
+   "label": "Max Agent 1 Attempts"
+  },
+  {
+   "fieldname": "agent_2_scheduled_at",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Agent 2 Scheduled At"
+  },
+  {
+   "fieldname": "result_section",
+   "fieldtype": "Section Break",
+   "label": "Result"
+  },
+  {
+   "fieldname": "primary_outcome",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Primary Outcome"
+  },
+  {
+   "fieldname": "sub_outcome",
+   "fieldtype": "Data",
+   "label": "Sub Outcome"
+  },
+  {
+   "fieldname": "customer_summary",
+   "fieldtype": "Long Text",
+   "label": "Customer Summary"
+  },
+  {
+   "fieldname": "agent_notes",
+   "fieldtype": "Long Text",
+   "label": "Agent Notes"
+  },
+  {
+   "fieldname": "next_action",
+   "fieldtype": "Small Text",
+   "label": "Next Action"
+  },
+  {
+   "fieldname": "call_log",
+   "fieldtype": "Link",
+   "label": "Call Log",
+   "options": "AI Call Log"
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Long Text",
+   "label": "Last Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payload_section",
+   "fieldtype": "Section Break",
+   "label": "Payloads"
+  },
+  {
+   "fieldname": "source_payload_json",
+   "fieldtype": "Code",
+   "label": "Source Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "encounter_json",
+   "fieldtype": "Code",
+   "label": "Full Encounter JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "context_json",
+   "fieldtype": "Code",
+   "label": "Compact Voice Context JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "medicine_summary_json",
+   "fieldtype": "Code",
+   "label": "Medicine Summary JSON",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shipkia_result_json",
+   "fieldtype": "Code",
+   "label": "Shipkia Result JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "diet_chart_dept",
+   "fieldtype": "Data",
+   "label": "Matched Diet Chart Department",
+   "read_only": 1
+  },
+  {
+   "fieldname": "diet_chart_knowledge_document",
+   "fieldtype": "Link",
+   "label": "Matched Diet Chart Knowledge Document",
+   "options": "AI Knowledge Document",
+   "read_only": 1
+  },
+  {
+   "fieldname": "diet_chart_pdf_file",
+   "fieldtype": "Data",
+   "label": "Matched Diet Chart PDF",
+   "read_only": 1
+  },
+  {
+   "fieldname": "diet_chart_summary_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Summary JSON",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "diet_chart_whatsapp_result_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart WhatsApp Result JSON",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "structured_details_json",
+   "fieldtype": "Code",
+   "label": "Structured Details JSON",
+   "options": "JSON"
+  }
+ ],
+ "indexes": [
+  [
+   "status",
+   "next_call_time"
+  ],
+  [
+   "status",
+   "agent_2_scheduled_at"
+  ],
+  [
+   "patient_encounter"
+  ],
+  [
+   "voice_task"
+  ]
+ ],
+ "modified": "2026-07-29 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Repeat Follow Up Workflow",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "patient_name",
+ "track_changes": 1
+}

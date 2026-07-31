@@ -26,6 +26,7 @@
     'AI Tool Permission',
     'AI Webhook Event',
     'AI WhatsApp Template Map',
+    'AI Repeat Follow Up Workflow',
     'Order Confirmation Workflow',
     'Chat Action Log',
     'Chat AI Suggestion',

@@ -1,0 +1,360 @@
+{
+ "actions": [],
+ "creation": "2026-07-29 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "company",
+  "agent_1",
+  "agent_2",
+  "livekit_channel_account_fallback",
+  "voice_task_template",
+  "timing_section",
+  "max_agent_1_attempts",
+  "retry_delay_minutes",
+  "voice_call_timeout_minutes",
+  "agent_2_delay_days",
+  "schedule_agent_2_only_after_conversation",
+  "shipkia_section",
+  "shipkia_tracking_enabled",
+  "shipkia_prefetch_before_call",
+  "shipkia_tracking_api_url",
+  "outcome_section",
+  "outcome_logging_required",
+  "prompt_section",
+  "default_knowledge_document",
+  "medicine_section",
+  "medicine_summary_field_names",
+  "diet_chart_section",
+  "diet_chart_whatsapp_enabled",
+  "diet_chart_prefetch_before_call",
+  "diet_chart_auto_send_before_call",
+  "diet_chart_dept_field_names",
+  "diet_chart_public_file_base_url",
+  "diet_chart_whatsapp_channel_account",
+  "diet_chart_whatsapp_template_map",
+  "diet_chart_whatsapp_remote_mcp_server",
+  "diet_chart_whatsapp_method",
+  "diet_chart_template_section",
+  "diet_chart_whatsapp_send_strategy",
+  "diet_chart_whatsapp_template_name",
+  "diet_chart_whatsapp_template_language",
+  "diet_chart_whatsapp_template_method",
+  "diet_chart_template_header_values_json",
+  "diet_chart_template_body_values_json",
+  "diet_chart_template_button_values_json",
+  "payload_mapping_section",
+  "idempotency_key_field_names",
+  "phone_field_names",
+  "awb_field_names"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "default": "sriaas",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "AI Company"
+  },
+  {
+   "fieldname": "agent_1",
+   "fieldtype": "Link",
+   "label": "Agent 1",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "agent_2",
+   "fieldtype": "Link",
+   "label": "Agent 2",
+   "options": "AI Agent"
+  },
+  {
+   "description": "Optional fallback used by default provisioning when Agent 1 has no LiveKit channel account.",
+   "fieldname": "livekit_channel_account_fallback",
+   "fieldtype": "Link",
+   "label": "LiveKit Channel Account Fallback",
+   "options": "AI Channel Account"
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template"
+  },
+  {
+   "fieldname": "timing_section",
+   "fieldtype": "Section Break",
+   "label": "Timing"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_agent_1_attempts",
+   "fieldtype": "Int",
+   "label": "Max Agent 1 Attempts"
+  },
+  {
+   "default": "60",
+   "fieldname": "retry_delay_minutes",
+   "fieldtype": "Int",
+   "label": "Retry Delay Minutes"
+  },
+  {
+   "default": "5",
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "default": "7",
+   "fieldname": "agent_2_delay_days",
+   "fieldtype": "Int",
+   "label": "Agent 2 Delay Days"
+  },
+  {
+   "default": "1",
+   "fieldname": "schedule_agent_2_only_after_conversation",
+   "fieldtype": "Check",
+   "label": "Schedule Agent 2 Only After Conversation"
+  },
+  {
+   "fieldname": "shipkia_section",
+   "fieldtype": "Section Break",
+   "label": "Shipkia Tracking"
+  },
+  {
+   "default": "1",
+   "fieldname": "shipkia_tracking_enabled",
+   "fieldtype": "Check",
+   "label": "Shipkia Tracking Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Fetch compact tracking status before starting the voice call so the agent has order status even if live MCP tools are unavailable.",
+   "fieldname": "shipkia_prefetch_before_call",
+   "fieldtype": "Check",
+   "label": "Prefetch Shipkia Before Call"
+  },
+  {
+   "default": "https://shipkia.com/api/track.php",
+   "fieldname": "shipkia_tracking_api_url",
+   "fieldtype": "Data",
+   "label": "Shipkia Tracking API URL"
+  },
+  {
+   "fieldname": "outcome_section",
+   "fieldtype": "Section Break",
+   "label": "Outcome"
+  },
+  {
+   "default": "1",
+   "fieldname": "outcome_logging_required",
+   "fieldtype": "Check",
+   "label": "Outcome Logging Required Before Close"
+  },
+  {
+   "fieldname": "prompt_section",
+   "fieldtype": "Section Break",
+   "label": "Prompt & Knowledge"
+  },
+  {
+   "fieldname": "default_knowledge_document",
+   "fieldtype": "Link",
+   "label": "Default Knowledge Document",
+   "options": "AI Knowledge Document"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "medicine_section",
+   "fieldtype": "Section Break",
+   "label": "Medicine Explanation"
+  },
+  {
+   "default": "drug_prescription,sr_allopathy_drug_prescription,sr_homeopathy_drug_prescription,sr_pe_order_items,sr_medication_template,sr_pe_instruction,sr_pe_disease,sr_diagnosis,sr_complaints",
+   "description": "Comma-separated encounter paths copied into compact voice context for medicine/order explanation.",
+   "fieldname": "medicine_summary_field_names",
+   "fieldtype": "Small Text",
+   "label": "Medicine Summary Field Names"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "diet_chart_section",
+   "fieldtype": "Section Break",
+   "label": "Diet Chart WhatsApp"
+  },
+  {
+   "default": "1",
+   "description": "Allow Radha Repeat Agent Sriaas 1 to send the matching diet chart PDF on WhatsApp through MCP.",
+   "fieldname": "diet_chart_whatsapp_enabled",
+   "fieldtype": "Check",
+   "label": "Diet Chart WhatsApp Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Resolve and store the matching diet chart before the voice call so LiveKit receives a compact diet_chart_summary even if MCP tools are unavailable.",
+   "fieldname": "diet_chart_prefetch_before_call",
+   "fieldtype": "Check",
+   "label": "Prefetch Diet Chart Before Call"
+  },
+  {
+   "default": "0",
+   "description": "If enabled, Confluence sends the matched diet chart PDF on WhatsApp before starting the call. Use this when the LiveKit worker cannot call MCP tools.",
+   "fieldname": "diet_chart_auto_send_before_call",
+   "fieldtype": "Check",
+   "label": "Auto Send Diet Chart Before Call"
+  },
+  {
+   "default": "sr_pe_deptt,patient_encounter.sr_pe_deptt,data.patient_encounter.sr_pe_deptt,body.encounter.sr_pe_deptt,encounter.sr_pe_deptt",
+   "description": "Comma-separated payload/encounter paths used to match the diet chart Knowledge Document.",
+   "fieldname": "diet_chart_dept_field_names",
+   "fieldtype": "Small Text",
+   "label": "Diet Chart Department Field Names"
+  },
+  {
+   "description": "Optional public base URL used to convert Customer PDF File paths like /files/chart.pdf into a WhatsApp-fetchable URL. Example: https://your-ngrok-domain",
+   "fieldname": "diet_chart_public_file_base_url",
+   "fieldtype": "Data",
+   "label": "Diet Chart Public File Base URL"
+  },
+  {
+   "description": "WA Chat Hub / Interakt channel account name used to send diet chart PDFs. Can be overridden per workflow_config.",
+   "fieldname": "diet_chart_whatsapp_channel_account",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Channel Account"
+  },
+  {
+   "description": "Optional AI WhatsApp Template Map used for diet chart sends. If set, the repeat follow-up tool sends through this UI-managed map instead of direct document/template fields.",
+   "fieldname": "diet_chart_whatsapp_template_map",
+   "fieldtype": "Link",
+   "label": "Diet Chart WhatsApp Template Map",
+   "options": "AI WhatsApp Template Map"
+  },
+  {
+   "description": "Optional remote Frappe/MCP server where WA Chat Hub is installed. If blank, Confluence AI tries local WA Chat Hub.",
+   "fieldname": "diet_chart_whatsapp_remote_mcp_server",
+   "fieldtype": "Link",
+   "label": "Diet Chart Remote WhatsApp Server",
+   "options": "AI MCP Server"
+  },
+  {
+   "default": "wa_chat_hub.api.runtime.send_reply",
+   "description": "Whitelisted method used for remote document sending.",
+   "fieldname": "diet_chart_whatsapp_method",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Send Method"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "diet_chart_template_section",
+   "fieldtype": "Section Break",
+   "label": "Diet Chart Approved Template"
+  },
+  {
+   "default": "Free-form then Template",
+   "description": "Use an approved template when the WhatsApp free-form messaging window is closed.",
+   "fieldname": "diet_chart_whatsapp_send_strategy",
+   "fieldtype": "Select",
+   "label": "Diet Chart WhatsApp Send Strategy",
+   "options": "Free-form Document\nTemplate Document\nFree-form then Template"
+  },
+  {
+   "description": "Approved WhatsApp/Interakt template name for sending the diet chart outside the 24-hour window. Template should support a document/media header if you want to attach the PDF.",
+   "fieldname": "diet_chart_whatsapp_template_name",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Name"
+  },
+  {
+   "default": "en",
+   "fieldname": "diet_chart_whatsapp_template_language",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Language"
+  },
+  {
+   "default": "wa_chat_hub.api.runtime.send_template_message",
+   "description": "Whitelisted method used for remote approved-template sending.",
+   "fieldname": "diet_chart_whatsapp_template_method",
+   "fieldtype": "Data",
+   "label": "Diet Chart WhatsApp Template Method"
+  },
+  {
+   "default": "[\"{media_url}\"]",
+   "description": "JSON array. Placeholders: {media_url}, {file_name}, {patient_name}, {department}, {caption}. For document-header templates, usually [\"{media_url}\"].",
+   "fieldname": "diet_chart_template_header_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Header Values JSON",
+   "options": "JSON"
+  },
+  {
+   "default": "[\"{patient_name}\", \"{department}\"]",
+   "description": "JSON array for template body variables. Use placeholders like {patient_name}, {department}, {caption}.",
+   "fieldname": "diet_chart_template_body_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Body Values JSON",
+   "options": "JSON"
+  },
+  {
+   "default": "{}",
+   "description": "JSON object for template button values, if your template needs them.",
+   "fieldname": "diet_chart_template_button_values_json",
+   "fieldtype": "Code",
+   "label": "Diet Chart Template Button Values JSON",
+   "options": "JSON"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "payload_mapping_section",
+   "fieldtype": "Section Break",
+   "label": "n8n Payload Mapping"
+  },
+  {
+   "default": "idempotency_key,event_id,data.idempotency_key,data.event_id,patient_encounter.name,data.patient_encounter.name,encounter.name,name",
+   "description": "Comma-separated payload paths. First non-empty value is used for duplicate protection.",
+   "fieldname": "idempotency_key_field_names",
+   "fieldtype": "Small Text",
+   "label": "Idempotency Key Field Names"
+  },
+  {
+   "default": "phone,mobile,customer_phone,patient_mobile,sr_pe_mobile,data.phone,data.mobile,data.patient_encounter.sr_pe_mobile,patient_encounter.sr_pe_mobile,patient_encounter.mobile",
+   "description": "Comma-separated payload paths used to find the customer phone.",
+   "fieldname": "phone_field_names",
+   "fieldtype": "Small Text",
+   "label": "Phone Field Names"
+  },
+  {
+   "default": "awb,awb_number,pe_shipkia_awb_number,data.awb,data.awb_number,data.patient_encounter.pe_shipkia_awb_number,patient_encounter.pe_shipkia_awb_number,patient_encounter.awb_number",
+   "description": "Comma-separated payload paths used to find the Shipkia AWB.",
+   "fieldname": "awb_field_names",
+   "fieldtype": "Small Text",
+   "label": "AWB Field Names"
+  }
+ ],
+ "issingle": 1,
+ "modified": "2026-07-29 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Repeat Follow Up Settings",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

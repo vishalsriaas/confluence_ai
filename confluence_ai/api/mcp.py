@@ -156,6 +156,10 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "create_draft_patient_encounter_from_sales",
         "send_mapped_whatsapp_template",
         "transfer_live_call",
+        "get_repeat_encounter_full_data",
+        "get_shipkia_tracking_status",
+        "send_repeat_diet_chart_whatsapp",
+        "log_repeat_followup_outcome",
     }:
         return None
 
@@ -193,6 +197,22 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         from confluence_ai.services.livekit import transfer_live_call
 
         return transfer_live_call(arguments, task_id=task_id, agent=agent)
+    if tool_name == "get_repeat_encounter_full_data":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.get_repeat_encounter_full_data(arguments, task_id=task_id, agent=agent)
+    if tool_name == "get_shipkia_tracking_status":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.get_shipkia_tracking_status(arguments, task_id=task_id, agent=agent)
+    if tool_name == "send_repeat_diet_chart_whatsapp":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.send_repeat_diet_chart_whatsapp(arguments, task_id=task_id, agent=agent)
+    if tool_name == "log_repeat_followup_outcome":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.log_repeat_followup_outcome(arguments, task_id=task_id, agent=agent)
     return None
 
 

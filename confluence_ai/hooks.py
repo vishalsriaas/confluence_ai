@@ -35,6 +35,7 @@ tenant_doctypes = [
     "AI Tool Permission",
     "AI Webhook Event",
     "AI WhatsApp Template Map",
+    "AI Repeat Follow Up Workflow",
     "Order Confirmation Workflow",
     "Chat Action Log",
     "Chat AI Suggestion",
@@ -59,6 +60,7 @@ tenant_doctypes = [
 
 doctype_js = {doctype: "public/js/company_form_defaults.js" for doctype in tenant_doctypes}
 doctype_js["Order Confirmation Settings"] = "public/js/order_confirmation_settings_tenant.js"
+doctype_js["AI Repeat Follow Up Settings"] = "public/js/company_form_defaults.js"
 
 after_install = "confluence_ai.install.after_install"
 after_migrate = "confluence_ai.install.after_migrate"
@@ -71,6 +73,7 @@ scheduler_events = {
     "cron": {
         "* * * * *": [
             "confluence_ai.services.order_confirmation.process_due_workflows",
+            "confluence_ai.services.repeat_followup.process_due_workflows",
         ],
     },
 }
@@ -85,6 +88,9 @@ doc_events = {
     },
     "Order Confirmation Settings": {
         "before_save": "confluence_ai.tenant.protect_order_confirmation_settings",
+    },
+    "AI Repeat Follow Up Settings": {
+        "before_save": "confluence_ai.tenant.apply_company_to_blank_doc",
     },
 }
 
@@ -116,6 +122,7 @@ permission_query_conditions = {
     "AI Tool Permission": "confluence_ai.tenant.ai_tool_permission_query_condition",
     "AI Webhook Event": "confluence_ai.tenant.ai_webhook_event_query_condition",
     "AI WhatsApp Template Map": "confluence_ai.tenant.ai_whatsapp_template_map_query_condition",
+    "AI Repeat Follow Up Workflow": "confluence_ai.tenant.ai_repeat_follow_up_workflow_query_condition",
     "Order Confirmation Workflow": "confluence_ai.tenant.order_confirmation_workflow_query_condition",
     "Chat Action Log": "confluence_ai.tenant.chat_action_log_query_condition",
     "Chat AI Suggestion": "confluence_ai.tenant.chat_ai_suggestion_query_condition",

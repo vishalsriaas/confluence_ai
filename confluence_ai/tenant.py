@@ -40,6 +40,7 @@ TENANT_DOCTYPES = {
 	"AI Tool Permission",
 	"AI Webhook Event",
 	"AI WhatsApp Template Map",
+	"AI Repeat Follow Up Workflow",
 	"Order Confirmation Workflow",
 	"Chat Action Log",
 	"Chat AI Suggestion",
@@ -316,6 +317,10 @@ def ai_webhook_event_query_condition(user: str | None = None) -> str:
 
 def ai_whatsapp_template_map_query_condition(user: str | None = None) -> str:
 	return _condition_for("AI WhatsApp Template Map", user)
+
+
+def ai_repeat_follow_up_workflow_query_condition(user: str | None = None) -> str:
+	return _condition_for("AI Repeat Follow Up Workflow", user)
 
 
 def order_confirmation_workflow_query_condition(user: str | None = None) -> str:

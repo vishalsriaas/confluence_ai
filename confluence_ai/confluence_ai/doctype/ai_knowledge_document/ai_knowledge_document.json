@@ -15,6 +15,11 @@
   "source_type",
   "source_name",
   "source_file",
+  "customer_pdf_file",
+  "customer_attachment_url",
+  "repeat_followup_document_type",
+  "department_match_values",
+  "whatsapp_caption",
   "source_url",
   "crawl_url_on_save",
   "crawl_same_domain_only",
@@ -94,6 +99,36 @@
    "fieldname": "source_file",
    "fieldtype": "Attach",
    "label": "Source File"
+  },
+  {
+   "description": "Optional PDF/document that can be sent to the customer on WhatsApp, for example a diet chart PDF. Keep Source File/Content as text for the AI, and this file as the customer-facing attachment.",
+   "fieldname": "customer_pdf_file",
+   "fieldtype": "Attach",
+   "label": "Customer PDF File"
+  },
+  {
+   "description": "Optional public URL for the customer-facing PDF/document. If filled, this is used instead of Customer PDF File.",
+   "fieldname": "customer_attachment_url",
+   "fieldtype": "Data",
+   "label": "Customer Attachment URL"
+  },
+  {
+   "fieldname": "repeat_followup_document_type",
+   "fieldtype": "Select",
+   "label": "Repeat Follow Up Document Type",
+   "options": "\nDiet Chart\nMedicine Guide\nOther"
+  },
+  {
+   "description": "Comma-separated department names/keys from Patient Encounter sr_pe_deptt that should match this document, e.g. Liver, Liver Care, sriaas liver.",
+   "fieldname": "department_match_values",
+   "fieldtype": "Small Text",
+   "label": "Department Match Values"
+  },
+  {
+   "description": "Customer-facing WhatsApp caption used when sending Customer PDF File.",
+   "fieldname": "whatsapp_caption",
+   "fieldtype": "Small Text",
+   "label": "WhatsApp Caption"
   },
   {
    "depends_on": "eval:doc.source_type=='URL'",

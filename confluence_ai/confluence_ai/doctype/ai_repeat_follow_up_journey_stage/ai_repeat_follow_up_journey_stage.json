@@ -1,0 +1,88 @@
+{
+ "actions": [],
+ "creation": "2026-07-30 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "stage_key",
+  "stage_label",
+  "agent_field",
+  "agent",
+  "status",
+  "delay_after_previous_days",
+  "scheduled_at",
+  "started_at",
+  "completed_at",
+  "notes"
+ ],
+ "fields": [
+  {
+   "columns": 2,
+   "fieldname": "stage_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Stage Key",
+   "reqd": 1
+  },
+  {
+   "columns": 2,
+   "fieldname": "stage_label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Stage Label"
+  },
+  {
+   "columns": 2,
+   "fieldname": "agent_field",
+   "fieldtype": "Data",
+   "label": "Agent Field"
+  },
+  {
+   "columns": 2,
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "label": "Agent",
+   "options": "AI Agent"
+  },
+  {
+   "columns": 2,
+   "fieldname": "status",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Status"
+  },
+  {
+   "columns": 2,
+   "fieldname": "delay_after_previous_days",
+   "fieldtype": "Data",
+   "label": "Delay After Previous"
+  },
+  {
+   "fieldname": "scheduled_at",
+   "fieldtype": "Datetime",
+   "label": "Scheduled At"
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At"
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-07-30 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Repeat Follow Up Journey Stage",
+ "permissions": [],
+ "sort_field": "idx",
+ "sort_order": "ASC"
+}

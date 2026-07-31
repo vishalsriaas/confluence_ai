@@ -68,29 +68,53 @@ def _channel_candidates(call_log) -> list:
     return result
 
 
-def _vobiz_auth_headers(call_log) -> dict:
-    auth_id = None
-    auth_token = None
+def _vobiz_auth_candidates(call_log) -> list[dict[str, str]]:
+    parsed = urlparse(call_log.external_recording_url or call_log.recording_url or "")
+    url_account_id = None
+    parts = [part for part in parsed.path.split("/") if part]
+    if "Account" in parts:
+        idx = parts.index("Account")
+        if len(parts) > idx + 1:
+            url_account_id = parts[idx + 1]
 
-    for channel_name in _channel_candidates(call_log):
+    candidates: list[dict[str, str]] = []
+    channel_names = list(_channel_candidates(call_log))
+
+    if url_account_id:
+        for row in frappe.get_all(
+            "AI Channel Account",
+            filters={"enabled": 1, "vobiz_auth_id": url_account_id},
+            pluck="name",
+        ):
+            channel_names.append(row)
+
+    seen_channels = set()
+    for channel_name in channel_names:
+        if channel_name in seen_channels:
+            continue
+        seen_channels.add(channel_name)
         channel = frappe.get_doc("AI Channel Account", channel_name)
-        auth_id = channel.get("vobiz_auth_id") or auth_id
-        auth_token = channel.get_password("vobiz_auth_token", raise_exception=False) or auth_token
+        auth_id = channel.get("vobiz_auth_id")
+        auth_token = channel.get_password("vobiz_auth_token", raise_exception=False)
         if auth_id and auth_token:
-            break
+            candidates.append({"X-Auth-ID": auth_id, "X-Auth-Token": auth_token})
+        # Some Vobiz recording URLs contain the provider account ID even when
+        # the channel row stores a SIP/trunk account alias. Try the URL account
+        # with the same token before failing with a 401/403.
+        if url_account_id and auth_token and url_account_id != auth_id:
+            candidates.append({"X-Auth-ID": url_account_id, "X-Auth-Token": auth_token})
 
-    if not auth_id:
-        parsed = urlparse(call_log.external_recording_url or call_log.recording_url or "")
-        parts = [part for part in parsed.path.split("/") if part]
-        if "Account" in parts:
-            idx = parts.index("Account")
-            if len(parts) > idx + 1:
-                auth_id = parts[idx + 1]
-
-    if not auth_id or not auth_token:
+    if not candidates:
         frappe.throw("Vobiz recording auth is not configured. Add Vobiz Auth ID and Vobiz Auth Token to the matching AI Channel Account.")
 
-    return {"X-Auth-ID": auth_id, "X-Auth-Token": auth_token}
+    unique = []
+    seen = set()
+    for headers in candidates:
+        key = (headers["X-Auth-ID"], headers["X-Auth-Token"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(headers)
+    return unique
 
 
 @frappe.whitelist()
@@ -100,9 +124,19 @@ def recording_audio(call_log: str):
     if not url:
         frappe.throw("No recording URL found for this call log.")
 
-    response = requests.get(url, headers=_vobiz_auth_headers(doc), timeout=60)
-    if not response.ok:
-        frappe.throw(f"Vobiz recording fetch failed with HTTP {response.status_code}: {response.text[:200]}")
+    last_response = None
+    for headers in _vobiz_auth_candidates(doc):
+        response = requests.get(url, headers=headers, timeout=60)
+        if response.ok:
+            break
+        last_response = response
+    else:
+        response = last_response
+
+    if not response or not response.ok:
+        detail = response.text[:200] if response is not None else "No response"
+        status_code = response.status_code if response is not None else "unknown"
+        frappe.throw(f"Vobiz recording fetch failed with HTTP {status_code}: {detail}")
 
     frappe.local.response.filename = f"{doc.name}.wav"
     frappe.local.response.filecontent = response.content

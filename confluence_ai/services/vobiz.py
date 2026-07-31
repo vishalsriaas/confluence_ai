@@ -248,6 +248,7 @@ def handle_callback(payload: dict) -> dict:
 
     frappe.db.commit()
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
+    repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
@@ -256,6 +257,7 @@ def handle_callback(payload: dict) -> dict:
         "call_log": call_log,
         "processed_event": event_type,
         "order_confirmation": order_confirmation_result,
+        "repeat_followup": repeat_followup_result,
     }
 
 
@@ -305,6 +307,52 @@ def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: s
         from confluence_ai.services.utils import create_error
 
         create_error("Order Confirmation Voice Callback", str(exc), source="vobiz", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
+
+
+def _handle_repeat_followup_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice" or task.external_record_type != "AI Repeat Follow Up Workflow" or not task.external_record_id:
+        return None
+    if event_type_lower not in {"status", "hangup", "completed", "failed", "busy", "no_answer", "timeout", "cancel", "transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
+        return None
+    try:
+        from confluence_ai.services import repeat_followup
+
+        if not frappe.db.exists("AI Repeat Follow Up Workflow", task.external_record_id):
+            return {"status": "ignored", "reason": "missing_workflow"}
+
+        status = str(payload.get("CallStatus") or payload.get("Status") or payload.get("status") or "").lower()
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcription_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or payload.get("transcription_text")
+            or ""
+        )
+        outcome = payload.get("repeat_followup_outcome") or payload.get("outcome")
+        if status in {"failed", "busy", "no_answer", "timeout", "cancel", "cancelled", "canceled"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("Reason") or payload.get("hangup_cause") or "Repeat follow-up voice call did not complete."
+        elif not notes and event_type_lower in {"status", "hangup", "completed"} and status in {"completed", "hangup"}:
+            return repeat_followup.wait_for_voice_transcript(
+                task.external_record_id,
+                "Voice call ended; waiting for Vobiz transcript before deciding repeat follow-up outcome.",
+            )
+
+        return repeat_followup.handle_voice_result(
+            workflow=task.external_record_id,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+        )
+    except Exception as exc:
+        from confluence_ai.services.utils import create_error
+
+        create_error("Repeat Follow Up Voice Callback", str(exc), source="vobiz", task=task.name, exc=exc)
         return {"status": "failed", "error": str(exc)}
 
 
@@ -421,6 +469,66 @@ def _candidate_livekit_trunk_ids(payload: dict) -> list[str]:
     return result
 
 
+def _find_repeat_followup_task_by_phone_and_trunk(candidate_trunk_ids: list[str], suffix: str | None) -> tuple[str | None, str | None]:
+    if not suffix or not candidate_trunk_ids or not frappe.db.exists("DocType", "AI Repeat Follow Up Workflow"):
+        return None, None
+
+    channel_accounts: list[str] = []
+    for row in frappe.get_all(
+        "AI Channel Account",
+        filters={"enabled": 1},
+        fields=["name", "trunk_id", "endpoint_paths_json"],
+    ):
+        endpoints = _parse_json_object(row.endpoint_paths_json)
+        ids = {
+            row.trunk_id,
+            endpoints.get("sip_trunk_id"),
+            endpoints.get("outbound_sip_trunk_id"),
+            endpoints.get("trunk_id"),
+        }
+        if any(value and value in candidate_trunk_ids for value in ids):
+            channel_accounts.append(row.name)
+
+    if not channel_accounts:
+        return None, None
+
+    rows = frappe.get_all(
+        "AI Repeat Follow Up Workflow",
+        filters={"status": ["in", ["Call Queued", "Call Running"]]},
+        fields=[
+            "name",
+            "patient_mobile",
+            "voice_task",
+            "voice_channel_account",
+            "livekit_channel_account_fallback",
+        ],
+        order_by="modified desc",
+        limit=50,
+    )
+    for workflow in rows:
+        digits = "".join(c for c in str(workflow.patient_mobile or "") if c.isdigit())
+        if not digits.endswith(suffix):
+            continue
+        workflow_channels = {
+            workflow.voice_channel_account,
+            workflow.livekit_channel_account_fallback,
+        }
+        if not any(channel and channel in channel_accounts for channel in workflow_channels):
+            continue
+        if not workflow.voice_task or not frappe.db.exists("AI Task", workflow.voice_task):
+            continue
+        latest_attempts = frappe.get_all(
+            "AI Task Attempt",
+            filters={"task": workflow.voice_task},
+            order_by="creation desc",
+            limit=1,
+            pluck="name",
+        )
+        return workflow.voice_task, (latest_attempts[0] if latest_attempts else None)
+
+    return None, None
+
+
 def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     """Create/update a human-friendly call log row from Vobiz callback payloads."""
     if not frappe.db.exists("DocType", "AI Call Log"):
@@ -459,6 +567,9 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     if task:
         doc.task = task.name
         doc.agent = task.assigned_agent or task.target_agent
+        doc.company = task.company or doc.company
+        if not doc.company and doc.agent:
+            doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
         try:
             context = json.loads(task.context_json or "{}")
             if isinstance(context, dict):
@@ -468,6 +579,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
             pass
     if attempt:
         doc.attempt = attempt.name
+        doc.company = doc.company or attempt.company
+
+    if not doc.company and doc.agent:
+        doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
 
     status = payload.get("CallStatus") or payload.get("Status") or payload.get("status") or event_type
     status_lower = str(status or "").lower()
@@ -635,6 +750,10 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
                 )
                 attempt_name = latest_attempts[0] if latest_attempts else None
                 return task.name, attempt_name
+
+        repeat_task, repeat_attempt = _find_repeat_followup_task_by_phone_and_trunk(candidate_trunk_ids, suffix)
+        if repeat_task:
+            return repeat_task, repeat_attempt
 
     # 5. Fallback for non-Trunk (LiveKit only) callbacks by session ID
     if uuid and not payload_trunk_id:

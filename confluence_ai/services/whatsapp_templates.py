@@ -42,12 +42,20 @@ def send_mapped_whatsapp_template(
     )
     profile_key = str(arguments.get("profile_key") or context.get("profile_key") or "").strip()
 
-    mapping = _find_template_map(
-        did_number=called_number,
-        profile_key=profile_key,
-        disease=disease or str(context.get("disease_or_concern") or ""),
-        intent=intent,
-    )
+    template_map = str(arguments.get("template_map") or arguments.get("whatsapp_template_map") or arguments.get("map") or "").strip()
+    if template_map:
+        if not frappe.db.exists("AI WhatsApp Template Map", template_map):
+            frappe.throw(f"AI WhatsApp Template Map not found: {template_map}")
+        mapping = frappe.get_doc("AI WhatsApp Template Map", template_map)
+        if not mapping.enabled:
+            frappe.throw(f"AI WhatsApp Template Map is disabled: {template_map}")
+    else:
+        mapping = _find_template_map(
+            did_number=called_number,
+            profile_key=profile_key,
+            disease=disease or str(context.get("disease_or_concern") or ""),
+            intent=intent,
+        )
     if not mapping:
         frappe.throw("No active AI WhatsApp Template Map matched this request.")
 
@@ -75,6 +83,9 @@ def send_mapped_whatsapp_template(
 
     try:
         result = _send_template(mapping, payload)
+        failed_message = _template_send_failure_message(result)
+        if failed_message:
+            frappe.throw(failed_message)
         record_provider_event(
             provider="WhatsApp",
             operation="send_mapped_whatsapp_template",
@@ -102,6 +113,30 @@ def send_mapped_whatsapp_template(
             exc=exc,
         )
         raise
+
+
+def _template_send_failure_message(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    candidates = [result]
+    body = result.get("body")
+    if isinstance(body, dict):
+        candidates.append(body)
+        message = body.get("message")
+        if isinstance(message, dict):
+            candidates.append(message)
+            nested = message.get("result")
+            if isinstance(nested, dict):
+                candidates.append(nested)
+    nested_result = result.get("result")
+    if isinstance(nested_result, dict):
+        candidates.append(nested_result)
+    for item in candidates:
+        if item.get("delivery_status") == "Failed" or item.get("sent") is False:
+            return item.get("error") or "WhatsApp template send failed."
+        if item.get("success") is False:
+            return item.get("error") or "WhatsApp template send failed."
+    return ""
 
 
 def _validate_customer_ready_message(message: str) -> None:
@@ -136,6 +171,20 @@ def _call_remote_whatsapp_method(server_name: str, method_path: str, payload: di
         frappe.throw("WhatsApp recipient phone number is required.")
     if not payload.get("channel_account"):
         frappe.throw("WhatsApp channel account is required.")
+
+    if method_path.endswith(".send_template_message") or method_path.endswith("send_template_message"):
+        remote_payload = {
+            **payload,
+            "template_name": payload.get("template_name"),
+            "name": payload.get("template_name"),
+            "body": payload.get("message") or f"Template: {payload.get('template_name')}",
+            "sender_type": payload.get("sender_type") or "Agent",
+        }
+        try:
+            return _remote_frappe_method(server_name, method_path, remote_payload)
+        except Exception as exc:
+            if "conversation is required" not in str(exc).lower():
+                raise
 
     conversation = payload.get("conversation")
     if not conversation:

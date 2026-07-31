@@ -36,6 +36,44 @@ def _voice_metadata_context(payload: dict) -> dict:
         or bool(payload.get("selected_sales_route"))
         or payload.get("build_sales_context") in (1, "1", True, "true", "True")
     )
+    is_repeat_followup = (
+        event_name == "repeat_followup"
+        or bool(payload.get("repeat_followup_compacted"))
+        or bool(payload.get("full_encounter_available_via_tool"))
+    )
+    if is_repeat_followup:
+        allowed_keys = [
+            "event",
+            "workflow",
+            "scenario_key",
+            "company",
+            "customer_name",
+            "patient_name",
+            "customer_phone",
+            "phone",
+            "patient_encounter",
+            "encounter_id",
+            "awb_number",
+            "order_id",
+            "tracking_summary",
+            "required_order_script",
+            "medicine_summary",
+            "required_medicine_script",
+            "radha_runtime_version",
+            "active_stage_id",
+            "active_stage_name",
+            "stage_sequence",
+            "next_stage_after_order",
+            "next_stage_after_medicine",
+            "next_stage_after_diet",
+            "stage_prompt_loading_required",
+            "voice_channel_account",
+            "livekit_channel_account_fallback",
+            "full_encounter_available_via_tool",
+        ]
+        compact = {key: payload.get(key) for key in allowed_keys if payload.get(key) not in (None, "", [], {})}
+        compact["repeat_followup_compacted"] = 1
+        return compact
     if not is_sales_flow:
         return payload
 
@@ -233,7 +271,9 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
     task = frappe.get_doc("AI Task", task_name)
     agent_name = task.assigned_agent or task.target_agent
     agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
-    account_name = agent.allowed_channel_account if agent else None
+    account_name = payload.get("voice_channel_account") or (agent.allowed_channel_account if agent else None)
+    if not account_name:
+        account_name = payload.get("livekit_channel_account_fallback")
     if not account_name:
         return {"status": "skipped", "reason": "no_livekit_account"}
 
@@ -333,6 +373,13 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
             request=payload,
             response=result_payload,
         )
+        if task.channel == "Voice" and task.external_record_type == "AI Repeat Follow Up Workflow":
+            try:
+                from confluence_ai.services import repeat_followup
+
+                repeat_followup.mark_voice_started(task.name, result_payload)
+            except Exception as exc:
+                create_error("Repeat Follow Up Voice Start", str(exc), source="livekit", task=task.name, agent=agent_name, exc=exc)
         return result_payload
 
     except Exception as exc:
@@ -597,6 +644,7 @@ def handle_callback(payload: dict) -> dict:
 
     frappe.db.commit()
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
+    repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
@@ -604,6 +652,7 @@ def handle_callback(payload: dict) -> dict:
         "attempt": attempt.name if attempt else None,
         "processed_event": event_type,
         "order_confirmation": order_confirmation_result,
+        "repeat_followup": repeat_followup_result,
     }
 
 
@@ -652,6 +701,43 @@ def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: s
         return {"status": "failed", "error": str(exc)}
 
 
+def _handle_repeat_followup_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice" or task.external_record_type != "AI Repeat Follow Up Workflow" or not task.external_record_id:
+        return None
+    if event_type_lower not in {"room_finished", "call_ended", "participant_left", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
+        return None
+    try:
+        from confluence_ai.services import repeat_followup
+
+        if not frappe.db.exists("AI Repeat Follow Up Workflow", task.external_record_id):
+            return {"status": "ignored", "reason": "missing_workflow"}
+
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcript_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or ""
+        )
+        outcome = payload.get("repeat_followup_outcome") or payload.get("outcome")
+        if event_type_lower in {"failed", "room_failed", "call_failed"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("error") or payload.get("error_message") or "Repeat follow-up voice call failed."
+
+        return repeat_followup.handle_voice_result(
+            workflow=task.external_record_id,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+        )
+    except Exception as exc:
+        create_error("Repeat Follow Up Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
+
+
 def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
     """Create/update the human-facing call log from LiveKit callbacks."""
     if not frappe.db.exists("DocType", "AI Call Log"):
@@ -688,8 +774,12 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         doc.direction = context.get("direction") or "Inbound"
         doc.agent = task.assigned_agent or task.target_agent or doc.agent
         doc.task = task.name
+        doc.company = task.company or doc.company
+        if not doc.company and doc.agent:
+            doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
         if attempt:
             doc.attempt = attempt.name
+            doc.company = doc.company or attempt.company
         doc.customer_name = context.get("customer_name") or context.get("patient_name") or doc.customer_name
         doc.customer_phone = (
             payload.get("caller_phone")
