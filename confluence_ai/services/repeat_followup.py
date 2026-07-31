@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import frappe
 import requests
-from frappe.utils import add_to_date, get_url, now_datetime
+from frappe.utils import add_to_date, get_datetime, get_url, now_datetime
 from frappe.utils.synchronization import filelock
 
 from confluence_ai.services.dispatcher import enqueue_task_execution, refresh_batch_counts
@@ -431,6 +431,10 @@ def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
     if not step_key.startswith("medicine_item_"):
         return {}
 
+    timing_block = _validate_minimum_step_speech_time(step)
+    if timing_block:
+        return timing_block
+
     required_flags = {
         "medicine_name_spoken": "medicine name",
         "dose_spoken": "dose",
@@ -463,6 +467,42 @@ def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
             "step_key": step_key,
         }
     return {}
+
+
+def _validate_minimum_step_speech_time(step: dict) -> dict:
+    started_at = step.get("started_at")
+    if not started_at:
+        return {}
+    try:
+        elapsed_seconds = (now_datetime() - get_datetime(started_at)).total_seconds()
+    except Exception:
+        return {}
+    required_seconds = _minimum_speech_seconds(step.get("speech_unit"))
+    if elapsed_seconds >= required_seconds:
+        return {}
+    remaining = max(1, int(required_seconds - elapsed_seconds))
+    return {
+        "message": (
+            "Medicine step cannot be completed yet. It was advanced too quickly to safely cover name, dose, timing/instruction and period. "
+            "Speak this same medicine completely, then mark it complete."
+        ),
+        "required_fields": ["minimum_speech_time", "medicine_name_spoken", "dose_spoken", "timing_or_instruction_spoken", "period_spoken"],
+        "missing_fields": [f"at least {remaining} more seconds of this medicine explanation"],
+        "step_key": step.get("step_key"),
+        "minimum_speech_seconds": required_seconds,
+        "elapsed_seconds": round(elapsed_seconds, 2),
+    }
+
+
+def _minimum_speech_seconds(speech_unit: Any) -> int:
+    text = _script_text(speech_unit)
+    words = re.findall(r"[\w/.-]+", text)
+    if not words:
+        return 6
+    # Medical dosage lines must not be marked complete after a tiny fragment.
+    # This protects against realtime model/tool-call race conditions without
+    # hardcoding any medicine name.
+    return max(8, min(22, int(len(words) / 2.8)))
 
 
 def mark_repeat_step_interrupted(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
@@ -1153,9 +1193,15 @@ def _start_config(settings, payload: dict | None) -> frappe._dict:
             config.livekit_channel_account_fallback = scenario_config.get("livekit_channel_account_fallback") or config.voice_channel_account
             config.voice_channel_source = "Scenario Config"
     if overrides:
+        minimum_voice_timeout = _int_or_default(config.get("voice_call_timeout_minutes"), 5)
         for fieldname in WORKFLOW_CONFIG_FIELDS:
             value = overrides.get(fieldname)
             if value not in (None, ""):
+                if fieldname == "voice_call_timeout_minutes":
+                    override_timeout = _int_or_default(value, minimum_voice_timeout)
+                    if override_timeout < minimum_voice_timeout:
+                        continue
+                    value = override_timeout
                 config[fieldname] = value
         if overrides.get("max_agent_1_attempts") not in (None, ""):
             config.max_retry_count = overrides.get("max_agent_1_attempts")
@@ -1177,6 +1223,13 @@ def _start_config(settings, payload: dict | None) -> frappe._dict:
     elif config.voice_channel_source not in ("workflow_config", "Scenario Config"):
         config.voice_channel_source = "Settings fallback"
     return config
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _payload_config_overrides(payload: dict) -> dict:
@@ -1474,6 +1527,9 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
     if not isinstance(prescriptions, list):
         prescriptions = []
     department = _clean_text(context.get("patient_department") or workflow.diet_chart_dept)
+    diet_summary = context.get("diet_chart_summary") if isinstance(context.get("diet_chart_summary"), dict) else {}
+    if not diet_summary and workflow.get("diet_chart_summary_json"):
+        diet_summary = parse_json_object(workflow.diet_chart_summary_json, "Diet Chart Summary JSON")
     tracking_summary = context.get("tracking_summary") or {}
     patient_name = _clean_text(context.get("patient_name") or workflow.patient_name) or "customer"
     medicine_count = len(prescriptions)
@@ -1599,7 +1655,7 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
     add_step(
         "diet_explanation",
         "Department-matched diet explanation",
-        _required_diet_script(department=department),
+        _required_diet_script(department=department, diet_summary=diet_summary),
         variables={"department": department},
         rag_filters={
             "stage": "AGENT_1",
@@ -1611,19 +1667,20 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
         completion_condition="complete only after allowed foods and parhej/avoid foods are explained from matched knowledge/chart",
         agent_instruction=(
             "Explain diet directly after medicine completion. Use retrieved department-matched knowledge, not generic diet words. "
-            "Mention specific allowed and avoid foods from the chart. End by saying you will send the chart on WhatsApp."
+            "Mention specific allowed and avoid foods from the chart. Do not say any WhatsApp chart has been sent unless a WhatsApp tool step exists and returns success."
         ),
     )
-    add_step(
-        "whatsapp_diet_chart",
-        "Send diet chart on WhatsApp",
-        "Iske saath main aapko diet chart WhatsApp par bhi bhej dungi. Send confirmation milne ke baad hi main bolungi ki chart send ho gaya hai.",
-        tool_to_call="send_repeat_diet_chart_whatsapp",
-        completion_condition="complete after WhatsApp send result is SUCCESS/FAILED/PENDING and truthfully explained",
-        agent_instruction=(
-            "Call send_repeat_diet_chart_whatsapp. If success, confirm sent. If failed/missing, say send confirmation nahi mili and log pending support. Never fake success."
-        ),
-    )
+    if _truthy(workflow.get("diet_chart_whatsapp_enabled")):
+        add_step(
+            "whatsapp_diet_chart",
+            "Send diet chart on WhatsApp",
+            "Agar customer ne WhatsApp par diet chart maanga hai, to send confirmation milne ke baad hi bolna ki chart send ho gaya hai. Agar customer ne nahi maanga, is step ko no_customer_request ke saath complete karna hai.",
+            tool_to_call="send_repeat_diet_chart_whatsapp",
+            completion_condition="complete after WhatsApp send result is SUCCESS/FAILED/PENDING or no_customer_request is logged",
+            agent_instruction=(
+                "Only call send_repeat_diet_chart_whatsapp if the customer explicitly asks/agrees. If success, confirm sent. If failed/missing, say send confirmation nahi mili and log pending support. Never fake success."
+            ),
+        )
     add_step(
         "outcome_log",
         "Outcome logging",

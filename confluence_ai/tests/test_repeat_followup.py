@@ -201,7 +201,7 @@ class TestRepeatFollowUp(unittest.TestCase):
 
         self.assertEqual(workflow.scenario_key, "medicine_delivery_day_7")
         self.assertEqual(workflow.retry_delay_minutes, 15)
-        self.assertEqual(workflow.voice_call_timeout_minutes, 3)
+        self.assertEqual(workflow.voice_call_timeout_minutes, 5)
         self.assertEqual(workflow.agent_2_delay_days, 10)
         self.assertEqual(workflow.shipkia_tracking_api_url, "https://shipkia.scenario/api/track.php")
         self.assertEqual(workflow.awb_field_names, "custom_awb,patient_encounter.pe_shipkia_awb_number")
@@ -250,6 +250,35 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertEqual(workflow.max_retry_count, 2)
         self.assertEqual(workflow.diet_chart_whatsapp_template_name, "approved_diet_pdf_template")
         self.assertEqual(workflow.diet_chart_whatsapp_send_strategy, "Template Document")
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_payload_cannot_reduce_scenario_voice_timeout(self, _enqueue):
+        config = frappe.new_doc("AI Repeat Follow Up Workflow")
+        config.update(
+            {
+                "workflow_type": "Scenario Config",
+                "enabled": 1,
+                "status": "Draft",
+                "company": "sriaas",
+                "scenario_key": "medicine_delivery_config",
+                "agent_1": self.settings.agent_1,
+                "voice_task_template": self.settings.voice_task_template,
+                "voice_call_timeout_minutes": 15,
+            }
+        )
+        config.insert(ignore_permissions=True)
+        frappe.db.commit()
+
+        payload = self._payload("scenario-timeout-floor")
+        payload["workflow_config"] = {
+            "scenario_key": "medicine_delivery_config",
+            "voice_call_timeout_minutes": 5,
+        }
+
+        result = repeat_followup.start_from_event(payload)
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(workflow.voice_call_timeout_minutes, 15)
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_raw_n8n_webhook_body_encounter_shape_is_accepted(self, _enqueue):
@@ -385,6 +414,17 @@ class TestRepeatFollowUp(unittest.TestCase):
 
         incomplete = repeat_followup.mark_repeat_step_complete({"step_key": "medicine_item_1"}, task_id=result["task"])
         self.assertEqual(incomplete["status"], "blocked_incomplete_step")
+
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+        machine_context = parse_json_object(workflow.context_json)
+        machine = machine_context["repeat_state_machine"]
+        for step in machine["steps"]:
+            if step["step_key"] == "medicine_item_1":
+                step["started_at"] = str(add_to_date(now_datetime(), seconds=-30))
+                break
+        workflow.context_json = json.dumps(machine_context)
+        workflow.save(ignore_permissions=True)
+        frappe.db.commit()
 
         repeat_followup.mark_repeat_step_complete(
             {
@@ -620,6 +660,11 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertIn("brown rice", context["required_diet_script"].lower())
         self.assertIn("fast food", context["required_diet_script"].lower())
         self.assertEqual(context["diet_chart_summary"]["knowledge_document"], doc.name)
+        machine = context["repeat_state_machine"]
+        diet_steps = [step for step in machine["steps"] if step["step_key"] == "diet_explanation"]
+        self.assertEqual(len(diet_steps), 1)
+        self.assertIn("brown rice", diet_steps[0]["speech_unit"].lower())
+        self.assertIn("fast food", diet_steps[0]["speech_unit"].lower())
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_outcome_logging_schedules_agent_2_delay_when_configured(self, _enqueue):
