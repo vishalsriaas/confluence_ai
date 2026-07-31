@@ -383,7 +383,22 @@ class TestRepeatFollowUp(unittest.TestCase):
         resumed = repeat_followup.resume_repeat_pending_step({}, task_id=result["task"])
         self.assertEqual(resumed["current_step"]["step_key"], "medicine_item_1")
 
-        repeat_followup.mark_repeat_step_complete({"step_key": "medicine_item_1"}, task_id=result["task"])
+        incomplete = repeat_followup.mark_repeat_step_complete({"step_key": "medicine_item_1"}, task_id=result["task"])
+        self.assertEqual(incomplete["status"], "blocked_incomplete_step")
+
+        repeat_followup.mark_repeat_step_complete(
+            {
+                "step_key": "medicine_item_1",
+                "structured_details": {
+                    "medicine_name": "Medicine 1",
+                    "medicine_name_spoken": True,
+                    "dose_spoken": True,
+                    "timing_or_instruction_spoken": True,
+                    "period_spoken": True,
+                },
+            },
+            task_id=result["task"],
+        )
         self.assertEqual(repeat_followup.get_current_speech_unit({}, task_id=result["task"])["step_key"], "medicine_item_2")
 
     @patch("confluence_ai.services.repeat_followup.requests.post")

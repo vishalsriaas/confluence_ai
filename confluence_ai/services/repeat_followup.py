@@ -391,6 +391,18 @@ def mark_repeat_step_complete(arguments: dict | None = None, *, task_id: str | N
     details = arguments.get("structured_details") or arguments.get("details") or {}
     if not isinstance(details, dict):
         details = {"value": details}
+    completion_block = _validate_repeat_step_completion(step, details)
+    if completion_block:
+        _append_mcp_tool_usage(workflow, "mark_repeat_step_complete", task_id=task_id, status="blocked", detail=completion_block)
+        return {
+            "status": "blocked_incomplete_step",
+            "workflow": workflow.name,
+            "active_step": step.get("step_key"),
+            "message": completion_block.get("message") or "Current step is incomplete. Continue the same step before moving ahead.",
+            "required_fields": completion_block.get("required_fields") or [],
+            "active_speech_unit": step.get("speech_unit"),
+            "active_variables": step.get("variables") or {},
+        }
     now_value = frappe.utils.now()
     step["status"] = "COMPLETED"
     step["completed_at"] = now_value
@@ -406,6 +418,51 @@ def mark_repeat_step_complete(arguments: dict | None = None, *, task_id: str | N
         "next_step": next_step,
         "all_required_steps_complete": 0 if next_step else 1,
     }
+
+
+def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
+    """Block unsafe early completion of medical speech units.
+
+    The realtime model can sometimes call the completion tool before the full
+    audio has covered dose/instruction/period. The backend cannot hear the
+    audio, so require explicit completion flags for medicine item steps.
+    """
+    step_key = _clean_text(step.get("step_key"))
+    if not step_key.startswith("medicine_item_"):
+        return {}
+
+    required_flags = {
+        "medicine_name_spoken": "medicine name",
+        "dose_spoken": "dose",
+        "timing_or_instruction_spoken": "timing/instruction",
+        "period_spoken": "period",
+    }
+    missing = [label for key, label in required_flags.items() if not _truthy(details.get(key))]
+    if missing:
+        return {
+            "message": (
+                "Medicine step cannot be completed yet. Speak this same medicine again with all required details: "
+                + ", ".join(missing)
+                + ". Then call mark_repeat_step_complete with medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
+            ),
+            "required_fields": list(required_flags.keys()),
+            "missing_fields": missing,
+            "step_key": step_key,
+        }
+
+    variables = step.get("variables") if isinstance(step.get("variables"), dict) else {}
+    expected_name = _clean_text(variables.get("medicine_name"))
+    spoken_name = _clean_text(details.get("medicine_name") or details.get("medicine"))
+    if expected_name and spoken_name and expected_name.lower() not in spoken_name.lower() and spoken_name.lower() not in expected_name.lower():
+        return {
+            "message": f"Wrong medicine completion. Active medicine is {expected_name}. Continue this same medicine; do not move ahead.",
+            "required_fields": ["medicine_name"],
+            "missing_fields": ["correct medicine name"],
+            "expected_medicine_name": expected_name,
+            "spoken_medicine_name": spoken_name,
+            "step_key": step_key,
+        }
+    return {}
 
 
 def mark_repeat_step_interrupted(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
@@ -1521,7 +1578,9 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
                 agent_instruction=(
                     "This is mandatory medical instruction. Do not skip this medicine. "
                     "Speak the medicine name, dose, timing/instruction and period exactly from variables. "
-                    "If a value is missing, say you will not guess and mark it pending; do not invent."
+                    "If a value is missing, say you will not guess and mark it pending; do not invent. "
+                    "Only after speaking all required details, call mark_repeat_step_complete with structured_details including "
+                    "medicine_name, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
                 ),
             )
         add_step(
@@ -3405,6 +3464,7 @@ Mandatory state tools when available:
 - Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
 - After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
 - If mark_repeat_step_complete returns a next_step with speech_unit and you have not just asked the customer a question that needs an answer, immediately continue by speaking that next_step.speech_unit. Do not remain silent between required steps.
+- For medicine_item steps, mark_repeat_step_complete will be blocked unless you pass structured_details with medicine_name, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true. If blocked, speak the same active_speech_unit fully; do not call the same state-read tool in a loop.
 - If the customer interrupts before the current step is complete, call mark_repeat_step_interrupted, answer briefly, then call resume_repeat_pending_step/get_current_speech_unit and resume the same step.
 - Never mark a future step complete.
 
