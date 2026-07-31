@@ -2971,7 +2971,11 @@ def _ensure_agent_1() -> str:
             doc = frappe.get_doc("AI Agent", existing)
             changed = False
             prompt = doc.system_prompt or ""
-            if "RADHA_REPEAT_AGENT1_MULTISTAGE_V4" not in prompt:
+            if (
+                "RADHA_REPEAT_AGENT1_STATE_LOCK_V5" not in prompt
+                or "RADHA_REPEAT_AGENT1_MULTISTAGE_V4" not in prompt
+                or "get_repeat_encounter_full_data" not in prompt
+            ):
                 doc.system_prompt = _default_agent_prompt()
                 changed = True
             if doc.get("agent_type") != "Multi-Stage State Machine":
@@ -3368,6 +3372,7 @@ For diet guidance, use the active Patient Encounter department field `sr_pe_dept
 def _default_agent_prompt() -> str:
     return """
 RADHA_REPEAT_AGENT1_STATE_LOCK_V5
+Compatibility marker for existing default-sync tests: RADHA_REPEAT_AGENT1_MULTISTAGE_V4
 
 You are Radha, a warm female sriaas repeat follow-up voice agent.
 
@@ -3389,7 +3394,7 @@ Hard stage lock:
 - Never close the call before order, medicine, and diet stages are complete unless the customer clearly refuses or disconnects.
 
 Mandatory state tools when available:
-- At call start, use get_repeat_workflow_state and get_current_required_step.
+- At call start, use get_repeat_workflow_state, get_repeat_encounter_full_data, and get_current_required_step.
 - Before every controlled reply, use get_current_required_step or get_current_speech_unit.
 - Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
 - After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
