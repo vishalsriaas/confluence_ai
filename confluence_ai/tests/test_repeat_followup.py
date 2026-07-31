@@ -431,6 +431,7 @@ class TestRepeatFollowUp(unittest.TestCase):
                 "step_key": "medicine_item_1",
                 "structured_details": {
                     "medicine_name": "Medicine 1",
+                    "spoken_text": "Pehli medicine Medicine 1 hai. Iski prescribed dose 1-0-1 hai, subah aur shaam khaane ke baad leni hai, aur isko 30 Day tak follow karna hai.",
                     "medicine_name_spoken": True,
                     "dose_spoken": True,
                     "timing_or_instruction_spoken": True,
@@ -707,9 +708,22 @@ class TestRepeatFollowUp(unittest.TestCase):
             task_id=result["task"],
         )
 
-        self.assertEqual(logged["status"], "success")
+        self.assertEqual(logged["status"], "blocked_incomplete_agent_1")
+        self.assertEqual(logged["pending_step"]["step_key"], "opening")
         workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
-        self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+        self.assertNotIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_voice_result_does_not_schedule_agent_2_when_agent_1_steps_incomplete(self, _enqueue):
+        result = repeat_followup.start_from_event(self._payload_with_medicines("incomplete-call-result", count=2))
+
+        handled = repeat_followup.handle_voice_result(task=result["task"], outcome="completed", notes="Customer disconnected early.")
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(handled["status"], "retry_queued_incomplete")
+        self.assertEqual(workflow.status, "Retry Queued")
+        self.assertEqual(workflow.primary_outcome, "agent_1_incomplete")
+        self.assertFalse(workflow.agent_2_scheduled_at)
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_missed_call_uses_configured_retry_delay_and_max_attempts(self, _enqueue):

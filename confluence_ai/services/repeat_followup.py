@@ -447,7 +447,7 @@ def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
             "message": (
                 "Medicine step cannot be completed yet. Speak this same medicine again with all required details: "
                 + ", ".join(missing)
-                + ". Then call mark_repeat_step_complete with medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
+                + ". Then call mark_repeat_step_complete with spoken_text plus medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
             ),
             "required_fields": list(required_flags.keys()),
             "missing_fields": missing,
@@ -455,6 +455,16 @@ def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
         }
 
     variables = step.get("variables") if isinstance(step.get("variables"), dict) else {}
+    spoken_text = _clean_text(
+        details.get("spoken_text")
+        or details.get("customer_facing_text")
+        or details.get("speech_text")
+        or details.get("what_was_spoken")
+    )
+    text_block = _validate_medicine_spoken_text(step_key, variables, spoken_text)
+    if text_block:
+        return text_block
+
     expected_name = _clean_text(variables.get("medicine_name"))
     spoken_name = _clean_text(details.get("medicine_name") or details.get("medicine"))
     if expected_name and spoken_name and expected_name.lower() not in spoken_name.lower() and spoken_name.lower() not in expected_name.lower():
@@ -503,6 +513,83 @@ def _minimum_speech_seconds(speech_unit: Any) -> int:
     # This protects against realtime model/tool-call race conditions without
     # hardcoding any medicine name.
     return max(8, min(22, int(len(words) / 2.8)))
+
+
+def _validate_medicine_spoken_text(step_key: str, variables: dict, spoken_text: str) -> dict:
+    if not spoken_text:
+        return {
+            "message": (
+                "Medicine step cannot be completed without spoken_text. Pass the exact customer-facing sentence you spoke, "
+                "including medicine name, dose, timing/instruction and period."
+            ),
+            "required_fields": [
+                "spoken_text",
+                "medicine_name_spoken",
+                "dose_spoken",
+                "timing_or_instruction_spoken",
+                "period_spoken",
+            ],
+            "missing_fields": ["spoken_text"],
+            "step_key": step_key,
+        }
+
+    normalized = _normalize_for_loose_match(spoken_text)
+    checks = {
+        "medicine name": variables.get("medicine_name"),
+        "dose": variables.get("medicine_dose"),
+        "period": variables.get("medicine_period"),
+    }
+    instruction = variables.get("medicine_timing") or variables.get("medicine_instruction")
+    missing = []
+    for label, value in checks.items():
+        value = _clean_text(value)
+        if not value:
+            continue
+        if not _loose_contains(normalized, value):
+            missing.append(label)
+    if not missing:
+        return {}
+    return {
+        "message": (
+            "Medicine step cannot be completed because spoken_text does not contain: "
+            + ", ".join(missing)
+            + ". Speak this same medicine naturally but include those exact prescription details."
+        ),
+        "required_fields": ["spoken_text"],
+        "missing_fields": missing,
+        "step_key": step_key,
+        "expected_medicine_name": variables.get("medicine_name") or "",
+        "expected_dose": variables.get("medicine_dose") or "",
+        "expected_period": variables.get("medicine_period") or "",
+        "expected_instruction": instruction or "",
+    }
+
+
+def _normalize_for_loose_match(value: Any) -> str:
+    text = str(value or "").lower()
+    text = text.replace("one", "1").replace("zero", "0")
+    text = text.replace("ओने", "1").replace("वन", "1").replace("ज़ीरो", "0").replace("जीरो", "0")
+    return re.sub(r"[^a-z0-9\u0900-\u097f]+", "", text)
+
+
+def _loose_contains(normalized_text: str, expected: Any) -> bool:
+    expected_text = _clean_text(expected)
+    if not expected_text:
+        return True
+    variants = {expected_text}
+    variants.add(expected_text.replace("-", " "))
+    variants.add(expected_text.replace("-", ""))
+    variants.add(expected_text.replace("/", " "))
+    variants.add(expected_text.replace("/", ""))
+    variants.add(re.sub(r"\([^)]*\)", "", expected_text).strip())
+    for variant in variants:
+        normalized_variant = _normalize_for_loose_match(variant)
+        if normalized_variant and normalized_variant in normalized_text:
+            return True
+    words = [word for word in re.split(r"[^A-Za-z0-9\u0900-\u097f]+", expected_text) if len(word) >= 3]
+    if words and all(_normalize_for_loose_match(word) in normalized_text for word in words[:4]):
+        return True
+    return False
 
 
 def mark_repeat_step_interrupted(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
@@ -869,6 +956,21 @@ def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str |
     arguments = arguments or {}
     workflow = _workflow_for_tool(arguments, task_id)
     state = _repeat_state_machine(workflow)
+    pending_step = _pending_required_steps_before(state, "outcome_log")
+    if pending_step:
+        _append_mcp_tool_usage(
+            workflow,
+            "log_repeat_followup_outcome",
+            task_id=task_id,
+            status="blocked",
+            detail={"pending_step": pending_step.get("step_key")},
+        )
+        return {
+            "status": "blocked_incomplete_agent_1",
+            "workflow": workflow.name,
+            "pending_step": pending_step,
+            "message": "Agent 1 required flow is incomplete. Finish the active required step before logging outcome or scheduling Agent 2.",
+        }
     workflow.primary_outcome = _clean_text(arguments.get("primary_outcome") or arguments.get("outcome") or "")
     workflow.sub_outcome = _clean_text(arguments.get("sub_outcome") or "")
     workflow.customer_summary = _clean_text(arguments.get("customer_summary") or arguments.get("summary") or arguments.get("notes") or "")
@@ -918,6 +1020,11 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     if normalized in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or outcome)
 
+    state = _repeat_state_machine(doc)
+    pending_step = _pending_required_steps_before(state, "outcome_log")
+    if pending_step:
+        return mark_agent_1_incomplete(doc.name, notes or f"Call ended before completing {pending_step.get('step_key')}.")
+
     if notes and not doc.customer_summary:
         doc.customer_summary = _clean_text(notes)
     if not doc.primary_outcome:
@@ -931,6 +1038,42 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     frappe.db.commit()
     schedule_result = schedule_agent_2(doc.name, real_conversation=True)
     return {"status": "unclear_logged", "workflow": doc.name, "agent_2": schedule_result}
+
+
+def mark_agent_1_incomplete(workflow_name: str, notes: str | None = None, *, ended_at=None) -> dict:
+    workflow = frappe.get_doc(WORKFLOW, workflow_name)
+    settings = _workflow_settings(workflow)
+    _mark_voice_task_missed(workflow.voice_task)
+    if notes:
+        workflow.agent_notes = _clean_text(notes)
+
+    max_attempts = int(workflow.max_retry_count or settings.max_agent_1_attempts or 3)
+    if int(workflow.retry_count or 0) >= max_attempts:
+        workflow.status = "Failed"
+        workflow.primary_outcome = workflow.primary_outcome or "agent_1_incomplete"
+        workflow.active_call_timeout_at = None
+        workflow.next_scheduled_call_time = None
+        workflow.next_scheduled_call_stage = "Stopped"
+        workflow.timer_status = "Agent 1 ended before completing required flow; no attempts remaining"
+        workflow.save(ignore_permissions=True)
+        frappe.db.commit()
+        return {"status": "failed_incomplete_after_retries", "workflow": workflow.name}
+
+    retry_time = add_to_date(
+        ended_at or now_datetime(),
+        minutes=int(settings.retry_delay_minutes or 60),
+        as_datetime=True,
+    )
+    workflow.status = "Retry Queued"
+    workflow.primary_outcome = workflow.primary_outcome or "agent_1_incomplete"
+    workflow.next_call_time = retry_time
+    workflow.active_call_timeout_at = None
+    workflow.next_scheduled_call_time = retry_time
+    workflow.next_scheduled_call_stage = "Agent 1 retry - incomplete required flow"
+    workflow.timer_status = f"Agent 1 incomplete; retry scheduled for {retry_time}"
+    workflow.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"status": "retry_queued_incomplete", "workflow": workflow.name, "next_call_time": retry_time}
 
 
 def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> dict:
@@ -1636,7 +1779,7 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
                     "Speak the medicine name, dose, timing/instruction and period exactly from variables. "
                     "If a value is missing, say you will not guess and mark it pending; do not invent. "
                     "Only after speaking all required details, call mark_repeat_step_complete with structured_details including "
-                    "medicine_name, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
+                    "medicine_name, spoken_text, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true."
                 ),
             )
         add_step(
@@ -1744,20 +1887,44 @@ def _medicine_variables(index: int, count: int, item: dict) -> dict:
 
 
 def _medicine_speech_unit(values: dict) -> str:
+    index = int(values.get("medicine_index") or 0)
+    count = int(values.get("medicine_count") or 0)
+    ordinals = {
+        1: "Pehli",
+        2: "Doosri",
+        3: "Teesri",
+        4: "Chauthi",
+        5: "Paanchvi",
+        6: "Chhathi",
+        7: "Saatvi",
+        8: "Aathvi",
+        9: "Nauvi",
+        10: "Dasvi",
+    }
+    ordinal = ordinals.get(index, f"{index} number ki")
+    name = values.get("medicine_name")
+    form = values.get("medicine_form")
+    dose = values.get("medicine_dose")
+    timing = values.get("medicine_timing") or values.get("medicine_instruction")
+    period = values.get("medicine_period")
     lines = [
-        f"Medicine {values.get('medicine_index')} of {values.get('medicine_count')}: {values.get('medicine_name')}.",
+        f"{ordinal} medicine {name} hai.",
     ]
-    if values.get("medicine_form"):
-        lines.append(f"Form: {values.get('medicine_form')}.")
-    if values.get("medicine_dose"):
-        lines.append(f"Dose: {values.get('medicine_dose')}.")
-    if values.get("medicine_timing"):
-        lines.append(f"Timing/instruction: {values.get('medicine_timing')}.")
-    elif values.get("medicine_instruction"):
-        lines.append(f"Instruction: {values.get('medicine_instruction')}.")
-    if values.get("medicine_period"):
-        lines.append(f"Period: {values.get('medicine_period')}.")
-    lines.append("Is medicine ka point clear karke hi next medicine par jaana hai.")
+    details = []
+    if form:
+        details.append(f"ye {form} form mein hai")
+    if dose:
+        details.append(f"iski prescribed dose {dose} hai")
+    if timing:
+        details.append(str(timing))
+    if period:
+        details.append(f"isko {period} tak follow karna hai")
+    if details:
+        lines.append(", ".join(details) + ".")
+    if index and count and index < count:
+        lines.append("Ab main next medicine par aati hoon.")
+    elif index and count:
+        lines.append("Ye last medicine thi; ab main short recap karke diet samjhaungi.")
     return "\n".join(lines)
 
 
@@ -3242,7 +3409,12 @@ def _ensure_tools() -> list[str]:
             [
                 ("workflow", "string", 0, "Optional workflow id. Usually omit; active task scope is used."),
                 ("step_key", "string", 0, "The active step key being completed."),
-                ("structured_details", "object", 0, "Step-specific facts, e.g. order_received true/false or send result."),
+                (
+                    "structured_details",
+                    "object",
+                    0,
+                    "Step-specific facts. For medicine_item steps include medicine_name, spoken_text, medicine_name_spoken, dose_spoken, timing_or_instruction_spoken, and period_spoken.",
+                ),
             ],
         ),
         (
@@ -3331,6 +3503,40 @@ def _ensure_tools() -> list[str]:
             if tool.description != description:
                 tool.description = description
                 changed = True
+            existing_params = {
+                row.parameter_name: row
+                for row in (tool.get("input_parameters") or [])
+                if row.get("parameter_name")
+            }
+            desired_names = []
+            for parameter_name, typ, required, param_description in params:
+                desired_names.append(parameter_name)
+                row = existing_params.get(parameter_name)
+                if row:
+                    if row.type != typ:
+                        row.type = typ
+                        changed = True
+                    if int(row.required or 0) != int(required or 0):
+                        row.required = required
+                        changed = True
+                    if row.description != param_description:
+                        row.description = param_description
+                        changed = True
+                else:
+                    tool.append(
+                        "input_parameters",
+                        {
+                            "parameter_name": parameter_name,
+                            "type": typ,
+                            "required": required,
+                            "description": param_description,
+                        },
+                    )
+                    changed = True
+            for row in list(tool.get("input_parameters") or []):
+                if row.get("parameter_name") not in desired_names:
+                    tool.remove(row)
+                    changed = True
             if changed:
                 tool.save(ignore_permissions=True)
             if tool_name in REPEAT_MCP_TOOL_NAMES:
@@ -3521,7 +3727,7 @@ Mandatory state tools when available:
 - Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
 - After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
 - If mark_repeat_step_complete returns a next_step with speech_unit and you have not just asked the customer a question that needs an answer, immediately continue by speaking that next_step.speech_unit. Do not remain silent between required steps.
-- For medicine_item steps, mark_repeat_step_complete will be blocked unless you pass structured_details with medicine_name, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true. If blocked, speak the same active_speech_unit fully; do not call the same state-read tool in a loop.
+- For medicine_item steps, mark_repeat_step_complete will be blocked unless you pass structured_details with medicine_name, spoken_text, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true. spoken_text must be the exact customer-facing sentence you just generated for that medicine. If blocked, speak the same active_speech_unit fully; do not call the same state-read tool in a loop.
 - If the customer interrupts before the current step is complete, call mark_repeat_step_interrupted, answer briefly, then call resume_repeat_pending_step/get_current_speech_unit and resume the same step.
 - Never mark a future step complete.
 
