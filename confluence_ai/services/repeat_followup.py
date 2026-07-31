@@ -24,10 +24,17 @@ DEFAULT_AGENT_2_NAME = "Radha Repeat Agent Sriaas 2"
 DEFAULT_SHIPKIA_URL = "https://shipkia.com/api/track.php"
 DEFAULT_KB_TITLE = "Radha Repeat Agent Sriaas 1 Follow Up Guide"
 REPEAT_MCP_TOOL_NAMES = (
+    "get_repeat_workflow_state",
+    "get_current_required_step",
+    "get_current_speech_unit",
+    "mark_repeat_step_complete",
+    "mark_repeat_step_interrupted",
+    "resume_repeat_pending_step",
     "get_repeat_encounter_full_data",
     "get_repeat_medicine_list",
     "verify_repeat_medicine_in_prescription",
     "get_shipkia_tracking_status",
+    "send_mapped_whatsapp_template",
     "log_repeat_followup_outcome",
 )
 STATE_MACHINE_CONTEXT_KEY = "repeat_state_machine"
@@ -3161,6 +3168,16 @@ def _ensure_tools() -> list[str]:
             ],
         ),
         (
+            "send_mapped_whatsapp_template",
+            "Shared WhatsApp template sender. Repeat follow-up uses this only after explicit customer request and with a complete customer-facing message.",
+            [
+                ("message", "string", 1, "Complete customer-facing message to place in the approved template variable."),
+                ("customer_requested", "boolean", 1, "True only when the customer explicitly asked or agreed to receive WhatsApp."),
+                ("phone", "string", 0, "Optional customer phone. If omitted, task/workflow context is used."),
+                ("template_map", "string", 0, "Optional AI WhatsApp Template Map such as the configured generic map."),
+            ],
+        ),
+        (
             "log_repeat_followup_outcome",
             "Log flexible repeat follow-up outcome, summary, next action and structured details before closing the call.",
             [
@@ -3280,6 +3297,8 @@ def _tool_condition(tool_docname: str) -> str:
         return "Call when the customer says the medicine/order has not arrived or asks delivery status."
     if tool_name == "send_repeat_diet_chart_whatsapp":
         return "Call when the customer asks for a diet chart, says they did not receive the diet chart, or asks for food/diet guidance that should be sent as PDF. Match using sr_pe_deptt from the full encounter."
+    if tool_name == "send_mapped_whatsapp_template":
+        return "Call only after explicit WhatsApp request/consent. Pass customer_requested=true and a complete medicine/order message; never pass a placeholder."
     if tool_name == "log_repeat_followup_outcome":
         return "Mandatory before closing any real conversation."
     return "Use only when needed for the repeat follow-up flow."
@@ -3348,11 +3367,11 @@ For diet guidance, use the active Patient Encounter department field `sr_pe_dept
 
 def _default_agent_prompt() -> str:
     return """
-RADHA_REPEAT_AGENT1_MULTISTAGE_V4
+RADHA_REPEAT_AGENT1_STATE_LOCK_V5
 
 You are Radha, a warm female sriaas repeat follow-up voice agent.
 
-This Agent 1 call is a strict multi-stage flow. Use only the currently loaded stage prompt.
+This Agent 1 call is a strict state-machine flow. Use only the current unlocked step.
 Initial active stage is ORDER_STATUS. Stage order is:
 ORDER_STATUS -> MEDICINE_EXPLANATION -> DIET_EXPLANATION -> OUTCOME_CLOSE.
 
@@ -3369,6 +3388,14 @@ Hard stage lock:
 - Never start diet before the medicine stage has completed every medicine.
 - Never close the call before order, medicine, and diet stages are complete unless the customer clearly refuses or disconnects.
 
+Mandatory state tools when available:
+- At call start, use get_repeat_workflow_state and get_current_required_step.
+- Before every controlled reply, use get_current_required_step or get_current_speech_unit.
+- Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
+- After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
+- If the customer interrupts before the current step is complete, call mark_repeat_step_interrupted, answer briefly, then call resume_repeat_pending_step/get_current_speech_unit and resume the same step.
+- Never mark a future step complete.
+
 Data safety:
 - Use only Patient Encounter, tracking_summary, loaded stage prompt, and configured tools.
 - Medicine data must come from drug_prescription/current prescription only.
@@ -3378,7 +3405,11 @@ Data safety:
 - If any field is missing, say the team will verify; do not invent.
 
 WhatsApp:
-- In this version, do not send WhatsApp and do not offer WhatsApp. Explain diet by voice only.
+- Do not offer WhatsApp proactively.
+- If the customer explicitly asks to receive medicine/order details on WhatsApp, do not deny.
+- Use send_mapped_whatsapp_template with customer_requested=true and a complete customer-facing message.
+- For medicine details, the message must include every medicine from get_repeat_medicine_list/current prescription with dose/timing/instruction/period.
+- Confirm sent only when the WhatsApp tool returns success. If it fails, say send confirmation nahi mili and team will check.
 
 Before closing:
 - Log outcome if log_repeat_followup_outcome is available.
@@ -3441,7 +3472,7 @@ Required speaking order:
    - dose/timing/how to take if present
    - instruction such as before/after food if present
    - period/duration if present
-4. After each medicine, internally mark that medicine as spoken.
+4. In state-machine mode, speak only one medicine item per assistant turn, then call mark_repeat_step_complete for that exact medicine step.
 5. If a detail is missing, say only for that medicine: "Iski exact instruction prescription mein clear nahi dikh rahi, team verify kar degi." Do not guess.
 
 Non-skipping rule:
@@ -3456,6 +3487,12 @@ Interruption rule:
 - Resume from the same medicine if it was not fully spoken, otherwise next unspoken medicine.
 - If customer says random/filler words, do not change topic. Continue the same medicine explanation.
 
+WhatsApp request:
+- If the customer asks to receive medicine details on WhatsApp, use send_mapped_whatsapp_template after explicit request.
+- Pass customer_requested=true.
+- Pass message as complete customer-facing medicine details with all medicines from get_repeat_medicine_list/current prescription.
+- Do not say WhatsApp cannot be sent just because the call version previously did not send diet charts.
+
 Completion condition:
 - This stage is complete only after all medicines from drug_prescription have been explained.
 - Then move to DIET_EXPLANATION by loading that stage prompt.
@@ -3467,7 +3504,6 @@ def _agent_1_diet_stage_prompt() -> str:
 ## ACTIVE STAGE: DIET_EXPLANATION
 
 You are currently in the diet chart explanation stage only.
-Do not send WhatsApp in this version.
 
 Mandatory source:
 Use only the matched diet chart content below. It is selected from sr_pe_deptt / patient department.
@@ -3482,7 +3518,7 @@ Required speaking behavior:
   2. kya avoid/parhej karna hai, with specific food names from the chart
   3. important routine/timing/quantity rules if chart contains them
 - Do not use generic words like "fruits kha lijiye" unless you also name the specific allowed fruits from the chart.
-- If chart content is missing, say: "Aapke department ka diet chart mujhe abhi clear nahi dikh raha, main team ko verify karne ke liye note kar deti hoon."
+- If chart content is missing or does not match the patient's department, say: "Aapke department ka correct diet chart mujhe abhi clear nahi dikh raha, main team ko verify karne ke liye note kar deti hoon." Do not use another department's chart.
 
 Interruption rule:
 - If customer interrupts, answer that question briefly from the diet chart if possible.
