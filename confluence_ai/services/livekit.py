@@ -44,6 +44,7 @@ def _voice_metadata_context(payload: dict) -> dict:
     if is_repeat_followup:
         allowed_keys = [
             "event",
+            "simple_followup_mode",
             "workflow",
             "scenario_key",
             "company",
@@ -59,6 +60,8 @@ def _voice_metadata_context(payload: dict) -> dict:
             "required_order_script",
             "medicine_summary",
             "required_medicine_script",
+            "required_diet_script",
+            "simple_followup_script",
             "radha_runtime_version",
             "active_stage_id",
             "active_stage_name",

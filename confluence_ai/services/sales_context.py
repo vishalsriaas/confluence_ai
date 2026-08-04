@@ -23,6 +23,8 @@ DEFAULT_HANDOFF_RULES = [
 
 
 def should_build_sales_context(route: "frappe.Document | None", agent: "frappe.Document | None", payload: dict) -> bool:
+    if agent and not getattr(agent, "enable_sales_context", 0):
+        return False
     if payload.get("build_sales_context") in (1, "1", True, "true", "True"):
         return True
     if agent and getattr(agent, "enable_sales_context", 0):
@@ -422,6 +424,7 @@ def create_draft_patient_encounter_from_sales(
         customer_name=customer_name,
         phone=phone,
         concern=concern,
+        patient=arguments.get("patient") or arguments.get("patient_id"),
     )
     if not patient_result.get("ok"):
         result = {
@@ -869,7 +872,15 @@ def _remote_find_or_create_patient(
     customer_name: str,
     phone: str | None,
     concern: str,
+    patient: str | None = None,
 ) -> dict:
+    if patient:
+        return {"ok": True, "patient": patient, "action": "provided"}
+
+    patient = _remote_find_patient_from_encounter(server_name, phone=phone, customer_name=customer_name)
+    if patient:
+        return {"ok": True, "patient": patient, "action": "found_from_patient_encounter"}
+
     patient = _remote_find_patient(server_name, phone)
     if patient:
         return {"ok": True, "patient": patient, "action": "found"}
@@ -890,6 +901,36 @@ def _remote_find_or_create_patient(
         }
     data = created.get("data") if isinstance(created.get("data"), dict) else {}
     return {"ok": True, "patient": data.get("name"), "action": "created", "patient_response": created}
+
+
+def _remote_find_patient_from_encounter(
+    server_name: str,
+    *,
+    phone: str | None,
+    customer_name: str | None = None,
+) -> str | None:
+    filters_to_try: list[list] = []
+    for candidate in _phone_candidates(phone):
+        filters_to_try.append([["sr_pe_mobile", "=", candidate]])
+    if customer_name:
+        filters_to_try.append([["patient_name", "like", f"%{customer_name}%"]])
+
+    for filters in filters_to_try:
+        result = _remote_frappe_list(
+            server_name,
+            "Patient Encounter",
+            filters=filters,
+            fields=["name", "patient", "patient_name", "sr_pe_mobile"],
+            limit=5,
+            order_by="creation desc",
+        )
+        if not result.get("ok"):
+            continue
+        for row in result.get("data") or []:
+            patient = str((row or {}).get("patient") or "").strip()
+            if patient:
+                return patient
+    return None
 
 
 def _remote_find_patient(server_name: str, phone: str | None) -> str | None:
@@ -946,10 +987,11 @@ def _build_patient_payload(
         "first_name": first_name,
         "patient_name": first_name,
         "mobile": mobile or phone,
-        "phone": phone,
         "sr_medical_department": _department_for_concern(server_name, concern),
         "status": "Active",
     }
+    if not candidate.get("mobile") and phone:
+        candidate["phone"] = phone
     if field_types:
         return {
             key: value

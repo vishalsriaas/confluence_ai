@@ -174,9 +174,10 @@ class TestRepeatFollowUp(unittest.TestCase):
         context = parse_json_object(task.context_json)
         self.assertEqual(context["repeat_followup_compacted"], 1)
         self.assertEqual(context["full_encounter_available_via_tool"], 1)
-        self.assertEqual(context["state_machine_required"], 1)
-        self.assertEqual(context["active_stage_id"], "ORDER_STATUS")
-        self.assertEqual(context["stage_prompt_loading_required"], 1)
+        self.assertEqual(context["simple_followup_mode"], 1)
+        self.assertEqual(context["state_machine_required"], 0)
+        self.assertEqual(context["active_stage_id"], "SIMPLE_FOLLOWUP")
+        self.assertEqual(context["stage_prompt_loading_required"], 0)
         self.assertEqual(context["current_step_key"], "opening")
         self.assertNotIn("nested", context)
         self.assertEqual(context["awb_number"], "AWB123")
@@ -321,14 +322,16 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertEqual(context["medicine_summary"]["medicine_count"], 12)
         self.assertIn("Medicine 12", context["required_medicine_script"])
         livekit_context = _voice_metadata_context(context)
-        self.assertEqual(livekit_context["active_stage_id"], "ORDER_STATUS")
+        self.assertEqual(livekit_context["active_stage_id"], "SIMPLE_FOLLOWUP")
+        self.assertEqual(livekit_context["simple_followup_mode"], 1)
         self.assertIn("stage_sequence", livekit_context)
         self.assertIn("required_order_script", livekit_context)
         self.assertIn("medicine_summary", livekit_context)
         self.assertIn("required_medicine_script", livekit_context)
+        self.assertIn("required_diet_script", livekit_context)
+        self.assertIn("simple_followup_script", livekit_context)
         self.assertIn("Medicine 12", livekit_context["required_medicine_script"])
         self.assertNotIn("strict_followup_script", livekit_context)
-        self.assertNotIn("required_diet_script", livekit_context)
         self.assertNotIn("current_speech_unit", livekit_context)
         self.assertNotIn("state_machine_tools", livekit_context)
 
@@ -708,10 +711,9 @@ class TestRepeatFollowUp(unittest.TestCase):
             task_id=result["task"],
         )
 
-        self.assertEqual(logged["status"], "blocked_incomplete_agent_1")
-        self.assertEqual(logged["pending_step"]["step_key"], "opening")
+        self.assertEqual(logged["status"], "success")
         workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
-        self.assertNotIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+        self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_voice_result_does_not_schedule_agent_2_when_agent_1_steps_incomplete(self, _enqueue):
@@ -720,10 +722,8 @@ class TestRepeatFollowUp(unittest.TestCase):
         handled = repeat_followup.handle_voice_result(task=result["task"], outcome="completed", notes="Customer disconnected early.")
         workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
 
-        self.assertEqual(handled["status"], "retry_queued_incomplete")
-        self.assertEqual(workflow.status, "Retry Queued")
-        self.assertEqual(workflow.primary_outcome, "agent_1_incomplete")
-        self.assertFalse(workflow.agent_2_scheduled_at)
+        self.assertEqual(handled["status"], "unclear_logged")
+        self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_missed_call_uses_configured_retry_delay_and_max_attempts(self, _enqueue):

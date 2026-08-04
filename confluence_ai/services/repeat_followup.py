@@ -956,7 +956,7 @@ def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str |
     arguments = arguments or {}
     workflow = _workflow_for_tool(arguments, task_id)
     state = _repeat_state_machine(workflow)
-    pending_step = _pending_required_steps_before(state, "outcome_log")
+    pending_step = {} if _is_simple_followup_mode(workflow) else _pending_required_steps_before(state, "outcome_log")
     if pending_step:
         _append_mcp_tool_usage(
             workflow,
@@ -1020,10 +1020,11 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     if normalized in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or outcome)
 
-    state = _repeat_state_machine(doc)
-    pending_step = _pending_required_steps_before(state, "outcome_log")
-    if pending_step:
-        return mark_agent_1_incomplete(doc.name, notes or f"Call ended before completing {pending_step.get('step_key')}.")
+    if not _is_simple_followup_mode(doc):
+        state = _repeat_state_machine(doc)
+        pending_step = _pending_required_steps_before(state, "outcome_log")
+        if pending_step:
+            return mark_agent_1_incomplete(doc.name, notes or f"Call ended before completing {pending_step.get('step_key')}.")
 
     if notes and not doc.customer_summary:
         doc.customer_summary = _clean_text(notes)
@@ -1038,6 +1039,14 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     frappe.db.commit()
     schedule_result = schedule_agent_2(doc.name, real_conversation=True)
     return {"status": "unclear_logged", "workflow": doc.name, "agent_2": schedule_result}
+
+
+def _is_simple_followup_mode(workflow) -> bool:
+    try:
+        context = parse_json_object(workflow.context_json, "Workflow Context JSON") if workflow.context_json else {}
+    except Exception:
+        context = {}
+    return _truthy(context.get("simple_followup_mode"))
 
 
 def mark_agent_1_incomplete(workflow_name: str, notes: str | None = None, *, ended_at=None) -> dict:
@@ -2293,6 +2302,9 @@ def _required_diet_script(*, department: str | None = None, diet_summary: dict |
     dept = _clean_text(department)
     diet_summary = diet_summary or {}
     explanation = _script_text(diet_summary.get("diet_explanation_script"))
+    customer_script = _customer_facing_diet_script(department=dept, diet_text=explanation)
+    if customer_script:
+        return customer_script
     lines = []
     if dept:
         lines.append(f"Ab main {dept} ke hisaab se diet samjha deti hoon.")
@@ -2307,6 +2319,74 @@ def _required_diet_script(*, department: str | None = None, diet_summary: dict |
     return "\n".join(lines)
 
 
+def _customer_facing_diet_script(*, department: str | None = None, diet_text: str | None = None) -> str:
+    text = _script_text(diet_text)
+    if not text:
+        return ""
+    allowed = _extract_diet_items(text, start_patterns=[r"food items allowed", r"allowed"], stop_patterns=[r"food items not allowed", r"not allowed", r"foods to avoid"])
+    avoid = _extract_diet_items(text, start_patterns=[r"food items not allowed", r"not allowed", r"foods to avoid"], stop_patterns=[r"meal", r"note:", r"## "])
+    if not allowed and not avoid:
+        return ""
+    dept = _clean_text(department)
+    lines = [f"Ab main {dept + ' ke hisaab se ' if dept else ''}diet samjha deti hoon."]
+    if allowed:
+        lines.append("Aap ye cheezein le sakte hain: " + ", ".join(allowed[:28]) + ".")
+    if avoid:
+        lines.append("Parhej mein ye avoid karna hai: " + ", ".join(avoid[:28]) + ".")
+    lines.append("Oil kam rakhein, overeating na karein, aur agar diabetes ya koi special condition ho to team/doctor se confirm karke fruit choose karein.")
+    return "\n".join(lines)
+
+
+def _extract_diet_items(text: str, *, start_patterns: list[str], stop_patterns: list[str]) -> list[str]:
+    lines = text.splitlines()
+    collecting = False
+    items: list[str] = []
+    skip_words = {
+        "food items allowed",
+        "food items not allowed",
+        "allowed",
+        "not allowed",
+        "fruits for diabetic patients",
+        "fruits for non-diabetic patients",
+        "cereals and grains",
+        "vegetables",
+        "pulses",
+        "beverages",
+        "dairy products",
+        "cooking oil / fat",
+        "non-vegetarian foods",
+        "spices",
+        "rice",
+        "nuts",
+        "seasoning",
+        "salad and steamed vegetables",
+    }
+    for raw in lines:
+        cleaned = raw.strip().strip("#").strip()
+        lowered = cleaned.lower()
+        if not collecting and any(re.search(pattern, lowered) for pattern in start_patterns):
+            collecting = True
+            continue
+        if collecting and any(re.search(pattern, lowered) for pattern in stop_patterns):
+            if items:
+                break
+        if not collecting:
+            continue
+        candidate = cleaned.lstrip("-•0123456789. ").strip()
+        if not candidate:
+            continue
+        candidate_l = candidate.lower()
+        if candidate_l in skip_words or candidate_l.startswith("note"):
+            continue
+        if len(candidate) > 55:
+            continue
+        if candidate not in items:
+            items.append(candidate)
+        if len(items) >= 40:
+            break
+    return items
+
+
 def _strict_followup_script(order_script: str | None, medicine_summary: dict | None, diet_script: str | None) -> str:
     medicine_script = ""
     if isinstance(medicine_summary, dict):
@@ -2319,6 +2399,24 @@ def _strict_followup_script(order_script: str | None, medicine_summary: dict | N
         medicine_script or "Medicine data is missing. Tell customer team will check medicine details before advising.",
         "SECTION 3 - DIET:",
         _script_text(diet_script),
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def _simple_followup_script(order_script: str | None, medicine_summary: dict | None, diet_script: str | None) -> str:
+    medicine_script = ""
+    if isinstance(medicine_summary, dict):
+        medicine_script = _script_text(medicine_summary.get("required_medicine_script"))
+    sections = [
+        "Radha simple straight flow. Speak naturally, not like field reading.",
+        "1) Opening: Namaste <patient_name> ji, main Radha sriaas treatment-support team se bol rahi hoon. Aapko medicine package receive ho gaya hai?",
+        "2) If customer says package received: acknowledge once and go directly to medicine explanation. If customer says not received or asks location/date: explain this order status, then go to medicine:",
+        _script_text(order_script),
+        "3) Medicine explanation: Tell total count first. Then explain every medicine in order. Do not skip any medicine. Use natural Hindi/Hinglish:",
+        medicine_script or "Medicine list missing hai; dosage guess mat karna. Team verify karegi.",
+        "4) Diet explanation: after all medicines, explain these diet points directly:",
+        _script_text(diet_script),
+        "5) Close: ask if any medicine or diet doubt remains. If not, say follow-up team will stay connected and close politely.",
     ]
     return "\n\n".join(section for section in sections if section)
 
@@ -3004,6 +3102,7 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
     medicine_script = context.get("required_medicine_script") or (medicine_summary.get("required_medicine_script") if isinstance(medicine_summary, dict) else "")
     return {
         "event": "repeat_followup",
+        "simple_followup_mode": 1,
         "workflow": workflow.name if workflow else context.get("workflow"),
         "company": context.get("company") or (workflow.company if workflow else "sriaas"),
         "scenario_key": context.get("scenario_key") or (workflow.scenario_key if workflow else ""),
@@ -3021,11 +3120,12 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
         "required_medicine_script": medicine_script,
         "required_diet_script": diet_script,
         "strict_followup_script": _strict_followup_script(order_script, medicine_summary, diet_script),
+        "simple_followup_script": _simple_followup_script(order_script, medicine_summary, diet_script),
         "diet_chart_summary": diet_summary,
         "radha_runtime_version": RADHA_RUNTIME_VERSION,
-        "active_stage_id": "ORDER_STATUS",
-        "active_stage_name": "1. Order delivery status only",
-        "stage_sequence": "ORDER_STATUS -> MEDICINE_EXPLANATION -> DIET_EXPLANATION -> OUTCOME_CLOSE",
+        "active_stage_id": "SIMPLE_FOLLOWUP",
+        "active_stage_name": "Simple Agent 1 delivery medicine diet flow",
+        "stage_sequence": "DELIVERY -> MEDICINE -> DIET -> CLOSE",
         "next_stage_after_order": "MEDICINE_EXPLANATION",
         "next_stage_after_medicine": "DIET_EXPLANATION",
         "next_stage_after_diet": "OUTCOME_CLOSE",
@@ -3034,8 +3134,8 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
         "current_step_label": active_step.get("step_label") or context.get("current_step_label") or "",
         "current_speech_unit": active_step.get("speech_unit") or context.get("current_speech_unit") or "",
         "current_rag_filters": active_step.get("rag_filters") or context.get("current_rag_filters") or {},
-        "state_machine_required": 1,
-        "stage_prompt_loading_required": 1,
+        "state_machine_required": 0,
+        "stage_prompt_loading_required": 0,
         "voice_channel_account": context.get("voice_channel_account") or (workflow.voice_channel_account if workflow else ""),
         "livekit_channel_account_fallback": context.get("livekit_channel_account_fallback") or (workflow.livekit_channel_account_fallback if workflow else ""),
         "repeat_followup_compacted": 1,
@@ -3698,56 +3798,49 @@ For diet guidance, use the active Patient Encounter department field `sr_pe_dept
 
 def _default_agent_prompt() -> str:
     return """
-RADHA_REPEAT_AGENT1_STATE_LOCK_V5
-Compatibility marker for existing default-sync tests: RADHA_REPEAT_AGENT1_MULTISTAGE_V4
+RADHA_REPEAT_AGENT1_SIMPLE_STRAIGHT_V1
+Compatibility marker: RADHA_REPEAT_AGENT1_STATE_LOCK_V5 RADHA_REPEAT_AGENT1_MULTISTAGE_V4
 
-You are Radha, a warm female sriaas repeat follow-up voice agent.
+You are Radha, a warm female sriaas treatment-support voice agent.
 
-This Agent 1 call is a strict state-machine flow. Use only the current unlocked step.
-Initial active stage is ORDER_STATUS. Stage order is:
-ORDER_STATUS -> MEDICINE_EXPLANATION -> DIET_EXPLANATION -> OUTCOME_CLOSE.
+Your job is simple and straight:
+1. Ask whether the customer received the medicine package.
+2. If received, acknowledge and go to medicines. If not received or customer asks location/date, explain order status from the provided order context.
+3. Explain every medicine from the provided Patient Encounter medicine script in order.
+4. Explain diet from the provided diet script.
+5. Ask for any doubt and close politely.
 
-Global voice identity:
-- Speak in natural Hindi/Hinglish unless the customer uses English.
-- Radha is female: use "bol rahi hoon", "samjha deti hoon", "kar deti hoon".
-- Never say "raha hoon". Never sound like a bot reading fields.
-- Do not speak internal labels like stage, tool, JSON, metadata, RAG, prompt, or system.
+Use only the provided context:
+- required_order_script
+- required_medicine_script
+- required_diet_script
+- simple_followup_script
+- tracking_summary
+- medicine_summary
 
-Hard stage lock:
-- Do not jump stages.
-- If the customer interrupts, answer only that question briefly and continue the same active stage.
-- A stage is complete only when its own completion condition is satisfied.
-- Never start diet before the medicine stage has completed every medicine.
-- Never close the call before order, medicine, and diet stages are complete unless the customer clearly refuses or disconnects.
+Voice rules:
+- Speak natural Hindi/Hinglish. Radha is female: say "bol rahi hoon", "samjha deti hoon", "kar deti hoon".
+- Never say "raha hoon".
+- Do not sound like field reading. Do not say labels like JSON, tool, stage, prompt, metadata, or RAG.
+- Do not ask permission before medicine or diet explanation. Continue naturally.
+- Do not jump from order to diet. Medicine always comes before diet.
+- If customer interrupts, answer that exact question briefly, then continue the same unfinished section.
+- If customer says "haan", "ok", "hmm", continue with the next missing point.
+- Do not offer WhatsApp proactively in this Agent 1 version.
 
-Mandatory state tools when available:
-- At call start, use get_repeat_workflow_state, get_repeat_encounter_full_data, and get_current_required_step.
-- Before every controlled reply, use get_current_required_step or get_current_speech_unit.
-- Opening rule: the first spoken reply must include both Radha's short intro and the delivery question. Never stop after only intro.
-- Speak only the returned current step. Never speak two medicine_item steps in one assistant turn.
-- After actually speaking/handling the current step, call mark_repeat_step_complete for that exact step_key.
-- If mark_repeat_step_complete returns a next_step with speech_unit and you have not just asked the customer a question that needs an answer, immediately continue by speaking that next_step.speech_unit. Do not remain silent between required steps.
-- For medicine_item steps, mark_repeat_step_complete will be blocked unless you pass structured_details with medicine_name, spoken_text, medicine_name_spoken=true, dose_spoken=true, timing_or_instruction_spoken=true, and period_spoken=true. spoken_text must be the exact customer-facing sentence you just generated for that medicine. If blocked, speak the same active_speech_unit fully; do not call the same state-read tool in a loop.
-- If the customer interrupts before the current step is complete, call mark_repeat_step_interrupted, answer briefly, then call resume_repeat_pending_step/get_current_speech_unit and resume the same step.
-- Never mark a future step complete.
+Medicine safety:
+- Medicine names, dose, timing/instruction, and period must come only from required_medicine_script / medicine_summary.
+- Tell total medicine count before details.
+- Speak every medicine in order.
+- Never invent medicine names.
+- If customer asks about a medicine name, answer from the current medicine_summary only. If not visible, say team will verify.
 
-Data safety:
-- Use only Patient Encounter, tracking_summary, loaded stage prompt, and configured tools.
-- Medicine data must come from drug_prescription/current prescription only.
-- Before speaking medicine names/dosage, use the medicine source-of-truth list if a medicine-list tool is available.
-- If patient asks about a medicine by name, verify it in current prescription before answering.
-- Never use sales/liver enquiry medicine examples or old-call memory in this repeat follow-up call.
-- If any field is missing, say the team will verify; do not invent.
+Diet safety:
+- Use required_diet_script only.
+- Mention specific allowed foods and specific parhej/avoid foods.
+- If customer asks about a food, answer from required_diet_script if visible. If unsure, say team will verify; do not guess.
 
-WhatsApp:
-- Do not offer WhatsApp proactively.
-- If the customer explicitly asks to receive medicine/order details on WhatsApp, do not deny.
-- Use send_mapped_whatsapp_template with customer_requested=true and a complete customer-facing message.
-- For medicine details, the message must include every medicine from get_repeat_medicine_list/current prescription with dose/timing/instruction/period.
-- Confirm sent only when the WhatsApp tool returns success. If it fails, say send confirmation nahi mili and team will check.
-
-Before closing:
-- Log outcome if log_repeat_followup_outcome is available.
+Do not call state/progress tools during the call. Speak the flow naturally.
 """.strip()
 
 

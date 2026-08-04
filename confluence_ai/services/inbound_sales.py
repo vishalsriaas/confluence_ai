@@ -311,6 +311,8 @@ def _context_from_vobiz_payload(payload: dict, selection: dict) -> dict:
     raw_called = payload.get("To") or payload.get("to") or payload.get("called_number")
     caller = _phone_for_context(raw_caller, prefer_ten_digit=True)
     called = _phone_for_context(raw_called)
+    agent = frappe.get_doc("AI Agent", selection.get("target_agent")) if selection.get("target_agent") else None
+    build_sales_context = 1 if agent and getattr(agent, "enable_sales_context", 0) else 0
     context = {
         "event": INBOUND_EVENT,
         "source_system": "Vobiz Inbound Sales",
@@ -327,10 +329,11 @@ def _context_from_vobiz_payload(payload: dict, selection: dict) -> dict:
         "business_unit": payload.get("business_unit"),
         "disease_or_concern": selection.get("disease_key"),
         "profile_key": selection.get("profile_key"),
-        "build_sales_context": 1,
-        "inbound_sales_context_deferred": 1,
         "payload_json": dict(payload),
     }
+    if build_sales_context:
+        context["build_sales_context"] = 1
+        context["inbound_sales_context_deferred"] = 1
     if raw_caller and raw_caller != caller:
         context["raw_customer_phone"] = raw_caller
     if raw_called and raw_called != called:
