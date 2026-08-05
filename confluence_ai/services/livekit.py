@@ -98,8 +98,16 @@ def _append_livekit_diagnostic_timeline(current, payload: dict) -> list[dict]:
     if isinstance(current, list):
         timeline = current
     elif isinstance(current, str) and current.strip():
-        parsed = parse_json_object(current)
-        timeline = parsed if isinstance(parsed, list) else []
+        try:
+            parsed = json.loads(current)
+        except Exception:
+            parsed = parse_json_object(current)
+        if isinstance(parsed, list):
+            timeline = parsed
+        elif isinstance(parsed, dict):
+            timeline = [parsed]
+        else:
+            timeline = []
     elif isinstance(current, dict):
         timeline = [current]
     else:
