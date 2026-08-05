@@ -16,6 +16,9 @@
   "default_timezone",
   "default_task_timeout_seconds",
   "dispatch_batch_size",
+  "livekit_diagnostics_section",
+  "livekit_diagnostics_enabled",
+  "livekit_diagnostics_max_events",
   "rag_section",
   "embedding_provider",
   "embedding_model",
@@ -94,6 +97,26 @@
    "fieldname": "dispatch_batch_size",
    "fieldtype": "Int",
    "label": "Dispatch Batch Size"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "livekit_diagnostics_section",
+   "fieldtype": "Section Break",
+   "label": "LiveKit Diagnostics"
+  },
+  {
+   "default": "0",
+   "description": "Enable compact per-turn LiveKit diagnostic timeline capture for voice debugging. Keep disabled during normal production unless investigating call continuity.",
+   "fieldname": "livekit_diagnostics_enabled",
+   "fieldtype": "Check",
+   "label": "Enable LiveKit Diagnostics"
+  },
+  {
+   "default": "200",
+   "description": "Maximum compact LiveKit diagnostic events retained per task/call log.",
+   "fieldname": "livekit_diagnostics_max_events",
+   "fieldtype": "Int",
+   "label": "LiveKit Diagnostics Max Events"
   },
   {
    "collapsible": 1,

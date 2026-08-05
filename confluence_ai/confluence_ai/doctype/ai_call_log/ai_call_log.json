@@ -39,7 +39,8 @@
   "initiated_payload_json",
   "status_payload_json",
   "recording_payload_json",
-  "transcript_payload_json"
+  "transcript_payload_json",
+  "livekit_diagnostic_timeline_json"
  ],
  "fields": [
   {
@@ -253,6 +254,13 @@
    "fieldname": "transcript_payload_json",
    "fieldtype": "Code",
    "label": "Transcript Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "description": "Compact per-turn LiveKit diagnostics captured only when Confluence AI Settings enables LiveKit Diagnostics.",
+   "fieldname": "livekit_diagnostic_timeline_json",
+   "fieldtype": "Code",
+   "label": "LiveKit Diagnostic Timeline JSON",
    "options": "JSON"
   }
  ],

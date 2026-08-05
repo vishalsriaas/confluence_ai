@@ -98,6 +98,8 @@ def ensure_settings() -> None:
             "default_timezone": "Asia/Kolkata",
             "default_task_timeout_seconds": 900,
             "dispatch_batch_size": 500,
+            "livekit_diagnostics_enabled": 0,
+            "livekit_diagnostics_max_events": 200,
             "embedding_provider": "OpenAI",
             "embedding_model": "text-embedding-3-small",
             "embedding_base_url": "https://api.openai.com/v1",

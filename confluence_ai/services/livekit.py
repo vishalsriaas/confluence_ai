@@ -23,6 +23,92 @@ class SafeFormatter(string.Formatter):
         return super().get_value(key, args, kwargs)
 
 
+def _livekit_diagnostics_enabled() -> bool:
+    try:
+        return bool(frappe.db.get_single_value("Confluence AI Settings", "livekit_diagnostics_enabled"))
+    except Exception:
+        return False
+
+
+def _livekit_diagnostics_max_events() -> int:
+    try:
+        value = int(frappe.db.get_single_value("Confluence AI Settings", "livekit_diagnostics_max_events") or 200)
+    except Exception:
+        value = 200
+    return max(20, min(value, 1000))
+
+
+def _compact_livekit_value(value, max_chars: int = 300):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(value, default=str)
+    else:
+        text = str(value)
+    if len(text) > max_chars:
+        return f"{text[:max_chars]}..."
+    return text
+
+
+def _compact_livekit_diagnostic_payload(payload: dict) -> dict:
+    compact = {"received_at": frappe.utils.now_datetime().isoformat()}
+    for key in (
+        "event",
+        "event_type",
+        "status",
+        "reason",
+        "task",
+        "room_name",
+        "room",
+        "diag_seq",
+        "monotonic_ms",
+        "metric_type",
+        "metric_name",
+        "tool_name",
+        "trigger",
+        "stage",
+        "current_stage",
+        "duration_ms",
+        "exception_type",
+        "error",
+    ):
+        value = _compact_livekit_value(payload.get(key))
+        if value is not None:
+            compact[key] = value
+
+    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
+    if transcript:
+        transcript_text = str(transcript)
+        compact["transcript_chars"] = len(transcript_text)
+        compact["transcript_preview"] = _compact_livekit_value(transcript_text, 240)
+
+    if "is_final" in payload:
+        compact["is_final"] = bool(payload.get("is_final"))
+    if "turn_count" in payload:
+        compact["turn_count"] = _compact_livekit_value(payload.get("turn_count"))
+    if "details" in payload:
+        compact["details"] = _compact_livekit_value(payload.get("details"), 600)
+
+    return compact
+
+
+def _append_livekit_diagnostic_timeline(current, payload: dict) -> list[dict]:
+    if isinstance(current, list):
+        timeline = current
+    elif isinstance(current, str) and current.strip():
+        parsed = parse_json_object(current)
+        timeline = parsed if isinstance(parsed, list) else []
+    elif isinstance(current, dict):
+        timeline = [current]
+    else:
+        timeline = []
+
+    timeline.append(_compact_livekit_diagnostic_payload(payload))
+    return timeline[-_livekit_diagnostics_max_events():]
+
+
 def _voice_metadata_context(payload: dict) -> dict:
     """Return only the context the realtime voice model needs at call start.
 
@@ -257,13 +343,17 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
                 "is_orchestrator": bool(s.is_orchestrator)
             })
 
+    voice_context = _voice_metadata_context(payload)
+    voice_context["livekit_diagnostics_enabled"] = 1 if _livekit_diagnostics_enabled() else 0
+    voice_context["livekit_diagnostics_max_events"] = _livekit_diagnostics_max_events()
+
     metadata = {
         "task": task.name,
         "agent": agent_name,
         "audio_name": audio_name,
         "system_prompt": system_prompt,
         "personality": personality,
-        "context": _voice_metadata_context(payload),
+        "context": voice_context,
     }
     if stage_prompts:
         metadata["stage_prompts"] = stage_prompts
@@ -551,11 +641,23 @@ def handle_callback(payload: dict) -> dict:
         attempt_response = {"raw_response": attempt_response}
 
     # Save the raw payload details
+    diagnostics_enabled = _livekit_diagnostics_enabled()
     task_result["last_livekit_payload"] = payload
     if attempt:
         attempt_response["last_livekit_payload"] = payload
 
-    _upsert_livekit_call_log(payload, task, attempt)
+    if diagnostics_enabled:
+        task_result["livekit_diagnostic_timeline"] = _append_livekit_diagnostic_timeline(
+            task_result.get("livekit_diagnostic_timeline"),
+            payload,
+        )
+        if attempt:
+            attempt_response["livekit_diagnostic_timeline"] = _append_livekit_diagnostic_timeline(
+                attempt_response.get("livekit_diagnostic_timeline"),
+                payload,
+            )
+
+    _upsert_livekit_call_log(payload, task, attempt, diagnostics_enabled=diagnostics_enabled)
 
     # Update statuses
     if event_type_lower in {"room_started", "participant_joined", "initiated"}:
@@ -741,7 +843,7 @@ def _handle_repeat_followup_callback(task, payload: dict, event_type_lower: str)
         return {"status": "failed", "error": str(exc)}
 
 
-def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
+def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enabled: bool = False) -> None:
     """Create/update the human-facing call log from LiveKit callbacks."""
     if not frappe.db.exists("DocType", "AI Call Log"):
         return
@@ -806,6 +908,13 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
         doc.domain = payload.get("domain") or context.get("vobiz_domain") or doc.domain
         doc.reason = payload.get("reason") or doc.reason
         doc.last_payload_json = as_json(payload)
+        if diagnostics_enabled and doc.meta.has_field("livekit_diagnostic_timeline_json"):
+            doc.livekit_diagnostic_timeline_json = as_json(
+                _append_livekit_diagnostic_timeline(
+                    doc.livekit_diagnostic_timeline_json,
+                    payload,
+                )
+            )
 
         status = str(payload.get("status") or livekit_event or "").lower()
         if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
