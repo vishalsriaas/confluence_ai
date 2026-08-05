@@ -24,8 +24,8 @@ class TestMCPPermissions(unittest.TestCase):
     @patch("confluence_ai.api.mcp.frappe.get_all")
     def test_livekit_console_scope_exposes_only_safe_read_tools(self, get_all, get_doc):
         tool_ids = {
-            "MCP-PINCODE": LIVEKIT_CONSOLE_TOOLS[0],
-            "MCP-RATE": LIVEKIT_CONSOLE_TOOLS[1],
+            f"MCP-TOOL-{index}": tool_name
+            for index, tool_name in enumerate(LIVEKIT_CONSOLE_TOOLS)
         }
         get_all.return_value = list(tool_ids)
         get_doc.side_effect = lambda _doctype, name: SimpleNamespace(tool_name=tool_ids[name])

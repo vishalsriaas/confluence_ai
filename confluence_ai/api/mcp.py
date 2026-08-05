@@ -11,6 +11,9 @@ from confluence_ai.services.mcp import assert_tool_allowed
 LIVEKIT_CONSOLE_SANDBOX_TASK = "livekit-console-sandbox"
 LIVEKIT_CONSOLE_TOOLS = (
     "lookup_pincode_serviceability",
+    "get_shipkia_starting_rate",
+    "get_shipkia_flat_rates",
+    "get_shipkia_flat_zonal_rates",
     "calculate_shipkia_rate",
 )
 

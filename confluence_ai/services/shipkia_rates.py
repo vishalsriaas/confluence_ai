@@ -19,6 +19,17 @@ RATE_CARD_PATH = (
 GST_RATE = Decimal("18")
 VOLUMETRIC_DIVISOR = Decimal("5000")
 ZONES = ("A", "B", "C", "D", "E", "F")
+STARTING_RATE_WEIGHT_G = Decimal("500")
+GENERAL_STARTING_RATE = Decimal("22")
+FLAT_RATE_COURIER = "E-Kart"
+FLAT_RATE_SERVICE = "E-Kart SURFACE"
+FLAT_ZONAL_RATE_COURIER = "E-Kart"
+FLAT_ZONAL_RATE_SERVICE = "E-Kart EXPRESS"
+EXPECTED_FLAT_RATE_SLABS = (
+    (Decimal("0"), Decimal("500")),
+    (Decimal("501"), Decimal("1000")),
+    (Decimal("1001"), Decimal("2000")),
+)
 
 
 @dataclass(frozen=True)
@@ -241,6 +252,454 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
             "change the final chargeable weight."
         )
     return response
+
+
+def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a non-customer-specific starting-rate headline or approved-zone floor."""
+    arguments = arguments or {}
+    raw_zone = str(arguments.get("zone") or "").strip().upper()
+    zone = raw_zone.removeprefix("ZONE").strip()
+    if zone not in ZONES:
+        zone = ""
+    courier_filter = str(arguments.get("courier_partner") or "").strip()
+    transport_mode = str(arguments.get("transport_mode") or "").strip()
+
+    if not zone:
+        return {
+            "status": "success",
+            "response_type": "general_starting",
+            "zone": None,
+            "amount": _money(GENERAL_STARTING_RATE),
+            "currency": "INR",
+            "gst_inclusive": False,
+            "marketing_headline": True,
+            "rate_card": rate_card_metadata(),
+            "message": (
+                "ShipKia shipping rates start from Rs 22. The exact rate depends on the route, "
+                "weight and service."
+            ),
+        }
+
+    eligible_rows = [
+        row
+        for row in load_rate_card()
+        if (
+            row.movement == "FWD"
+            and not row.is_additional
+            and row.min_weight_g <= STARTING_RATE_WEIGHT_G <= row.max_weight_g
+            and row.zone_prices[zone] > 0
+            and (not courier_filter or _matches_courier(row, courier_filter))
+            and (not transport_mode or _matches_transport_mode(row, transport_mode))
+        )
+    ]
+    if not eligible_rows:
+        return {
+            "status": "configuration_required",
+            "response_type": "zone_starting",
+            "zone": zone,
+            "amount": None,
+            "currency": "INR",
+            "gst_inclusive": True,
+            "rate_card": rate_card_metadata(),
+            "message": f"No verified starting rate is configured for Zone {zone}.",
+        }
+
+    selected = min(
+        eligible_rows,
+        key=lambda row: (row.zone_prices[zone], row.service.casefold()),
+    )
+    base_amount = selected.zone_prices[zone]
+    gst = base_amount * GST_RATE / Decimal("100")
+    total = base_amount + gst
+    return {
+        "status": "success",
+        "response_type": "zone_starting",
+        "zone": zone,
+        "amount": _money(total),
+        "currency": "INR",
+        "gst_inclusive": True,
+        "marketing_headline": False,
+        "basis": {
+            "movement_type": "Forward",
+            "weight_slab_g": int(STARTING_RATE_WEIGHT_G),
+            "courier": selected.courier_partner,
+            "service": selected.service,
+            "base_amount": _money(base_amount),
+            "gst": _money(gst),
+        },
+        "requested_courier_partner": courier_filter or None,
+        "requested_transport_mode": transport_mode or None,
+        "rate_card": rate_card_metadata(),
+        "message": (
+            f"Zone {zone} shipping rates start from Rs {_money(total):.2f}, including GST."
+        ),
+    }
+
+
+def get_flat_rates(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the three verified all-zone E-Kart Surface flat-rate slabs."""
+    return _get_flat_rates_impl(arguments or {})
+
+
+def _get_flat_rates_impl(arguments: dict[str, Any]) -> dict[str, Any]:
+    raw_scope = str(arguments.get("response_scope") or "").strip().casefold()
+    scope_map = {
+        "": "Matching" if _has_weight(arguments) else "Starting",
+        "starting": "Starting",
+        "matching": "Matching",
+        "all": "All",
+    }
+    return _get_flat_rates_with_scope(arguments, raw_scope, scope_map)
+
+
+def get_flat_zonal_rates(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return the verified E-Kart Express Flat-Zonal catalog.
+
+    Flat-Zonal is distinct from all-zone Flat pricing: one complete base rate
+    applies to Zones A-B and another applies to Zones C-F. The additional
+    500-gram component is verified separately and is never presented as a
+    complete shipment price.
+    """
+    arguments = arguments or {}
+    payment_arguments = dict(arguments)
+    payment_arguments["payment_type"] = arguments.get("payment_type") or "Prepaid"
+    try:
+        payment_type = _payment_type(payment_arguments)
+        order_value = _optional_decimal(arguments.get("order_value"), "order_value")
+    except ValueError as exc:
+        return _flat_zonal_rate_error("validation_error", str(exc))
+
+    if order_value is not None and order_value <= 0:
+        return _flat_zonal_rate_error(
+            "validation_error",
+            "COD order value must be greater than zero.",
+        )
+    if payment_type == "COD" and order_value is None:
+        return {
+            **_flat_zonal_rate_error(
+                "order_value_required",
+                "Ask only for the COD order value before quoting the Flat-Zonal rate.",
+            ),
+            "payment_type": "COD",
+            "cod_order_value_required": True,
+        }
+
+    try:
+        base_row, additional_row = _verified_flat_zonal_rate_rows()
+    except (FileNotFoundError, ValueError) as exc:
+        return _flat_zonal_rate_error("configuration_required", str(exc))
+
+    groups = (
+        ("A-B", ("A", "B")),
+        ("C-F", ("C", "D", "E", "F")),
+    )
+    zone_groups = []
+    for label, zones in groups:
+        breakdown = _amount_breakdown(
+            shipping=base_row.zone_prices[zones[0]],
+            payment_type=payment_type,
+            order_value=order_value,
+            cod_minimum=base_row.cod_minimum,
+            cod_percentage=base_row.cod_percentage,
+        )
+        zone_groups.append(
+            {
+                "zone_group": label,
+                "zones": list(zones),
+                "min_weight_g": int(base_row.min_weight_g),
+                "max_weight_g": int(base_row.max_weight_g),
+                "payment_type": payment_type,
+                **breakdown,
+            }
+        )
+
+    additional_breakdown = _amount_breakdown(
+        shipping=additional_row.zone_prices[ZONES[0]],
+        payment_type="Prepaid",
+        order_value=None,
+        cod_minimum=Decimal("0"),
+        cod_percentage=Decimal("0"),
+    )
+    return {
+        "status": "success",
+        "response_type": "flat_zonal_all",
+        "currency": "INR",
+        "gst_inclusive": True,
+        "movement_type": "Forward",
+        "payment_type": payment_type,
+        "order_value": _money(order_value) if order_value is not None else None,
+        "cod_order_value_required": False,
+        "courier_partner": FLAT_ZONAL_RATE_COURIER,
+        "service": FLAT_ZONAL_RATE_SERVICE,
+        "zone_groups": zone_groups,
+        "additional_weight": {
+            "applies_after_weight_g": int(base_row.max_weight_g),
+            "additional_weight_unit_g": int(additional_row.max_weight_g),
+            **additional_breakdown,
+        },
+        "rate_card": rate_card_metadata(),
+        "message": (
+            "Speak both verified GST-inclusive E-Kart Express Flat-Zonal base-rate groups, "
+            "then the verified additional 500-gram condition."
+        ),
+    }
+
+
+def _verified_flat_zonal_rate_rows() -> tuple[RateRow, RateRow]:
+    rows = tuple(
+        row
+        for row in load_rate_card()
+        if row.courier_partner == FLAT_ZONAL_RATE_COURIER
+        and row.service == FLAT_ZONAL_RATE_SERVICE
+        and row.movement == "FWD"
+    )
+    base_rows = [row for row in rows if not row.is_additional]
+    additional_rows = [row for row in rows if row.is_additional]
+    if len(base_rows) != 1 or len(additional_rows) != 1:
+        raise ValueError(
+            "The active rate card does not contain the expected E-Kart Express Flat-Zonal rows."
+        )
+    base_row = base_rows[0]
+    additional_row = additional_rows[0]
+    if base_row.min_weight_g != 0 or base_row.max_weight_g != Decimal("500"):
+        raise ValueError("The E-Kart Express Flat-Zonal base slab changed.")
+    ab_price = base_row.zone_prices["A"]
+    cf_price = base_row.zone_prices["C"]
+    if (
+        ab_price <= 0
+        or cf_price <= 0
+        or ab_price == cf_price
+        or any(base_row.zone_prices[zone] != ab_price for zone in ("A", "B"))
+        or any(base_row.zone_prices[zone] != cf_price for zone in ("C", "D", "E", "F"))
+    ):
+        raise ValueError("The E-Kart Express Zone A-B / Zone C-F Flat-Zonal structure changed.")
+    additional_price = additional_row.zone_prices["A"]
+    if additional_price <= 0 or any(
+        additional_row.zone_prices[zone] != additional_price for zone in ZONES[1:]
+    ):
+        raise ValueError("The E-Kart Express additional 500-gram Flat-Zonal rate changed.")
+    return base_row, additional_row
+
+
+def _flat_zonal_rate_error(status: str, message: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "response_type": "flat_zonal_unavailable",
+        "currency": "INR",
+        "gst_inclusive": True,
+        "zone_groups": [],
+        "message": message,
+    }
+
+
+def _get_flat_rates_with_scope(
+    arguments: dict[str, Any],
+    raw_scope: str,
+    scope_map: dict[str, str],
+) -> dict[str, Any]:
+    if raw_scope not in scope_map:
+        return _flat_rate_error(
+            "validation_error",
+            "response_scope must be Starting, Matching or All.",
+        )
+    response_scope = scope_map[raw_scope]
+
+    payment_arguments = dict(arguments)
+    payment_arguments["payment_type"] = arguments.get("payment_type") or "Prepaid"
+    try:
+        payment_type = _payment_type(payment_arguments)
+        order_value = _optional_decimal(arguments.get("order_value"), "order_value")
+    except ValueError as exc:
+        return _flat_rate_error("validation_error", str(exc))
+
+    if order_value is not None and order_value <= 0:
+        return _flat_rate_error(
+            "validation_error",
+            "COD order value must be greater than zero.",
+        )
+    if payment_type == "COD" and order_value is None:
+        return {
+            **_flat_rate_error(
+                "order_value_required",
+                "Ask only for the COD order value before quoting the verified flat rate.",
+            ),
+            "payment_type": "COD",
+            "cod_order_value_required": True,
+            "response_scope": response_scope,
+        }
+
+    try:
+        rows = _verified_flat_rate_rows()
+    except (FileNotFoundError, ValueError) as exc:
+        return _flat_rate_error("configuration_required", str(exc))
+
+    all_options = [
+        _flat_catalog_option(
+            row,
+            payment_type=payment_type,
+            order_value=order_value,
+        )
+        for row in rows
+    ]
+    starting_option = all_options[0]
+    chargeable_weight_g: Decimal | None = None
+    matching_option: dict[str, Any] | None = None
+    if response_scope == "Matching":
+        if not _has_weight(arguments):
+            return _flat_rate_error(
+                "validation_error",
+                "A positive shipment weight is required for a matching flat-rate slab.",
+            )
+        try:
+            dead_weight_kg = _dead_weight_kg(arguments)
+            length, width, height = _dimensions(arguments)
+        except ValueError as exc:
+            return _flat_rate_error("validation_error", str(exc))
+        volumetric_weight_kg = (
+            length * width * height / VOLUMETRIC_DIVISOR
+            if length is not None and width is not None and height is not None
+            else None
+        )
+        chargeable_weight_kg = max(
+            dead_weight_kg,
+            volumetric_weight_kg if volumetric_weight_kg is not None else Decimal("0"),
+        )
+        chargeable_weight_g = (
+            chargeable_weight_kg * Decimal("1000")
+        ).to_integral_value(rounding=ROUND_CEILING)
+        matching_option = next(
+            (
+                option
+                for option in all_options
+                if Decimal(str(option["min_weight_g"]))
+                <= chargeable_weight_g
+                <= Decimal(str(option["max_weight_g"]))
+            ),
+            None,
+        )
+
+    if response_scope == "All":
+        returned_options = all_options
+        response_type = "flat_all"
+        message = "Speak the three verified GST-inclusive E-Kart Surface flat-rate slabs."
+    elif response_scope == "Matching" and matching_option is not None:
+        returned_options = [matching_option]
+        response_type = "flat_matching"
+        message = "Speak only the verified GST-inclusive flat rate for this chargeable weight."
+    elif response_scope == "Matching":
+        returned_options = [starting_option]
+        response_type = "flat_starting_fallback"
+        message = (
+            "No exact flat slab matches this chargeable weight. Speak only the verified flat-rate "
+            "starting headline and do not imply that it applies to this shipment."
+        )
+    else:
+        returned_options = [starting_option]
+        response_type = "flat_starting"
+        message = "Speak only the verified GST-inclusive flat-rate starting headline."
+
+    return {
+        "status": "success",
+        "response_type": response_type,
+        "response_scope": response_scope,
+        "currency": "INR",
+        "gst_inclusive": True,
+        "movement_type": "Forward",
+        "payment_type": payment_type,
+        "order_value": _money(order_value) if order_value is not None else None,
+        "cod_order_value_required": False,
+        "courier_partner": FLAT_RATE_COURIER,
+        "service": FLAT_RATE_SERVICE,
+        "chargeable_weight_g": (
+            int(chargeable_weight_g) if chargeable_weight_g is not None else None
+        ),
+        "exact_match_available": matching_option is not None,
+        "starting_flat_rate": starting_option,
+        "flat_rate_options": returned_options,
+        "verified_flat_rate_count": len(all_options),
+        "excluded_additional_weight_components": True,
+        "rate_card": rate_card_metadata(),
+        "message": message,
+    }
+
+
+def _verified_flat_rate_rows() -> tuple[RateRow, ...]:
+    rows = tuple(
+        sorted(
+            (
+                row
+                for row in load_rate_card()
+                if row.courier_partner == FLAT_RATE_COURIER
+                and row.service == FLAT_RATE_SERVICE
+                and row.movement == "FWD"
+                and not row.is_additional
+            ),
+            key=lambda row: (row.min_weight_g, row.max_weight_g),
+        )
+    )
+    actual_slabs = tuple((row.min_weight_g, row.max_weight_g) for row in rows)
+    if actual_slabs != EXPECTED_FLAT_RATE_SLABS:
+        raise ValueError(
+            "The active rate card does not contain exactly the three expected E-Kart Surface "
+            "flat-rate slabs. Do not quote a flat amount."
+        )
+    for row in rows:
+        prices = tuple(row.zone_prices[zone] for zone in ZONES)
+        if prices[0] <= 0 or any(price != prices[0] for price in prices[1:]):
+            raise ValueError(
+                "An E-Kart Surface slab is not a positive complete Zone A-F flat rate. "
+                "Do not quote a flat amount."
+            )
+        if row.cod_minimum != 0 or row.cod_percentage != 0:
+            raise ValueError(
+                "The E-Kart Surface flat-rate COD configuration changed. Do not quote a flat "
+                "amount until the new rule is reviewed."
+            )
+    return rows
+
+
+def _flat_catalog_option(
+    row: RateRow,
+    *,
+    payment_type: str,
+    order_value: Decimal | None,
+) -> dict[str, Any]:
+    breakdown = _amount_breakdown(
+        shipping=row.zone_prices[ZONES[0]],
+        payment_type=payment_type,
+        order_value=order_value,
+        cod_minimum=row.cod_minimum,
+        cod_percentage=row.cod_percentage,
+    )
+    return {
+        "courier_partner": row.courier_partner,
+        "service": row.service,
+        "min_weight_g": int(row.min_weight_g),
+        "max_weight_g": int(row.max_weight_g),
+        "payment_type": payment_type,
+        "shipping_charge": breakdown["shipping_charge"],
+        "cod_charge": breakdown["cod_charge"],
+        "gst": breakdown["gst"],
+        "total": breakdown["total"],
+    }
+
+
+def _flat_rate_error(status: str, message: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "response_type": "flat_unavailable",
+        "currency": "INR",
+        "gst_inclusive": True,
+        "flat_rate_options": [],
+        "message": message,
+    }
+
+
+def _has_weight(arguments: dict[str, Any]) -> bool:
+    return any(
+        arguments.get(key) not in (None, "")
+        for key in ("dead_weight", "dead_weight_kg", "dead_weight_g")
+    )
 
 
 @lru_cache(maxsize=1)

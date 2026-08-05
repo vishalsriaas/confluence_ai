@@ -32,6 +32,10 @@ def receive_whatsapp() -> dict:
 def receive_livekit() -> dict:
     require_access("webhook")
     payload = get_request_json()
+    if payload.get("console_session") in (1, "1", True, "true", "True"):
+        # Console checkpoints are already consolidated into one room-scoped
+        # AI Call Log, so do not duplicate every transition as a webhook row.
+        return livekit.handle_callback(payload)
     event = _record_inbound("livekit", payload)
     result = livekit.handle_callback(payload)
     frappe.db.set_value("AI Webhook Event", event, {"status": "Processed", "response_json": as_json(result)})

@@ -8,6 +8,9 @@ from frappe.tests.utils import FrappeTestCase
 
 from confluence_ai.prompts.shipkia_voice import (
     SHIPKIA_VOICE_PROMPT_VERSION,
+    SHIPKIA_VOICE_V3_PROMPT,
+    SHIPKIA_VOICE_V4_PROMPT,
+    SHIPKIA_VOICE_V5_PROMPT,
     get_shipkia_voice_prompt,
     list_shipkia_voice_prompt_versions,
 )
@@ -20,11 +23,19 @@ from confluence_ai.shipkia_setup import (
 )
 from confluence_ai.services.livekit import (
     _removable_automatic_dispatch_ids,
+    _is_participant_disconnect,
     _shipkia_dispatch_conflict,
+    _rate_flow_completed,
+    _rate_flow_started,
+    _successful_pricing_outcome,
+    build_voice_metadata,
 )
 from confluence_ai.services.shipkia_voice import (
     calculate_shipkia_rate,
     create_or_update_shipkia_lead,
+    get_shipkia_flat_rates,
+    get_shipkia_flat_zonal_rates,
+    get_shipkia_starting_rate,
     lookup_pincode_serviceability,
     lookup_shipkia_crm_lead,
     normalize_phone,
@@ -32,17 +43,23 @@ from confluence_ai.services.shipkia_voice import (
 
 
 class TestShipKiaVoice(FrappeTestCase):
-    def test_voice_v3_prompt_has_provider_rate_and_safe_benefit_flow(self):
-        prompt = get_shipkia_voice_prompt(SHIPKIA_VOICE_PROMPT_VERSION)
+    def test_voice_v3_prompt_has_gated_context_and_safe_benefit_flow(self):
+        prompt = get_shipkia_voice_prompt("shipkia-voice-v3")
 
-        self.assertEqual(SHIPKIA_VOICE_PROMPT_VERSION, "shipkia-voice-v3")
+        self.assertEqual(prompt, SHIPKIA_VOICE_V3_PROMPT)
+        self.assertEqual(SHIPKIA_VOICE_PROMPT_VERSION, "shipkia-voice-v5")
         self.assertEqual(
             list_shipkia_voice_prompt_versions(),
-            ["shipkia-voice-v2", "shipkia-voice-v3"],
+            ["shipkia-voice-v3", "shipkia-voice-v4", "shipkia-voice-v5"],
         )
         self.assertIn("Direct Courier", prompt)
         self.assertIn("Shipping Aggregator", prompt)
         self.assertIn("current rate for a comparable shipment", prompt)
+        self.assertIn("kuch nahi", prompt)
+        self.assertIn(
+            "does not reopen current arrangement",
+            prompt.lower(),
+        )
         self.assertIn("whether GST and COD charges are included", prompt)
         self.assertIn("If it is equal or higher, say so honestly", prompt)
         self.assertIn("Give no more than two benefits", prompt)
@@ -54,37 +71,377 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("explicitly confirm both weight and", prompt)
         self.assertIn("A request for information is not consent to a callback", prompt)
         self.assertEqual(prompt.count("Namaste! Main ShipKia ka assistant hoon"), 1)
-        self.assertIn("answered-fields checklist", prompt)
-        self.assertIn("detail supplied inside a", prompt)
-        self.assertIn("multi-detail answer", prompt)
+        self.assertIn("worker-controlled gated state", prompt)
+        self.assertIn("multi-detail reply", prompt)
         self.assertIn("brand or business name", prompt)
         self.assertIn("handled question again", prompt)
         self.assertIn("shipping challenge the next qualification priority", prompt)
         self.assertIn("Aapko shipping operations mein abhi sabse badi challenge", prompt)
         self.assertIn("relevant solution using only approved ShipKia capabilities", prompt)
         self.assertIn("6-digit pickup pincode", prompt)
-        self.assertIn("Both pickup_pincode and delivery_pincode are mandatory", prompt)
-        self.assertIn("even when the requested service appears", prompt)
+        self.assertIn("Ask each pincode once", prompt)
+        self.assertIn("general Rs 22 starting response", prompt)
+        self.assertIn("Weight remains mandatory for exact calculation only", prompt)
+        self.assertIn("get_shipkia_starting_rate", prompt)
+        self.assertIn("exact pending question", prompt)
         self.assertIn("https://auth.shipkia.com/signup", prompt)
         self.assertIn("Do not push, repeatedly offer, or assume a scheduled sales call", prompt)
         self.assertIn("hard price floor", prompt)
         self.assertIn("switch from a quoted GST-inclusive total", prompt)
         self.assertIn("use calculate_shipkia_rate.flat_rate_options", prompt)
-        self.assertIn("calculate_shipkia_rate.flat_additional_rate_options", prompt)
-        self.assertIn("shipment charge remains zone-dependent", prompt)
+        self.assertIn("flat additional-weight component", prompt)
+        self.assertIn("speak only the single returned", prompt)
         self.assertIn("Never call a lowest, average, starting", prompt)
         self.assertIn("production task provides a customer phone", prompt)
         self.assertNotIn("guaranteed RTO reduction", prompt)
+
+    def test_voice_v4_is_standalone_compact_and_has_verified_pricing_flow(self):
+        prompt = get_shipkia_voice_prompt("shipkia-voice-v4")
+
+        self.assertEqual(prompt, SHIPKIA_VOICE_V4_PROMPT)
+        self.assertFalse(prompt.startswith(SHIPKIA_VOICE_V3_PROMPT))
+        self.assertLess(len(prompt), 10000)
+        self.assertIn("get_shipkia_flat_rates", prompt)
+        self.assertNotIn("Rs 22", prompt)
+        self.assertNotIn("₹22", prompt)
+        self.assertIn("Namaste, main ShipKia ki taraf se baat kar", prompt)
+        self.assertIn(
+            "Kya abhi hum do minute baat kar sakte hain?",
+            " ".join(prompt.split()),
+        )
+        self.assertIn("Stop and wait for consent", prompt)
+        self.assertIn("Normal requires, in order", prompt)
+        self.assertIn("response_scope=Matching", prompt)
+        self.assertIn("response_scope=All", prompt)
+        self.assertIn(
+            "Never ask for pickup or delivery pincode",
+            " ".join(prompt.split()),
+        )
+        self.assertIn("Both/dono is a complete payment answer", prompt)
+        self.assertIn("Never ask for permission", prompt)
+        self.assertIn(
+            "Reuse every unchanged confirmed detail",
+            " ".join(prompt.split()),
+        )
+        self.assertIn(
+            'Only an explicit "flat rate" selects Flat',
+            " ".join(prompt.split()),
+        )
+        self.assertIn("Kya aap aur kuch jaanna chahenge?", prompt)
+
+    def test_voice_v5_has_harsh_discovery_solution_and_zone_flow(self):
+        prompt = get_shipkia_voice_prompt("shipkia-voice-v5")
+
+        self.assertEqual(prompt, SHIPKIA_VOICE_V5_PROMPT)
+        self.assertIn("You are Harsh", prompt)
+        self.assertIn("Kya abhi hum do minute baat kar sakte hain?", " ".join(prompt.split()))
+        self.assertIn("shipping rates check karna chahenge ya onboarding", prompt)
+        self.assertIn("Company name and company type form one optional pair", prompt)
+        self.assertIn("current comparable shipping rate", prompt)
+        self.assertIn("main problem with that provider", prompt)
+        self.assertIn("PROBLEM-TO-SOLUTION RESPONSE", prompt)
+        self.assertIn("SHIPKIA USP RESPONSE", prompt)
+        self.assertIn("Dedicated account manager", prompt)
+        self.assertIn("WhatsApp confirmation", prompt)
+        self.assertIn("call confirmation", prompt)
+        self.assertIn("Delivery NDR assistance", prompt)
+        self.assertIn("WhatsApp and IVR calling", prompt)
+        self.assertIn("benefits/about-ShipKia question", prompt)
+        self.assertIn("six-digit pickup pincode or pickup city/location", prompt)
+        self.assertIn("delivery pincode or drop city/location", prompt)
+        self.assertIn("Pan-India starting rate", prompt)
+        self.assertIn(
+            "Never ask the customer to identify ShipKia's internal zone",
+            " ".join(prompt.split()),
+        )
+        self.assertIn("monthly shipment quantity/volume", prompt)
+        self.assertIn("Rate Card 10 June CSV", prompt)
+        self.assertIn("lookup_pincode_serviceability exactly once", prompt)
+        self.assertIn("prompt itself contains no fallback number", prompt)
+        self.assertIn("The customer's original rate enquiry remains active", prompt)
+        self.assertIn('Never ask "Kya aap aur', prompt)
+        self.assertIn('close ASR variants such as "Par India"', prompt)
+        self.assertIn("Before the successful requested rate", prompt)
+        self.assertIn("mandatory normal-discovery boundary", prompt)
+        self.assertIn("A shipment quantity is never an answer", prompt)
+        self.assertIn("provider-problem question is pending", prompt)
+        self.assertIn("exactly three customer-facing pricing structures", prompt)
+        self.assertIn("get_shipkia_flat_zonal_rates", prompt)
+        self.assertIn("Kya aap ShipKia ke saath aage badhna chahte hain?", prompt)
+        self.assertIn("clear yes to that move-forward question", prompt)
+        self.assertIn("onboarding link is being sent", prompt)
+        self.assertIn("better plan will be discussed with the team", prompt)
+        self.assertIn("not as a reset", prompt)
+        self.assertIn("E-Kart Surface ke Flat rates chahiye", prompt)
+        self.assertIn('or "thank you" by\n  itself is not', prompt)
+
+    def test_shipkia_production_metadata_defaults_to_current_v5_prompt(self):
+        class FakeTask:
+            assigned_agent = "agent-445"
+            target_agent = ""
+            name = "task-test-v5"
+            context_json = "{}"
+
+        class FakeAgent:
+            personality = ""
+
+            @staticmethod
+            def get_system_prompt(include_tool_catalog=False):
+                return "legacy prompt"
+
+            @staticmethod
+            def get(field):
+                values = {
+                    "audio_name": "Puck",
+                    "agent_type": "Single Agent",
+                }
+                return values.get(field)
+
+        with patch(
+            "confluence_ai.services.livekit.frappe.get_doc",
+            side_effect=[FakeTask(), FakeAgent()],
+        ):
+            metadata = build_voice_metadata("task-test-v5", {})
+
+        self.assertEqual(metadata["prompt_version"], "shipkia-voice-v5")
+        self.assertEqual(metadata["system_prompt"], SHIPKIA_VOICE_V5_PROMPT)
+
+    def test_console_rate_completion_requires_successful_pricing_tool(self):
+        audit = {
+            "state_snapshot": {
+                "requested_rate_type": "Normal",
+                "fields": {"assistance_intent": {"value": "Rates"}},
+            },
+            "tool_outcomes": [
+                {"tool_name": "calculate_shipkia_rate", "status": "blocked"}
+            ],
+        }
+        self.assertTrue(_rate_flow_started(audit))
+        self.assertFalse(_successful_pricing_outcome(audit))
+        audit["tool_outcomes"].append(
+            {"tool_name": "calculate_shipkia_rate", "status": "success"}
+        )
+        self.assertTrue(_successful_pricing_outcome(audit))
+        route_audit = {
+            "tool_outcomes": [
+                {"tool_name": "lookup_pincode_serviceability", "status": "success"}
+            ]
+        }
+        self.assertTrue(_successful_pricing_outcome(route_audit))
+        self.assertTrue(
+            _is_participant_disconnect(
+                {
+                    "failure_code": "participant_disconnect",
+                    "reason": "participant_disconnect_timeout",
+                }
+            )
+        )
+
+    def test_v5_rate_flow_is_complete_only_after_an_approved_close(self):
+        unfinished = {
+            "prompt_version": "shipkia-voice-v5",
+            "state_snapshot": {
+                "move_forward_question_due": True,
+                "onboarding_link_presented": False,
+                "better_plan_close_presented": False,
+            },
+        }
+        onboarding_complete = {
+            **unfinished,
+            "state_snapshot": {
+                **unfinished["state_snapshot"],
+                "move_forward_question_due": False,
+                "onboarding_link_presented": True,
+            },
+        }
+        better_plan_complete = {
+            **unfinished,
+            "state_snapshot": {
+                **unfinished["state_snapshot"],
+                "move_forward_question_due": False,
+                "better_plan_close_presented": True,
+            },
+        }
+
+        self.assertFalse(_rate_flow_completed(unfinished))
+        self.assertTrue(_rate_flow_completed(onboarding_complete))
+        self.assertTrue(_rate_flow_completed(better_plan_complete))
+        self.assertTrue(_rate_flow_completed({"prompt_version": "shipkia-voice-v4"}))
 
     def test_voice_v3_prompt_distinguishes_complete_and_additional_flat_rates(self):
         prompt = get_shipkia_voice_prompt("shipkia-voice-v3")
 
         self.assertIn("use calculate_shipkia_rate.flat_rate_options", prompt)
-        self.assertIn("calculate_shipkia_rate.flat_additional_rate_options", prompt)
-        self.assertIn("shipment charge remains zone-dependent", prompt)
-        self.assertIn("never describe a flat additional-weight component", prompt)
-        self.assertIn("If Shadowfax Surface 5 KG is returned", prompt)
-        self.assertIn("do not rename SURFACE as", prompt)
+        self.assertIn("flat additional-weight component", prompt)
+        self.assertIn("state only that service's returned current-shipment", prompt)
+        self.assertIn("stop without asking a follow-up question", prompt)
+        self.assertIn("Shadowfax Surface 5 KG", prompt)
+        self.assertIn("E-Kart SURFACE", prompt)
+
+    def test_starting_rate_lookup_returns_general_and_zone_floors(self):
+        general = get_shipkia_starting_rate({})
+        invalid = get_shipkia_starting_rate({"zone": "invented"})
+
+        self.assertEqual(general["status"], "success")
+        self.assertEqual(general["response_type"], "general_starting")
+        self.assertEqual(general["amount"], 22.0)
+        self.assertFalse(general["gst_inclusive"])
+
+        expected_zone_amounts = {
+            "A": 22.07,
+            "B": 25.96,
+            "C": 31.15,
+            "D": 35.05,
+            "E": 53.22,
+            "F": 54.52,
+        }
+        for zone, expected_amount in expected_zone_amounts.items():
+            with self.subTest(zone=zone):
+                result = get_shipkia_starting_rate({"zone": zone})
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(result["response_type"], "zone_starting")
+                self.assertEqual(result["zone"], zone)
+                self.assertEqual(result["amount"], expected_amount)
+                self.assertTrue(result["gst_inclusive"])
+
+        self.assertEqual(invalid["response_type"], "general_starting")
+        self.assertEqual(invalid["amount"], 22.0)
+
+    def test_shadowfax_surface_starting_rate_uses_requested_verified_zone(self):
+        result = get_shipkia_starting_rate(
+            {
+                "zone": "C",
+                "courier_partner": "Shadowfax",
+                "transport_mode": "Surface",
+            }
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["zone"], "C")
+        self.assertEqual(result["amount"], 76.58)
+        self.assertEqual(result["basis"]["courier"], "Shadowfax")
+        self.assertEqual(result["basis"]["service"], "Shadowfax Surface 500 G")
+
+    def test_flat_rate_catalog_returns_only_three_verified_ekart_slabs(self):
+        result = get_shipkia_flat_rates({"response_scope": "All"})
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["response_type"], "flat_all")
+        self.assertEqual(result["verified_flat_rate_count"], 3)
+        self.assertTrue(result["excluded_additional_weight_components"])
+        self.assertEqual(
+            [
+                (
+                    option["service"],
+                    option["min_weight_g"],
+                    option["max_weight_g"],
+                    option["shipping_charge"],
+                    option["gst"],
+                    option["total"],
+                )
+                for option in result["flat_rate_options"]
+            ],
+            [
+                ("E-Kart SURFACE", 0, 500, 64.9, 11.68, 76.58),
+                ("E-Kart SURFACE", 501, 1000, 74.8, 13.46, 88.26),
+                ("E-Kart SURFACE", 1001, 2000, 88.0, 15.84, 103.84),
+            ],
+        )
+        self.assertNotIn("E-Kart EXPRESS", str(result["flat_rate_options"]))
+        self.assertNotIn("Shadowfax", str(result["flat_rate_options"]))
+
+    def test_flat_zonal_catalog_returns_verified_ekart_express_zone_groups(self):
+        result = get_shipkia_flat_zonal_rates({})
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["response_type"], "flat_zonal_all")
+        self.assertEqual(result["service"], "E-Kart EXPRESS")
+        self.assertEqual(
+            [
+                (group["zone_group"], group["zones"], group["max_weight_g"], group["total"])
+                for group in result["zone_groups"]
+            ],
+            [
+                ("A-B", ["A", "B"], 500, 84.37),
+                ("C-F", ["C", "D", "E", "F"], 500, 109.03),
+            ],
+        )
+        self.assertEqual(result["additional_weight"]["additional_weight_unit_g"], 500)
+        self.assertEqual(result["additional_weight"]["total"], 38.94)
+
+    def test_flat_rate_catalog_matches_boundaries_and_volumetric_weight(self):
+        expected = {
+            0.5: 76.58,
+            0.501: 88.26,
+            1.0: 88.26,
+            1.001: 103.84,
+            2.0: 103.84,
+        }
+        for weight, total in expected.items():
+            with self.subTest(weight=weight):
+                result = get_shipkia_flat_rates(
+                    {
+                        "response_scope": "Matching",
+                        "dead_weight": weight,
+                    }
+                )
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(result["response_type"], "flat_matching")
+                self.assertTrue(result["exact_match_available"])
+                self.assertEqual(result["flat_rate_options"][0]["total"], total)
+
+        volumetric = get_shipkia_flat_rates(
+            {
+                "response_scope": "Matching",
+                "dead_weight": 0.5,
+                "length": 50,
+                "width": 40,
+                "height": 3,
+            }
+        )
+        self.assertEqual(volumetric["chargeable_weight_g"], 1200)
+        self.assertEqual(volumetric["flat_rate_options"][0]["total"], 103.84)
+
+    def test_flat_rate_catalog_above_two_kg_returns_starting_fallback_only(self):
+        result = get_shipkia_flat_rates(
+            {
+                "response_scope": "Matching",
+                "dead_weight": 2.001,
+            }
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["response_type"], "flat_starting_fallback")
+        self.assertFalse(result["exact_match_available"])
+        self.assertEqual(result["chargeable_weight_g"], 2001)
+        self.assertEqual(len(result["flat_rate_options"]), 1)
+        self.assertEqual(result["flat_rate_options"][0]["total"], 76.58)
+        self.assertIn("do not imply", result["message"].lower())
+
+    def test_flat_rate_catalog_requires_cod_value_then_returns_zero_cod_charge(self):
+        missing = get_shipkia_flat_rates(
+            {
+                "response_scope": "Starting",
+                "payment_type": "COD",
+            }
+        )
+        self.assertEqual(missing["status"], "order_value_required")
+        self.assertTrue(missing["cod_order_value_required"])
+        self.assertEqual(missing["flat_rate_options"], [])
+
+        result = get_shipkia_flat_rates(
+            {
+                "response_scope": "Matching",
+                "dead_weight": 0.5,
+                "payment_type": "COD",
+                "order_value": 5000,
+            }
+        )
+        option = result["flat_rate_options"][0]
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["payment_type"], "COD")
+        self.assertEqual(option["cod_charge"], 0.0)
+        self.assertEqual(option["total"], 76.58)
 
     def test_managed_prompt_sections_are_idempotent_and_capability_gated(self):
         original = "ShipKia voice prompt."
@@ -105,13 +462,14 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("reply in natural conversational Hinglish", once)
         self.assertIn("Do not translate, repeat, or paraphrase", once)
         self.assertEqual(once.count("Namaste! Main ShipKia ka assistant hoon"), 1)
-        self.assertIn("answered-fields checklist", once)
+        self.assertIn("worker-controlled gated state", once)
         self.assertIn("flat_rate_options", once)
-        self.assertIn("brand/business name", once)
-        self.assertIn("main shipping challenge the next qualification priority", once)
-        self.assertIn("Aapko shipping operations mein abhi sabse", once)
+        self.assertIn("optional qualification in order", once)
+        self.assertIn("and main problem", once)
+        self.assertIn("same pending question", once)
         self.assertIn("6-digit pickup pincode", once)
-        self.assertIn("Never call the rate tool or quote a rate before both pincodes", once)
+        self.assertIn("Weight is mandatory and must never be assumed", once)
+        self.assertIn("exact rate depends on", once)
         self.assertIn("https://auth.shipkia.com/signup", once)
         self.assertIn("Do not push, repeatedly offer, or assume a scheduled sales call", once)
         self.assertIn("hard price", once)
@@ -170,11 +528,11 @@ class TestShipKiaVoice(FrappeTestCase):
         prompt = _with_managed_shipkia_prompt("ShipKia voice prompt.")
 
         self.assertIn("customer-request-first approach", prompt)
-        self.assertIn("Do not require a", prompt)
-        self.assertIn("current rate before giving the requested ShipKia rate", prompt)
+        self.assertIn("worker-gated optional", prompt)
+        self.assertIn("explicit unknown/refusal", prompt)
         self.assertIn('ShipKia rates ₹{amount} se start hote hain', prompt)
         self.assertIn("does not share or does not have a current rate", prompt)
-        self.assertIn("monthly shipment volume", prompt)
+        self.assertIn("End the remaining optional qualification", prompt)
         self.assertIn("avoidable RTO reduce karne mein", prompt)
         self.assertIn("Never add an arbitrary margin", prompt)
         self.assertIn("Never quote a remembered or universal starting rate", prompt)
@@ -260,14 +618,36 @@ class TestShipKiaVoice(FrappeTestCase):
             },
             agent="agent-445",
         )
-        self.assertEqual(serviceability["status"], "configuration_required")
-        self.assertIsNone(serviceability["serviceable"])
+        self.assertEqual(serviceability["status"], "success")
+        self.assertTrue(serviceability["serviceable"])
+        self.assertEqual(serviceability["zone"], "C")
+        self.assertTrue(serviceability["zone_verified"])
+        self.assertEqual(serviceability["starting_rate"]["amount"], 31.15)
         self.assertEqual(rate["status"], "success")
         self.assertEqual(rate["rate_card"]["version"], "Rate Card 10 - June")
         self.assertEqual(rate["eligible_rates"][0]["service"], "Shree Maruti Surface")
         self.assertEqual(rate["eligible_rates"][0]["shipping_charge"], 18.7)
         self.assertEqual(rate["eligible_rates"][0]["gst"], 3.37)
         self.assertEqual(rate["eligible_rates"][0]["total"], 22.07)
+
+    def test_v5_route_resolver_supports_ncr_locations_and_pan_india(self):
+        ncr = lookup_pincode_serviceability(
+            {"pickup_location": "Delhi", "delivery_location": "Noida"},
+            agent="agent-445",
+        )
+        pan_india = lookup_pincode_serviceability(
+            {"pan_india": True},
+            agent="agent-445",
+        )
+
+        self.assertEqual(ncr["zone"], "A")
+        self.assertEqual(ncr["starting_rate"]["amount"], 22.07)
+        self.assertEqual(pan_india["zone"], "A")
+        self.assertEqual(
+            pan_india["resolution_basis"],
+            "pan_india_zone_a_starting_policy",
+        )
+        self.assertEqual(pan_india["starting_rate"]["amount"], 22.07)
 
     def test_rate_card_returns_zone_matrix_when_zone_is_unknown(self):
         rate = calculate_shipkia_rate(
@@ -366,6 +746,52 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertEqual(
             rate["flat_additional_rate_options"][1]["additional_weight_unit_g"],
             500,
+        )
+
+    def test_call_1411_returns_distinct_cod_rate_and_verified_flat_option(self):
+        prepaid = calculate_shipkia_rate(
+            {
+                "pickup_pincode": "201305",
+                "delivery_pincode": "110001",
+                "dead_weight": 0.5,
+                "payment_type": "Prepaid",
+                "courier": "Delhivery Surface",
+            },
+            agent="agent-445",
+        )
+        cod = calculate_shipkia_rate(
+            {
+                "pickup_pincode": "201305",
+                "delivery_pincode": "110001",
+                "dead_weight": 0.5,
+                "payment_type": "COD",
+                "order_value": 5000,
+                "courier": "Delhivery Surface",
+            },
+            agent="agent-445",
+        )
+        flat = calculate_shipkia_rate(
+            {
+                "pickup_pincode": "201305",
+                "delivery_pincode": "110001",
+                "dead_weight": 0.5,
+                "payment_type": "COD",
+                "order_value": 5000,
+            },
+            agent="agent-445",
+        )
+
+        prepaid_a = prepaid["eligible_rates"][0]["zone_breakdowns"]["A"]
+        cod_a = cod["eligible_rates"][0]["zone_breakdowns"]["A"]
+        self.assertEqual(prepaid_a["total"], 32.45)
+        self.assertEqual(cod_a["cod_charge"], 90.0)
+        self.assertEqual(cod_a["total"], 138.65)
+        self.assertNotEqual(prepaid_a["total"], cod_a["total"])
+        self.assertTrue(flat["flat_rate_available"])
+        self.assertEqual(flat["flat_rate_options"][0]["service"], "E-Kart SURFACE")
+        self.assertEqual(
+            flat["flat_rate_options"][0]["flat_rate_breakdown"]["total"],
+            76.58,
         )
 
     def test_shadowfax_flat_additional_rate_does_not_mark_base_as_flat(self):

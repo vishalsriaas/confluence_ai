@@ -284,16 +284,25 @@ def finalize_shipkia_call_outcome(
 def lookup_pincode_serviceability(
     arguments: dict, *, task_id: str | None = None, agent: str | None = None
 ) -> dict:
-    result = {
-        "status": "configuration_required",
-        "serviceable": None,
-        "pickup_pincode": str(arguments.get("pickup_pincode") or ""),
-        "delivery_pincode": str(arguments.get("delivery_pincode") or ""),
-        "message": (
-            "ShipKia pincode serviceability is not configured. Do not infer a zone or promise serviceability; "
-            "save the shipment requirement and arrange a ShipKia team follow-up."
-        ),
-    }
+    from confluence_ai.services.shipkia_rates import get_starting_rate
+    from confluence_ai.services.shipkia_zones import resolve_shipkia_zone
+
+    result = resolve_shipkia_zone(arguments)
+    if result.get("status") == "success" and result.get("zone_verified"):
+        starting_rate = get_starting_rate({"zone": result.get("zone")})
+        result["starting_rate"] = starting_rate
+        if starting_rate.get("status") != "success":
+            result.update(
+                {
+                    "status": "configuration_required",
+                    "zone": None,
+                    "zone_verified": False,
+                    "fallback_starting_rate": get_starting_rate({}),
+                    "message": "The route resolved, but its verified starting rate is unavailable.",
+                }
+            )
+    elif result.get("status") != "route_details_required":
+        result["fallback_starting_rate"] = get_starting_rate({})
     _record("lookup_pincode_serviceability", arguments, result, task_id=task_id, agent=agent)
     return result
 
@@ -315,6 +324,61 @@ def calculate_shipkia_rate(
     return result
 
 
+def get_shipkia_starting_rate(
+    arguments: dict, *, task_id: str | None = None, agent: str | None = None
+) -> dict:
+    from confluence_ai.services.shipkia_rates import get_starting_rate
+
+    try:
+        result = get_starting_rate(arguments)
+    except (FileNotFoundError, ValueError) as exc:
+        result = {
+            "status": "configuration_required",
+            "response_type": "general_starting",
+            "zone": None,
+            "amount": None,
+            "message": str(exc),
+        }
+    _record("get_shipkia_starting_rate", arguments, result, task_id=task_id, agent=agent)
+    return result
+
+
+def get_shipkia_flat_rates(
+    arguments: dict, *, task_id: str | None = None, agent: str | None = None
+) -> dict:
+    from confluence_ai.services.shipkia_rates import get_flat_rates
+
+    try:
+        result = get_flat_rates(arguments)
+    except (FileNotFoundError, ValueError) as exc:
+        result = {
+            "status": "configuration_required",
+            "response_type": "flat_unavailable",
+            "flat_rate_options": [],
+            "message": f"{exc} Do not estimate or fabricate a flat rate.",
+        }
+    _record("get_shipkia_flat_rates", arguments, result, task_id=task_id, agent=agent)
+    return result
+
+
+def get_shipkia_flat_zonal_rates(
+    arguments: dict, *, task_id: str | None = None, agent: str | None = None
+) -> dict:
+    from confluence_ai.services.shipkia_rates import get_flat_zonal_rates
+
+    try:
+        result = get_flat_zonal_rates(arguments)
+    except (FileNotFoundError, ValueError) as exc:
+        result = {
+            "status": "configuration_required",
+            "response_type": "flat_zonal_unavailable",
+            "zone_groups": [],
+            "message": f"{exc} Do not estimate or fabricate a Flat-Zonal rate.",
+        }
+    _record("get_shipkia_flat_zonal_rates", arguments, result, task_id=task_id, agent=agent)
+    return result
+
+
 def execute_shipkia_tool(
     tool_name: str,
     arguments: dict,
@@ -329,6 +393,9 @@ def execute_shipkia_tool(
         "create_shipkia_followup": create_shipkia_followup,
         "finalize_shipkia_call_outcome": finalize_shipkia_call_outcome,
         "lookup_pincode_serviceability": lookup_pincode_serviceability,
+        "get_shipkia_starting_rate": get_shipkia_starting_rate,
+        "get_shipkia_flat_rates": get_shipkia_flat_rates,
+        "get_shipkia_flat_zonal_rates": get_shipkia_flat_zonal_rates,
         "calculate_shipkia_rate": calculate_shipkia_rate,
     }
     handler = handlers.get(tool_name)

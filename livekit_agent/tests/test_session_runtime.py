@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 from livekit_agent.session_runtime import VoiceSessionRuntime, redact_sensitive_text
 
@@ -37,6 +38,13 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
             "CUSTOMER: My OTP is [REDACTED]\nAGENT: Please keep it private.",
         )
         self.assertEqual(self.runtime.metrics()["turn_count"], 2)
+
+    async def test_deduplicates_native_realtime_events_with_different_ids(self) -> None:
+        self.assertTrue(self.runtime.add_user_turn("Work Shop", turn_id="transcript-event"))
+        self.assertFalse(self.runtime.add_user_turn("Work Shop", turn_id="conversation-item"))
+
+        self.assertEqual(self.runtime.transcript(), "CUSTOMER: Work Shop")
+        self.assertEqual(self.runtime.metrics()["turn_count"], 1)
 
     async def test_recovers_once_after_response_timeout(self) -> None:
         async def recover(_customer_text: str, _reason: str) -> None:
@@ -123,6 +131,16 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(expired)
         self.assertEqual(self.runtime.metrics()["failure_code"], "participant_disconnect")
+
+    async def test_intentional_user_disconnect_finishes_as_completed(self) -> None:
+        self.runtime.failure_code = "participant_disconnect"
+
+        await self.runtime.finish("user_initiated")
+
+        ended = [payload for event, payload in self.events if event == "call_ended"]
+        self.assertTrue(ended)
+        self.assertEqual(ended[-1]["status"], "completed")
+        self.assertEqual(ended[-1]["failure_code"], "participant_disconnect")
 
     async def test_agent_transcript_does_not_complete_response_before_playout(self) -> None:
         recovery_reasons: list[str] = []
@@ -237,6 +255,43 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory.count("North Star"), 1)
         self.assertIn("600 shipments monthly", memory)
         self.assertIn("high rates are our main challenge", memory)
+
+    async def test_tool_outcome_is_sanitized_and_emitted_once(self) -> None:
+        self.runtime.record_tool_outcome(
+            "calculate_shipkia_rate",
+            status="blocked",
+            summary="password: hidden-value",
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(self.runtime.metrics()["tool_outcome_count"], 1)
+        self.assertIn("[REDACTED]", self.runtime.tool_outcomes[0]["summary"])
+        self.assertEqual(
+            len([event for event, _payload in self.events if event == "tool_outcome"]),
+            1,
+        )
+
+    async def test_session_usage_is_persisted_without_inventing_cost(self) -> None:
+        self.runtime.record_session_usage(
+            SimpleNamespace(
+                model_usage=[
+                    {
+                        "type": "llm_usage",
+                        "provider": "google",
+                        "model": "gemini-live",
+                        "input_tokens": 120,
+                        "input_audio_tokens": 80,
+                        "output_tokens": 45,
+                        "output_audio_tokens": 30,
+                    }
+                ]
+            )
+        )
+
+        metrics = self.runtime.metrics()
+        self.assertEqual(metrics["model_usage"][0]["input_tokens"], 120)
+        self.assertEqual(metrics["model_usage"][0]["output_audio_tokens"], 30)
+        self.assertEqual(metrics["monetary_cost_status"], "cost_unavailable")
 
 
 class TestRedaction(unittest.TestCase):

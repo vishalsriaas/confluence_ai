@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import re
+import time
 import frappe
+from frappe.exceptions import DuplicateEntryError, TimestampMismatchError, UniqueValidationError
 from google.protobuf import duration_pb2
 from livekit import api
 from livekit.protocol import room as proto_room
@@ -239,6 +241,14 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         system_prompt = agent.get_system_prompt() if agent else ""
     personality = agent.personality if agent else ""
     prompt_version = str(payload.get("prompt_version") or "").strip()
+    if agent_name == SHIPKIA_VOICE_AGENT:
+        from confluence_ai.prompts.shipkia_voice import (
+            SHIPKIA_VOICE_PROMPT_VERSION,
+            get_shipkia_voice_prompt,
+        )
+
+        prompt_version = prompt_version or SHIPKIA_VOICE_PROMPT_VERSION
+        system_prompt = get_shipkia_voice_prompt(prompt_version)
     if system_prompt:
         if "{{" in system_prompt:
             try:
@@ -576,12 +586,17 @@ async def _find_sip_participant_identity(lkapi: api.LiveKitAPI, room_name: str) 
     return None
 
 
+def _is_participant_disconnect(payload: dict) -> bool:
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    failure_code = str(payload.get("failure_code") or metrics.get("failure_code") or "")
+    return failure_code.strip().lower() == "participant_disconnect"
+
+
 def _is_intentional_participant_disconnect(payload: dict) -> bool:
     """Return whether the participant deliberately ended the call."""
     metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
-    failure_code = str(payload.get("failure_code") or metrics.get("failure_code") or "")
     close_reason = str(payload.get("reason") or metrics.get("close_reason") or "")
-    return failure_code.strip().lower() == "participant_disconnect" and (
+    return _is_participant_disconnect(payload) and (
         close_reason.strip().lower() == "user_initiated"
     )
 
@@ -597,7 +612,269 @@ def _callback_failed(payload: dict, event_type_lower: str) -> bool:
     )
 
 
+_PRICING_TOOL_NAMES = {
+    "lookup_pincode_serviceability",
+    "calculate_shipkia_rate",
+    "get_shipkia_flat_rates",
+    "get_shipkia_flat_zonal_rates",
+    "get_shipkia_starting_rate",
+}
+
+
+def _successful_pricing_outcome(audit: dict) -> bool:
+    outcomes = audit.get("tool_outcomes")
+    if not isinstance(outcomes, list):
+        single = audit.get("tool_outcome")
+        outcomes = [single] if isinstance(single, dict) else []
+    return any(
+        isinstance(outcome, dict)
+        and str(outcome.get("tool_name") or "") in _PRICING_TOOL_NAMES
+        and str(outcome.get("status") or "").strip().lower() == "success"
+        for outcome in outcomes
+    )
+
+
+def _rate_flow_started(audit: dict) -> bool:
+    snapshot = audit.get("state_snapshot")
+    if not isinstance(snapshot, dict):
+        return False
+    fields = snapshot.get("fields")
+    if isinstance(fields, dict):
+        intent = fields.get("assistance_intent")
+        if isinstance(intent, dict):
+            intent = intent.get("value")
+        if str(intent or "").strip().lower() == "rates":
+            return True
+    return bool(snapshot.get("requested_rate_type"))
+
+
+def _rate_flow_completed(audit: dict) -> bool:
+    """V5 is complete only after one of its two approved closing messages."""
+    if str(audit.get("prompt_version") or "") != "shipkia-voice-v5":
+        return True
+    snapshot = audit.get("state_snapshot")
+    if not isinstance(snapshot, dict):
+        return False
+    return bool(
+        snapshot.get("onboarding_link_presented")
+        or snapshot.get("better_plan_close_presented")
+    )
+
+
+def _console_audit_payload(payload: dict) -> dict:
+    """Keep only the non-secret, non-audio fields needed to audit a Console call."""
+    allowed = (
+        "console_session",
+        "event",
+        "status",
+        "prompt_version",
+        "call_uuid",
+        "room_id",
+        "room_name",
+        "reason",
+        "failure_code",
+        "transcript",
+        "classifier_decision",
+        "classifier_error",
+        "deterministic_transitions",
+        "applied_transitions",
+        "state_snapshot",
+        "state_transitions",
+        "tool_outcome",
+        "tool_outcomes",
+        "metrics",
+        "duration",
+    )
+    return {key: payload[key] for key in allowed if payload.get(key) not in (None, "")}
+
+
+def _upsert_console_livekit_call_log_once(payload: dict) -> str | None:
+    """Upsert exactly one task-less audit record for a LiveKit Console room."""
+    if not frappe.db.exists("DocType", "AI Call Log"):
+        return None
+
+    from confluence_ai.services.utils import now
+
+    room_name = str(payload.get("room_name") or payload.get("room") or "")
+    call_uuid = str(
+        payload.get("call_uuid")
+        or payload.get("room_id")
+        or payload.get("room_sid")
+        or room_name
+    )
+    if not call_uuid:
+        return None
+
+    existing = frappe.db.exists(
+        "AI Call Log",
+        {"call_uuid": call_uuid, "provider": "LiveKit", "direction": "Console"},
+    )
+    doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
+    event_type = str(payload.get("event") or payload.get("event_type") or "status_update")
+    event_type_lower = event_type.lower()
+    audit = _console_audit_payload(payload)
+    previous_audit = parse_json_object(doc.transcript_payload_json)
+    decision_history = previous_audit.get("classifier_decisions")
+    if not isinstance(decision_history, list):
+        decision_history = []
+    if payload.get("classifier_decision") is not None or payload.get("classifier_error"):
+        decision_record = {
+            key: payload[key]
+            for key in (
+                "classifier_decision",
+                "classifier_error",
+                "deterministic_transitions",
+                "applied_transitions",
+            )
+            if payload.get(key) not in (None, "")
+        }
+        if decision_record and all(
+            as_json(existing) != as_json(decision_record)
+            for existing in decision_history
+        ):
+            decision_history.append(decision_record)
+            decision_history = decision_history[-100:]
+    audit = {
+        **previous_audit,
+        **audit,
+        "classifier_decisions": decision_history,
+    }
+    disconnected_before_rate = (
+        event_type_lower
+        in {
+            "call_ended",
+            "room_finished",
+            "participant_left",
+            "completed",
+        }
+        and _is_participant_disconnect(payload)
+        and _rate_flow_started(audit)
+        and (
+            not _successful_pricing_outcome(audit)
+            or not _rate_flow_completed(audit)
+        )
+    )
+    completed_rate_disconnect = (
+        event_type_lower
+        in {"call_ended", "room_finished", "participant_left", "completed"}
+        and _is_participant_disconnect(payload)
+        and _rate_flow_started(audit)
+        and _successful_pricing_outcome(audit)
+        and _rate_flow_completed(audit)
+    )
+    if disconnected_before_rate:
+        audit["completion_outcome"] = "Incomplete/User Disconnected"
+    elif completed_rate_disconnect:
+        audit["completion_outcome"] = "Completed/User Disconnected"
+
+    doc.provider = "LiveKit"
+    doc.direction = "Console"
+    doc.event_type = event_type
+    doc.call_uuid = call_uuid
+    doc.sip_call_id = room_name or call_uuid
+    doc.reason = (
+        "Incomplete/User Disconnected"
+        if disconnected_before_rate
+        else payload.get("reason") or doc.reason
+    )
+    doc.last_payload_json = as_json(audit)
+
+    if event_type_lower in {"agent_started", "room_started", "participant_joined", "initiated"}:
+        doc.status = "In Progress"
+        doc.started_at = payload.get("started_at") or doc.started_at or now()
+        doc.initiated_payload_json = as_json(audit)
+    elif event_type_lower in {
+        "call_ended",
+        "room_finished",
+        "participant_left",
+        "completed",
+        "failed",
+        "room_failed",
+        "call_failed",
+        "agent_startup_failed",
+    }:
+        doc.status = (
+            "Failed"
+            if disconnected_before_rate
+            or (
+                not completed_rate_disconnect
+                and _callback_failed(payload, event_type_lower)
+            )
+            else "Completed"
+        )
+        doc.ended_at = payload.get("ended_at") or doc.ended_at or now()
+        doc.status_payload_json = as_json(audit)
+    elif not doc.status or doc.status == "Unknown":
+        doc.status = "In Progress"
+
+    duration = payload.get("duration")
+    if duration is None and isinstance(payload.get("metrics"), dict):
+        duration = payload["metrics"].get("duration_seconds")
+    if duration is not None:
+        try:
+            doc.duration_sec = max(0, int(float(duration)))
+        except (TypeError, ValueError):
+            pass
+
+    transcript = payload.get("transcript")
+    if transcript:
+        doc.transcript = str(transcript)
+        doc.transcript_summary = (
+            payload.get("transcript_summary")
+            or payload.get("summary")
+            or str(transcript)[:1000]
+        )
+    doc.transcript_payload_json = as_json(audit)
+    doc.save(ignore_permissions=True)
+    return doc.name
+
+
+def _upsert_console_livekit_call_log(payload: dict) -> str | None:
+    """Retry concurrent room checkpoints without creating duplicate call logs."""
+    for attempt in range(8):
+        try:
+            return _upsert_console_livekit_call_log_once(payload)
+        except (TimestampMismatchError, DuplicateEntryError, UniqueValidationError):
+            frappe.db.rollback()
+            if attempt == 7:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+    return None
+
+
+def cleanup_console_call_logs(retention_days: int = 30) -> int:
+    """Delete only expired task-less LiveKit Console audit logs."""
+    from frappe.utils import add_days, now_datetime
+
+    days = max(1, int(retention_days or 30))
+    expired = frappe.get_all(
+        "AI Call Log",
+        filters={
+            "provider": "LiveKit",
+            "direction": "Console",
+            "task": ["is", "not set"],
+            "creation": ["<", add_days(now_datetime(), -days)],
+        },
+        pluck="name",
+    )
+    for name in expired:
+        frappe.delete_doc("AI Call Log", name, ignore_permissions=True)
+    if expired:
+        frappe.db.commit()
+    return len(expired)
+
+
 def handle_callback(payload: dict) -> dict:
+    if payload.get("console_session") in (1, "1", True, "true", "True"):
+        call_log = _upsert_console_livekit_call_log(payload)
+        frappe.db.commit()
+        return {
+            "status": "success",
+            "console_session": True,
+            "call_log": call_log,
+            "processed_event": payload.get("event") or payload.get("event_type"),
+        }
+
     # 1. Match the webhook payload to a task and/or attempt
     from confluence_ai.services.vobiz import find_task_and_attempt
     task_name, attempt_name = find_task_and_attempt(payload)
@@ -627,8 +904,10 @@ def handle_callback(payload: dict) -> dict:
     event_type_lower = event_type.lower()
     runtime_events = {
         "transcript_checkpoint",
+        "gated_state_checkpoint",
         "agent_state",
         "tool_completed",
+        "tool_outcome",
         "participant_reconnect_grace",
         "participant_reconnected",
         "participant_disconnect_timeout",
@@ -925,8 +1204,10 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None) -> None:
             "initiated",
             "agent_started",
             "transcript_checkpoint",
+            "gated_state_checkpoint",
             "agent_state",
             "tool_completed",
+            "tool_outcome",
             "participant_reconnect_grace",
             "participant_reconnected",
             "agent_recovery_started",

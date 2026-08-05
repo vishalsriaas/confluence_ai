@@ -103,11 +103,79 @@ TOOL_SPECS = {
         ],
     },
     "lookup_pincode_serviceability": {
-        "description": "Check ShipKia pickup/delivery serviceability. Currently returns configuration_required.",
-        "condition": "Call only for a rate or serviceability enquiry after both pincodes are collected.",
+        "description": (
+            "Resolve a ShipKia route zone and return that zone's verified starting rate from the "
+            "active rate card. Supports pincodes, city/location pairs, and Pan-India starting enquiries."
+        ),
+        "condition": (
+            "Call once per customer-requested route after both endpoints are collected, or for a "
+            "Pan-India/All-India starting-rate enquiry."
+        ),
         "parameters": [
-            ("pickup_pincode", "string", True, "Pickup pincode."),
-            ("delivery_pincode", "string", True, "Delivery pincode."),
+            ("pickup_pincode", "string", False, "Six-digit pickup pincode when supplied."),
+            ("delivery_pincode", "string", False, "Six-digit delivery pincode when supplied."),
+            ("pickup_location", "string", False, "Customer-confirmed pickup city/location."),
+            ("delivery_location", "string", False, "Customer-confirmed delivery city/location."),
+            (
+                "pan_india",
+                "boolean",
+                False,
+                "True only when the customer asks for Pan-India or All-India starting rates.",
+            ),
+        ],
+    },
+    "get_shipkia_starting_rate": {
+        "description": (
+            "Return the verified ShipKia starting-rate response. With an approved Zone A-F it "
+            "returns that zone's exact GST-inclusive starting amount; without a zone it returns "
+            "the backend-verified general starting headline."
+        ),
+        "condition": (
+            "Call once when the customer requests a Pan-India/general rate, explicitly cannot "
+            "provide a required pricing detail, or explicitly supplies an approved Zone A-F."
+        ),
+        "parameters": [
+            (
+                "zone",
+                "string",
+                False,
+                "Customer-supplied or trusted approved zone A, B, C, D, E or F; omit when unknown.",
+            ),
+        ],
+    },
+    "get_shipkia_flat_rates": {
+        "description": (
+            "Return only the three verified GST-inclusive E-Kart Surface forward flat-rate "
+            "slabs from the active Rate Card 10. Additional-weight components are excluded."
+        ),
+        "condition": (
+            "Call immediately for a ShipKia Voice V5 explicit flat-rate request and return all "
+            "verified Prepaid slabs. Older guarded flows may use weight/payment-specific scopes."
+        ),
+        "parameters": [
+            ("dead_weight", "number", False, "Actual shipment weight in kilograms for a matching slab."),
+            ("weight_unit", "string", False, "kg by default; use g when dead_weight is in grams."),
+            ("length", "number", False, "Package length in centimetres, when available."),
+            ("width", "number", False, "Package width in centimetres, when available."),
+            ("height", "number", False, "Package height in centimetres, when available."),
+            ("payment_type", "string", False, "Prepaid by default, or COD when explicitly requested."),
+            ("order_value", "number", False, "Required positive order value for a COD flat-rate request."),
+            ("response_scope", "string", False, "Starting, Matching or All."),
+        ],
+    },
+    "get_shipkia_flat_zonal_rates": {
+        "description": (
+            "Return the verified GST-inclusive E-Kart Express Flat-Zonal catalog from active "
+            "Rate Card 10: one base group for Zones A-B, one for Zones C-F, plus the verified "
+            "additional 500-gram condition."
+        ),
+        "condition": (
+            "Call immediately only after an explicit Flat-Zonal, flat zonal, zonal-flat, or "
+            "zone-wise flat-rate request. Never use it for generic Flat or Zonal rates."
+        ),
+        "parameters": [
+            ("payment_type", "string", False, "Prepaid by default, or COD when explicitly requested."),
+            ("order_value", "number", False, "Required positive order value for a COD Flat-Zonal request."),
         ],
     },
     "calculate_shipkia_rate": {
@@ -116,13 +184,12 @@ TOOL_SPECS = {
             "volumetric weight, COD, 18% GST and Zone A-F pricing. Never estimate rates."
         ),
         "condition": (
-            "Call for every rate enquiry only after pickup pincode, delivery pincode, weight and "
-            "payment type are explicitly confirmed. If the approved zone is unknown, omit zone "
-            "and present the returned Zone A-F prices."
+            "Call only when worker-gated pricing_mode is exact: positive weight, payment and every "
+            "required shipment input are confirmed, with no starting-rate escape active."
         ),
         "parameters": [
-            ("pickup_pincode", "string", True, "Confirmed 6-digit pickup pincode."),
-            ("delivery_pincode", "string", True, "Confirmed 6-digit delivery pincode."),
+            ("pickup_pincode", "string", False, "Confirmed 6-digit pickup pincode; omit only when explicitly unavailable."),
+            ("delivery_pincode", "string", False, "Confirmed 6-digit delivery pincode; omit only when explicitly unavailable."),
             ("dead_weight", "number", True, "Actual package weight in kilograms."),
             ("weight_unit", "string", False, "kg by default; use g only when dead_weight is supplied in grams."),
             ("length", "number", False, "Package length in centimetres."),
@@ -314,11 +381,26 @@ def _active_rate_rules() -> str:
 {RATE_PROMPT_MARKER}
 
 - Rate Card 10 - June is active in calculate_shipkia_rate.
-- For every rate enquiry, call calculate_shipkia_rate as soon as weight and payment type are
-  known. Include dimensions when available, but do not withhold a rate when they are missing.
-- lookup_pincode_serviceability may still return configuration_required. That does not block a
-  rate quote. Call calculate_shipkia_rate without zone and speak the returned Zone A-F prices.
-- If an approved zone is known, pass zone A, B, C, D, E or F and speak only returned amounts.
+- Keep the normal qualification flow. For V5, call lookup_pincode_serviceability once after two
+  customer-confirmed pincode/city endpoints, or for a Pan-India/All-India request. It returns the
+  resolved zone and that zone's verified starting rate. Pan-India uses Zone A only as a starting
+  basis. Do not delay that starting rate for weight or payment mode.
+- Without an approved zone, the starting-rate response is "ShipKia rates start from Rs 22; the
+  exact rate depends on route, weight and service." With an approved zone, speak only the returned
+  exact GST-inclusive zone starting amount. Never infer a zone from pincodes.
+- For every rate enquiry, call calculate_shipkia_rate only when the worker-controlled gated state
+  says pricing_mode=exact and pricing_ready=true. A verified positive weight is mandatory for
+  exact calculation and must never be defaulted.
+  Include dimensions when available, but do not withhold a rate when they are missing.
+- A blocked, invalid, or failed calculator call returned no verified amount. Never reuse Rs 22 as
+  an exact Prepaid/COD rate and never guess that Flat pricing is unavailable after such a failure.
+- If route resolution cannot produce a verified zone/rate, speak only its returned general Rs 22
+  fallback. Never invent a zone or call the exact calculator for that unresolved route.
+- Ask each pincode once. If the customer explicitly says a pincode, weight, payment mode, or
+  required COD value is unknown or refuses it, mark that field handled and use the general starting
+  rate. Silence, noise, or an unrelated reply never authorizes this fallback.
+- If an approved zone is known, use get_shipkia_starting_rate with that zone; do not calculate a
+  customer-specific rate in that response.
 - If COD order value is missing, speak the returned shipping charge and COD formula, then ask
   only for the order value.
 - Never arrange a follow-up solely because pincode-to-zone mapping is unavailable.
@@ -380,48 +462,46 @@ def _rate_sales_rules() -> str:
 {RATE_SALES_PROMPT_MARKER}
 
 Use a consultative, customer-request-first approach whenever a customer asks about shipping prices.
-The deterministic rate card remains the only pricing source. Answer the selected rate path before
-continuing optional qualification.
+The deterministic rate card remains the only pricing source. Complete the worker-gated optional
+qualification sequence, or end it on an explicit unknown/refusal, before shipment pricing.
 
 Conversation sequence:
 
-1. Maintain an answered-fields checklist from CRM context and every customer turn. An explicit
-   answer, correction, refusal, "not shared", or detail inside a multi-detail answer counts as
-   handled. Never ask a handled question again; ask only one missing question per turn.
-2. Collect only the minimum missing shipment details needed by calculate_shipkia_rate, then call
-   it in this order: 6-digit pickup pincode, 6-digit delivery pincode, weight, and Prepaid or COD;
-   for COD, collect order value when required. Ask only one missing item per turn, but capture every
-   detail when the customer supplies several together. A city, state, area or internal Zone A-F is
-   not a substitute for a pincode. Never call the rate tool or quote a rate before both pincodes are
-   confirmed. Do not delay the requested rate with general qualification questions.
-3. By default, speak only the lowest eligible verified total as:
+1. The worker-controlled gated state is authoritative. Advance a field only from evidence verified
+   in the customer's latest statement. Model-generated tool arguments, silence, noise, or an
+   unrelated reply cannot complete it. Preserve explicit multi-detail answers and corrections.
+2. Before shipment inputs, collect the next missing optional qualification in order: business
+   name, business type, shipping arrangement, provider when applicable, current comparable rate,
+   and main problem. If the customer explicitly says "pata nahi", does not know, says not
+   applicable, says they currently use nothing or have selected no courier, or refuses any one,
+   end all remaining optional qualification and move to shipment
+   inputs. If a reply is unrelated, answer it briefly and return to the same pending question.
+3. Collect shipment inputs in this order: 6-digit pickup pincode, 6-digit delivery pincode,
+   positive weight, and Prepaid or COD; for COD, collect order value when available. Ask only one
+   missing item per turn while preserving every explicit out-of-order detail. Ask a pincode once;
+   an explicit unknown/refusal permits a verified no-zone starting rate, but silence or an
+   unrelated reply does not. Weight is mandatory and must never be assumed.
+4. By default, speak only the lowest eligible verified total as:
    "In details ke basis par ShipKia rates ₹{{amount}} se start hote hain."
    State whether GST is included. For COD, include the verified COD basis or ask for order value.
-4. If the customer explicitly asks for a flat rate, use only flat_rate_options. When is_flat_rate
+5. If the customer explicitly asks for a flat rate, use only flat_rate_options. When is_flat_rate
    is true, speak the exact service and flat_rate_breakdown as the verified Zone A-F flat amount
    without a zone qualification. If none is returned, say no verified flat option was found.
-5. If the customer voluntarily shares a current comparable rate, clarify its basis only when
+6. If the customer voluntarily shares a current comparable rate, clarify its basis only when
    needed and compare equivalent weights, zones, payment types and inclusions. Do not require a
    current rate before giving the requested ShipKia rate.
-6. Do not list courier-wise prices or a full rate table unless the customer explicitly requests
+7. Do not list courier-wise prices or a full rate table unless the customer explicitly requests
    a detailed breakup. If requested, use no more than the three options returned by the tool.
-7. After answering the rate request, naturally collect only relevant missing qualification:
-   brand/business name, business type, main shipping challenge, monthly shipment volume, and
-   current shipping setup or comparable rate. Do not turn the call into a full form.
-8. Make the main shipping challenge the next qualification priority after the requested answer. If
-   it is unknown and was not refused, ask exactly once: "Aapko shipping operations mein abhi sabse
-   badi challenge kya face ho rahi hai?" If the customer already stated a problem, treat the
-   challenge as answered and do not ask again.
-9. Acknowledge the stated challenge and give one short, specific solution using no more than two
+8. Acknowledge a verified stated challenge and give one short, specific solution using no more than two
    relevant approved capabilities: multi-courier comparison for rate concerns; support/ticketing
    and eligible-account manager assistance for shipment or support concerns; WhatsApp/automated
    call order confirmation for mistaken or unconfirmed orders; WhatsApp/IVR NDR workflows,
    dashboard visibility and RTO analytics for delivery exceptions or RTO concerns. Do not recite
    every feature or guarantee an outcome.
-10. When a production task provides a phone and Lead-write tools are available, save only confirmed
+9. When a production task provides a phone and Lead-write tools are available, save only confirmed
    organization, challenge, volume, provider, rate basis, service interest and summary. Merge
    non-destructively; never save guesses or blanks. Direct Console remains read-only.
-11. Close the rate discussion with the relevant RTO value statement:
+10. Close the rate discussion with the relevant RTO value statement:
    "ShipKia ke NDR WhatsApp, IVR workflows aur RTO analytics se avoidable RTO reduce karne mein
    help mil sakti hai."
 
@@ -439,9 +519,8 @@ Natural close:
 
 When the customer does not share or does not have a current rate:
 
-- Do not pressure them and do not repeat the question.
-- Say "No problem," provide the verified ShipKia starting price, briefly explain the relevant
-  operational value, and continue with the monthly-volume question.
+- Do not pressure them and do not repeat the question. End the remaining optional qualification,
+  move to missing shipment inputs, and never use the response to invent a rate field.
 
 When the customer shares a current rate:
 
@@ -464,8 +543,9 @@ Pricing integrity:
 - For a non-flat result, if the zone is unknown, use the lowest returned Zone A-F amount only with
   a clear statement that the exact starting price depends on the approved zone.
 - Never ask the customer to identify ShipKia's internal Zone A-F. Collect pickup and delivery
-  pincodes when useful; if zone lookup is unavailable, give the qualified starting price and
-  explain that the exact rate varies by approved zone unless the selected result is verified flat.
+  pincodes once. If an asked pincode is explicitly unavailable, give the qualified no-zone starting
+  price only after weight/payment are handled and explain that the exact rate varies by pincode and
+  approved zone unless the selected result is verified flat.
 - Treat courier, service and transport-mode labels as exact rate-card constraints. "Standard"
   is not "Express," and "Surface" is not "Air." Never rename or infer a service category.
 - If the customer says "express delivery," call calculate_shipkia_rate with mode="Express".

@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 
@@ -54,6 +55,8 @@ class VoiceSessionRuntime:
         self.turns: list[dict[str, Any]] = []
         self.seen_turn_ids: set[str] = set()
         self.tool_latencies_ms: list[int] = []
+        self.tool_outcomes: list[dict[str, Any]] = []
+        self.model_usage: list[dict[str, Any]] = []
         self.response_latencies_ms: list[int] = []
         self.reconnect_count = 0
         self.recovery_attempted = 0
@@ -101,10 +104,21 @@ class VoiceSessionRuntime:
         key = turn_id or f"user:{clean}"
         if key in self.seen_turn_ids:
             return False
+        now_monotonic = time.monotonic()
+        # Native realtime emits the same final customer utterance through both
+        # user_input_transcribed and conversation_item_added with different IDs.
+        # Keep one audit/runtime turn while still allowing a genuine later repeat.
+        if (
+            self._last_user_monotonic is not None
+            and clean.casefold() == self._last_user_text.casefold()
+            and now_monotonic - self._last_user_monotonic <= 3.0
+        ):
+            self.seen_turn_ids.add(key)
+            return False
         self.seen_turn_ids.add(key)
         self._last_user_turn += 1
         self._last_user_text = clean
-        self._last_user_monotonic = time.monotonic()
+        self._last_user_monotonic = now_monotonic
         self._cancel_interruption_recovery()
         self.turns.append(
             {
@@ -266,6 +280,69 @@ class VoiceSessionRuntime:
             )
         )
 
+    def record_tool_outcome(
+        self,
+        tool_name: str,
+        *,
+        status: object,
+        summary: object = "",
+    ) -> None:
+        outcome = {
+            "tool_name": str(tool_name or ""),
+            "status": redact_sensitive_text(status)[:120],
+            "summary": redact_sensitive_text(summary)[:500],
+            "created_at": time.time(),
+        }
+        self.tool_outcomes.append(outcome)
+        if len(self.tool_outcomes) > 40:
+            self.tool_outcomes = self.tool_outcomes[-40:]
+        self._spawn(
+            self.emit(
+                "tool_outcome",
+                tool_outcome=outcome,
+                tool_outcomes=list(self.tool_outcomes),
+                metrics=self.metrics(),
+            )
+        )
+
+    def record_session_usage(self, usage: object) -> None:
+        raw_items = getattr(usage, "model_usage", None)
+        if not isinstance(raw_items, list):
+            return
+        sanitized: list[dict[str, Any]] = []
+        for item in raw_items:
+            if is_dataclass(item):
+                raw = asdict(item)
+            elif isinstance(item, dict):
+                raw = dict(item)
+            else:
+                raw = {
+                    key: getattr(item, key)
+                    for key in (
+                        "type",
+                        "provider",
+                        "model",
+                        "input_tokens",
+                        "input_cached_tokens",
+                        "input_audio_tokens",
+                        "input_text_tokens",
+                        "output_tokens",
+                        "output_audio_tokens",
+                        "output_text_tokens",
+                        "audio_duration",
+                        "characters_count",
+                    )
+                    if hasattr(item, key)
+                }
+            sanitized.append(
+                {
+                    str(key): value
+                    for key, value in raw.items()
+                    if isinstance(value, (str, int, float, bool, type(None)))
+                }
+            )
+        self.model_usage = sanitized
+
     def participant_connected(self) -> None:
         if self._disconnect_task and not self._disconnect_task.done():
             self._disconnect_task.cancel()
@@ -345,6 +422,7 @@ class VoiceSessionRuntime:
             "duration_seconds": max(0, int(time.monotonic() - self.started_monotonic)),
             "response_latencies_ms": list(self.response_latencies_ms),
             "tool_latencies_ms": list(self.tool_latencies_ms),
+            "tool_outcome_count": len(self.tool_outcomes),
             "reconnect_count": self.reconnect_count,
             "recovery_attempted": self.recovery_attempted,
             "recovery_succeeded": self.recovery_succeeded,
@@ -354,6 +432,8 @@ class VoiceSessionRuntime:
             "failure_code": self.failure_code,
             "close_reason": self.close_reason,
             "turn_count": len(self.turns),
+            "model_usage": list(self.model_usage),
+            "monetary_cost_status": "cost_unavailable",
         }
 
     def transcript(self) -> str:
@@ -367,12 +447,21 @@ class VoiceSessionRuntime:
         self._cancel_interruption_recovery()
         if self._disconnect_task and not self._disconnect_task.done():
             self._disconnect_task.cancel()
+        intentional_disconnect = bool(
+            self.failure_code == "participant_disconnect"
+            and self.close_reason == "user_initiated"
+        )
         await self.emit(
             "call_ended",
-            status="failed" if self.failure_code else "completed",
+            status=(
+                "completed"
+                if intentional_disconnect or not self.failure_code
+                else "failed"
+            ),
             reason=self.close_reason,
             failure_code=self.failure_code,
             transcript=self.transcript(),
+            tool_outcomes=list(self.tool_outcomes),
             metrics=self.metrics(),
             duration=self.metrics()["duration_seconds"],
         )

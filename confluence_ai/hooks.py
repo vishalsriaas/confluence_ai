@@ -68,6 +68,9 @@ scheduler_events = {
         "confluence_ai.services.dispatcher.enqueue_ready_batches",
         "confluence_ai.services.scheduler.process_deadlines",
     ],
+    "daily": [
+        "confluence_ai.services.livekit.cleanup_console_call_logs",
+    ],
     "cron": {
         "* * * * *": [
             "confluence_ai.services.order_confirmation.process_due_workflows",
