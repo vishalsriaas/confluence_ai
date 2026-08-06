@@ -622,6 +622,32 @@ _CUSTOMER_CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 _NOISE_ONLY_GREETING_RE = re.compile(r"^(?:hello|hallo|halo|alo|hi|hey)[.!?]*$", re.IGNORECASE)
+_OPENING_ACTIONABLE_SHORT_RE = re.compile(
+    r"\b(?:haan|han|yes|yeah|yep|ji|ok|okay|theek|bataiye|bataye|boliye|no|nahi|nahin|"
+    r"rate|rates|onboarding|service|services|shipkia|courier|wait|hold|ruko|ruk|busy|"
+    r"later|baad|minute|interested|wrong|number)\b|"
+    r"(?:हां|हा|जी|बताइए|बोलिए|ठीक|नहीं|रेट|सर्विस|रुकिए|बाद|मिनट)",
+    re.IGNORECASE,
+)
+_AGENT_OPENING_RE = re.compile(
+    r"\bnamaste\b.{0,100}\bshipkia\b.{0,180}\b(?:shipping\s+query|do\s+minute\s+baat)\b|"
+    r"\bhumein\s+aapki\s+shipping\s+query\s+mili\s+thi\b|"
+    r"\bkya\s+abhi\s+hum\s+do\s+minute\s+baat\s+kar\s+sakte\s+hain\b",
+    re.IGNORECASE,
+)
+
+
+def _is_opening_noise_turn(
+    customer_text: object,
+    conversation_state: GatedConversationState,
+) -> bool:
+    """Reject a short non-actionable ASR fragment while consent is pending."""
+    if conversation_state.pending_field() != "conversation_consent":
+        return False
+    clean = _normalized_text(customer_text).strip(" .,!?।")
+    if not clean or len(clean.split()) > 2:
+        return False
+    return not bool(_OPENING_ACTIONABLE_SHORT_RE.search(clean))
 _HANDLED_QUESTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "conversation_consent",
@@ -810,6 +836,11 @@ def _shipkia_flow_response_violation(
 
     if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
         return "spoken_onboarding_url"
+    if (
+        conversation_state.is_handled("conversation_consent")
+        and _AGENT_OPENING_RE.search(agent_clean)
+    ):
+        return "restarted_opening"
     if (
         _AGENT_FLAT_ZONAL_CLAIM_RE.search(agent_clean)
         and not conversation_state.flat_zonal_catalog_presented
@@ -4558,6 +4589,7 @@ async def entrypoint(ctx: JobContext) -> None:
     participant_seen = bool(ctx.room.remote_participants)
     close_reason = "maximum_call_duration"
     correction_active = False
+    ignored_opening_noise: dict[str, float] = {}
 
     @ctx.room.on("participant_connected")
     def _participant_connected(participant):
@@ -4590,6 +4622,22 @@ async def entrypoint(ctx: JobContext) -> None:
         if getattr(event, "is_final", False):
             turn_id = f"user:{getattr(event, 'created_at', time.time())}"
             transcript = getattr(event, "transcript", "")
+            if _is_opening_noise_turn(transcript, conversation_state):
+                ignored_opening_noise[_normalized_text(transcript)] = time.monotonic()
+                async def suppress_opening_noise() -> None:
+                    try:
+                        await session.interrupt()
+                    except RuntimeError:
+                        pass
+                    await emit_runtime_event(
+                        "opening_noise_ignored",
+                        status="ignored",
+                        customer_text=str(transcript or "")[:120],
+                    )
+
+                task = asyncio.create_task(suppress_opening_noise())
+                task.add_done_callback(VoiceSessionRuntime._log_task_exception)
+                return
             if runtime.add_user_turn(transcript, turn_id=turn_id):
                 turn_processor.schedule(transcript, turn_id=turn_id)
 
@@ -4601,6 +4649,16 @@ async def entrypoint(ctx: JobContext) -> None:
         if str(item.role) == "user":
             turn_id = getattr(item, "id", None)
             customer_text = item.text_content or ""
+            noise_key = _normalized_text(customer_text)
+            ignored_at = ignored_opening_noise.get(noise_key)
+            recently_ignored = bool(
+                ignored_at is not None and time.monotonic() - ignored_at <= 5.0
+            )
+            if recently_ignored:
+                ignored_opening_noise.pop(noise_key, None)
+                return
+            if _is_opening_noise_turn(customer_text, conversation_state):
+                return
             is_new_turn = runtime.add_user_turn(customer_text, turn_id=turn_id)
             assistant._response_language = _response_language_for_turn(
                 customer_text,
@@ -4825,7 +4883,10 @@ async def entrypoint(ctx: JobContext) -> None:
                                 else "Use two or three verified facilities relevant to their question"
                             )
                             correction_direction = (
-                                "Answer the customer's ShipKia procedure/services/benefits question "
+                                "The call is already in progress and consent is accepted. Never "
+                                "greet, introduce ShipKia again, mention that a query was received, "
+                                "or ask for consent. Answer the customer's current ShipKia "
+                                "procedure/services/benefits question "
                                 f"now. {usp_scope}: multi-courier shipment management; dedicated "
                                 "account-manager support for ticketing; WhatsApp order confirmation "
                                 "with call fallback; and WhatsApp plus IVR follow-up for delivery "
@@ -4860,6 +4921,13 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "The one information checkpoint is not authorized at this stage. "
                                 "Do not ask whether the customer wants to know anything else. "
                                 "Continue only with this current authoritative action: "
+                                + conversation_state.guidance()
+                            )
+                        elif flow_violation == "restarted_opening":
+                            correction_direction = (
+                                "The call is already in progress and consent was accepted. Never "
+                                "greet, introduce ShipKia again, mention that a query was received, "
+                                "or ask for consent. Continue only with this current action: "
                                 + conversation_state.guidance()
                             )
                         elif flow_violation == "qualification_bridge_omitted":
@@ -4959,7 +5027,9 @@ async def entrypoint(ctx: JobContext) -> None:
                         reply = session.generate_reply(
                             instructions=(
                                 "The previous draft violated the ShipKia V5 flow and was interrupted. "
-                                "Do not repeat it. " + correction_direction
+                                "Do not repeat it. The call is already in progress; never greet, "
+                                "introduce ShipKia, mention that a query was received, or ask for "
+                                "conversation consent again. " + correction_direction
                             )
                         )
                         if hasattr(reply, "wait_for_playout"):

@@ -13,6 +13,7 @@ from livekit_agent.agent import (
     _authoritative_rate_request_arguments,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
+    _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
     _rate_gate_response,
@@ -51,6 +52,44 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_opening_ignores_short_non_actionable_asr_noise(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        self.assertTrue(_is_opening_noise_turn("Coke", state))
+        self.assertTrue(_is_opening_noise_turn("random sound", state))
+        for meaningful in (
+            "haan",
+            "ji bataiye",
+            "okay",
+            "nahi",
+            "rates",
+            "services",
+            "one minute",
+            "not interested",
+            "wrong number",
+        ):
+            with self.subTest(meaningful=meaningful):
+                self.assertFalse(_is_opening_noise_turn(meaningful, state))
+
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        self.assertFalse(_is_opening_noise_turn("Coke", state))
+
+    def test_opening_cannot_restart_after_consent_is_accepted(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "Namaste, main ShipKia ki taraf se baat kar raha hoon. Humein aapki shipping "
+                "query mili thi. Kya abhi hum do minute baat kar sakte hain?"
+            ),
+            customer_text="ShipKia ki services kya kya hain?",
+            previous_agent_text="Aap rates check karna chahenge ya onboarding mein help chahiye?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "restarted_opening")
+
     def test_call_1708_blocks_flat_zonal_claim_without_matching_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.flat_catalog_presented = True
