@@ -14,6 +14,7 @@ from livekit_agent.agent import (
     _detailed_services_reply_instruction,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
+    _high_volume_manager_reply_instruction,
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
@@ -92,6 +93,15 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertEqual(instruction.count("business ya brand ka naam kya hai"), 1)
         self.assertNotIn("Aap kuch aur jaanna chahenge", instruction)
         self.assertIn("repeat any information", instruction)
+
+    def test_high_volume_reply_adds_manager_support_before_single_checkpoint(self):
+        instruction = _high_volume_manager_reply_instruction("Hinglish", 1000)
+
+        self.assertIn("monthly shipments 1,000", instruction)
+        self.assertIn("dedicated account manager", instruction)
+        self.assertIn("support aur ticketing", instruction)
+        self.assertEqual(instruction.count("Kya aap kuch aur jaanna chahenge"), 1)
+        self.assertIn("Never ask for monthly shipments again", instruction)
 
     def test_opening_ignores_short_non_actionable_asr_noise(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -1639,7 +1649,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
     async def test_v5_explicit_flat_zonal_uses_only_flat_zonal_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("flat zonal rates batao", turn_id="flat-zonal")
+        state.apply_deterministic_answers("Rflat Zonal", turn_id="flat-zonal")
         forwarder = make_mcp_forwarder(
             "get_shipkia_flat_zonal_rates",
             "v5-flat-zonal-test",

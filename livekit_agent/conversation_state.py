@@ -284,7 +284,8 @@ _PROVIDER_RATE_ASR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
-    r"(?:\bflat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    r"(?:\br[\s-]*flat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\bflat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
     r"\b(?:flat|flatt|flood)[\s,.-]*(?:zone|zonal)\s*(?:rate|rates|pricing|available)?\b|"
     r"\bflat[\s,.-]*(?:2|two|to)?\s*(?:night|nite|nait|tonight)\s*"
     r"(?:rate|rates|pricing|available)\b|"
@@ -3690,6 +3691,15 @@ class GatedConversationState:
                         "Briefly acknowledge the captured monthly shipment quantity, then stop. "
                         "The one information checkpoint was already consumed, so do not ask it "
                         "again or add another question."
+                    )
+                monthly_shipments = int(self.value("monthly_shipments") or 0)
+                if monthly_shipments > 500:
+                    return (
+                        "Briefly acknowledge the captured monthly shipment quantity, then say "
+                        "that for this volume they will get a dedicated account manager who will "
+                        "help with support and ticketing. Then ask exactly: 'Kya aap kuch aur "
+                        "jaanna chahenge?' Do not ask for the quantity or any qualification field "
+                        "again."
                     )
                 return (
                     "Briefly acknowledge the captured monthly shipment quantity, then ask exactly: "

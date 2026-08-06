@@ -1169,6 +1169,27 @@ def _provider_options_reply_instruction(
     )
 
 
+def _high_volume_manager_reply_instruction(response_language: str, quantity: int) -> str:
+    formatted_quantity = f"{quantity:,}"
+    if response_language == "English":
+        response = (
+            f"Understood, your monthly shipment volume is {formatted_quantity}. For this volume, "
+            "you will get a dedicated account manager who will help you with support and "
+            "ticketing. Would you like to know anything else?"
+        )
+    else:
+        response = (
+            f"Theek hai, aapki monthly shipments {formatted_quantity} hain. Is volume ke liye "
+            "aapko ek dedicated account manager milega jo support aur ticketing mein aapki help "
+            "karega. Kya aap kuch aur jaanna chahenge?"
+        )
+    return (
+        "This is a controlled high-volume response in an active call. Say exactly once and say "
+        f"nothing else: \"{response}\" Never ask for monthly shipments again, add another "
+        "qualification question, quote a rate, call a tool, or repeat the closing question."
+    )
+
+
 def _gemini_start_sensitivity() -> genai_types.StartSensitivity:
     """Return the configured speech-start profile, defaulting fail-safe for noise."""
     configured = os.getenv("GEMINI_VAD_START_SENSITIVITY", "LOW").strip().upper()
@@ -4721,6 +4742,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.last_provider_options_query
                 and not conversation_state.last_provider_rates_query
             )
+            or (
+                conversation_state.last_monthly_quantity_captured
+                and int(conversation_state.value("monthly_shipments") or 0) > 500
+                and not conversation_state.anything_else_checkpoint_consumed
+            )
         )
         if controlled_at_schedule:
             # Mark it before yielding so an incomplete native draft cannot
@@ -4744,8 +4770,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.last_provider_options_query
                 and not conversation_state.last_provider_rates_query
             )
+            high_volume = bool(
+                conversation_state.last_monthly_quantity_captured
+                and int(conversation_state.value("monthly_shipments") or 0) > 500
+                and not conversation_state.anything_else_checkpoint_consumed
+            )
             if runtime.user_turn_count != turn_epoch or not (
-                detailed_services or provider_options
+                detailed_services or provider_options or high_volume
             ):
                 return
             controlled_information_reply_epochs.add(turn_epoch)
@@ -4764,6 +4795,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     else _provider_options_reply_instruction(
                         assistant._response_language,
                         conversation_state,
+                    )
+                    if provider_options
+                    else _high_volume_manager_reply_instruction(
+                        assistant._response_language,
+                        int(conversation_state.value("monthly_shipments") or 0),
                     )
                 )
             )

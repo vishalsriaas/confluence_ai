@@ -1604,6 +1604,7 @@ class TestGatedConversationState(unittest.TestCase):
         for customer_text in (
             "Par flood zone rate available?",
             "Mai puch raha hoon, flat, 2 night rate available hai.",
+            "Rflat Zonal",
         ):
             with self.subTest(customer_text=customer_text):
                 state = GatedConversationState(
@@ -1870,6 +1871,23 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.is_handled("monthly_shipments"))
         self.assertTrue(state.last_monthly_quantity_captured)
         self.assertIn("acknowledge", state.guidance())
+        self.assertIn("dedicated account manager", state.guidance())
+        self.assertIn("support and ticketing", state.guidance())
+
+    def test_v5_manager_message_applies_only_above_five_hundred_shipments(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Zone C rate batao", turn_id="rate")
+        state.mark_pricing_verified("get_shipkia_starting_rate")
+
+        state.apply_deterministic_answers(
+            "500",
+            turn_id="quantity",
+            previous_agent_text="Aapki monthly shipment quantity kitni hoti hai?",
+        )
+
+        self.assertNotIn("dedicated account manager", state.guidance())
+        self.assertIn("Kya aap kuch aur jaanna chahenge", state.guidance())
 
     def test_v5_monthly_quantity_due_survives_missing_agent_transcript_context(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
