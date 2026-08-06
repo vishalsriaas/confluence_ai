@@ -263,6 +263,8 @@ _BROAD_USP_QUERY_PATTERN = re.compile(
 _GENERIC_SERVICES_QUERY_PATTERN = re.compile(
     r"\b(?:what|which|kaun|kon|kya|aur|or)\b.{0,45}\bservices?\b|"
     r"\bservices?\b.{0,45}\b(?:provide|provided|offer|offered|available|dete|karte|kya|hai)\b|"
+    r"\bservices?\b.{0,45}\b(?:bare|detail|bata|bataye|janna|jaanna|benefits?)\b|"
+    r"\b(?:bata|bataye|detail|janna|jaanna)\b.{0,45}\bservices?\b|"
     r"\u0938\u0930\u094d\u0935\u093f\u0938(?:\u0947\u091c)?|"
     r"\u0938\u0947\u0935\u093e(?:\u090f\u0902|\u092f\u0947\u0902)?|\u0938\u0941\u0935\u093f\u0927\u093e",
     re.IGNORECASE,
@@ -294,7 +296,13 @@ _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"\u0938\u094d\u0915\u094d\u0935\u093e\u092f\u0930\s+\u091a\u0948\u0928\u0932\s*\u0930\u0947\u091f|"
     r"\b(?:zonal|donal|jonal)[\s-]*(?:flat|plate|flait)\s*"
     r"(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\b(?:orthonal|ortho[\s-]*nal|ordinal)[\s-]*flat\s*"
+    r"(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\bflat[\s-]*(?:donner|donnal|jonal|journal)[\s-]*"
+    r"(?:rate|rates|trade|pricing|charge|charges)?\b|"
     r"\bzone[\s-]*wise\s+flat\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\u092b\u094d\u0932\u0948\u091f\s*(?:\u091c\u0930\u094d\u0928\u0932|\u091c\u094b\u0928\u0932|\u0921\u094b\u0928\u0932)\s*"
+    r"\u0930\u0947\u091f(?:\u094d\u0938)?|"
     r"(?:फ्लैट\s*(?:ज़ोनल|जोनल|डोनल)|"
     r"(?:ज़ोनल|जोनल|डोनल|नल)\s*(?:फ्लैट|प्लेट))\s*रेट(?:्स)?)",
     re.IGNORECASE,
@@ -1390,6 +1398,11 @@ class GatedConversationState:
             and _CONTEXTUAL_MORE_SERVICES_PATTERN.search(clean)
             and _PREVIOUS_USP_ANSWER_PATTERN.search(previous_clean)
         )
+        contextual_detailed_services = bool(
+            self.v5_company_pair_flow
+            and _DETAILED_USP_QUERY_PATTERN.search(clean)
+            and _PREVIOUS_USP_ANSWER_PATTERN.search(previous_clean)
+        )
         self.last_usp_query = bool(
             self.v5_company_pair_flow
             and (
@@ -1397,6 +1410,7 @@ class GatedConversationState:
                 or _BROAD_USP_QUERY_PATTERN.search(clean)
                 or generic_services_query
                 or contextual_more_services
+                or contextual_detailed_services
             )
         )
         self.last_detailed_usp_query = bool(
@@ -1404,6 +1418,7 @@ class GatedConversationState:
             and (
                 generic_services_query
                 or contextual_more_services
+                or contextual_detailed_services
                 or _DETAILED_USP_QUERY_PATTERN.search(clean)
             )
         )

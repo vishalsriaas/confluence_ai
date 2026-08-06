@@ -1088,25 +1088,29 @@ def _response_language_for_turn(text: object, current_language: str) -> str:
 def _detailed_services_reply_instruction(response_language: str) -> str:
     if response_language == "English":
         response = (
-            "ShipKia helps you manage shipments across multiple courier partners. You get a "
-            "dedicated account manager for ticketing and support. Order confirmation is sent on "
-            "WhatsApp first, with a call fallback when there is no response. Delivery NDR "
-            "follow-up is supported through WhatsApp and IVR calls. Would you like to know "
-            "anything else, or may I help you check rates or with onboarding?"
+            "ShipKia lets you manage shipments across multiple courier partners from one platform. "
+            "For operational tickets or support queries, a dedicated account manager helps with "
+            "coordination. Order confirmation is sent on WhatsApp first, with a call fallback when "
+            "there is no response. If a delivery attempt has an issue, NDR follow-up is supported "
+            "through WhatsApp and IVR calls. Would you like to know anything else, or may I help "
+            "you check rates or with onboarding?"
         )
     else:
         response = (
-            "ShipKia se aap multiple courier partners ke saath shipments manage kar sakte hain. "
-            "Ticketing aur support ke liye dedicated account manager milta hai. Order "
-            "confirmation pehle WhatsApp se hota hai, aur response na aane par call fallback "
-            "hota hai. Delivery NDR ke follow-up ke liye WhatsApp aur IVR calls ka support "
-            "milta hai. Aap kuch aur jaanna chahenge, ya main aapko rates check karne ya "
-            "onboarding mein help karun?"
+            "ShipKia par aap ek hi platform se multiple courier partners ke saath shipments manage "
+            "kar sakte hain. Operations mein ticket ya support query aaye to dedicated account "
+            "manager coordination mein help karta hai. Order confirmation pehle WhatsApp se hota "
+            "hai, aur response na aane par call fallback hota hai. Delivery attempt mein issue aaye "
+            "to NDR follow-up ke liye WhatsApp aur IVR calls ka support milta hai. Aap kuch aur "
+            "jaanna chahenge, ya main aapko rates check karne ya onboarding mein help karun?"
         )
     return (
         "This is a controlled detailed-services response in an active call. Say exactly once and "
         f"say nothing else: \"{response}\" Never greet, split it into another response, call a "
-        "tool, or repeat the closing question."
+        "tool, shorten or generalize any of the four explanations, or repeat the closing question. "
+        "Every clause is required. In particular, explicitly say that WhatsApp confirmation comes "
+        "first, a call is the fallback when there is no response, and NDR uses both WhatsApp and "
+        "IVR calls."
     )
 
 

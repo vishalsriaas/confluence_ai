@@ -752,6 +752,7 @@ class TestGatedConversationState(unittest.TestCase):
     def test_call_1681_generic_services_query_requests_all_verified_usps(self):
         for customer_text in (
             "Aur kaun-kaun si services provide karte hain aap?",
+            "Chupkiyan ki services ke bare mein bataye.",
             "\u0906\u092a \u0915\u094c\u0928-\u0915\u094c\u0928 \u0938\u0940 \u0938\u0930\u094d\u0935\u093f\u0938\u0947\u091c \u092a\u094d\u0930\u094b\u0935\u093e\u0907\u0921 \u0915\u0930\u0924\u0947 \u0939\u0948\u0902?",
         ):
             with self.subTest(customer_text=customer_text):
@@ -772,6 +773,19 @@ class TestGatedConversationState(unittest.TestCase):
                 self.assertIn("WhatsApp order confirmation", guidance)
                 self.assertIn("call confirmation", guidance)
                 self.assertIn("IVR-call follow-up", guidance)
+
+        detail_state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        detail_state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        detail_state.apply_deterministic_answers(
+            "\u0939\u093e\u0902, \u092e\u0941\u091d\u0947 \u0921\u093f\u091f\u0947\u0932 \u092e\u0947\u0902 \u092c\u0924\u093e\u0907\u090f\u0964 \u091c\u093f\u0924\u0928\u093e \u0921\u093f\u091f\u0947\u0932 \u0939\u094b \u0938\u0915\u0947 \u0909\u0938\u092e\u0947\u0902 \u092c\u0924\u093e\u0907\u090f\u0964",
+            turn_id="details",
+            previous_agent_text=(
+                "ShipKia mein dedicated account manager aur WhatsApp order confirmation support "
+                "milta hai."
+            ),
+        )
+        self.assertTrue(detail_state.last_usp_query)
+        self.assertTrue(detail_state.last_detailed_usp_query)
 
         courier_state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         courier_state.apply_deterministic_answers(
@@ -1605,6 +1619,9 @@ class TestGatedConversationState(unittest.TestCase):
             "Par flood zone rate available?",
             "Mai puch raha hoon, flat, 2 night rate available hai.",
             "Rflat Zonal",
+            "orthonal flat rate",
+            "à flat Donner trade",
+            "\u092b\u094d\u0932\u0948\u091f \u091c\u0930\u094d\u0928\u0932 \u0930\u0947\u091f",
         ):
             with self.subTest(customer_text=customer_text):
                 state = GatedConversationState(
