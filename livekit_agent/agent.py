@@ -1088,21 +1088,21 @@ def _response_language_for_turn(text: object, current_language: str) -> str:
 def _detailed_services_reply_instruction(response_language: str) -> str:
     if response_language == "English":
         response = (
-            "ShipKia lets you manage shipments across multiple courier partners from one platform. "
-            "For operational tickets or support queries, a dedicated account manager helps with "
-            "coordination. Order confirmation is sent on WhatsApp first, with a call fallback when "
-            "there is no response. If a delivery attempt has an issue, NDR follow-up is supported "
-            "through WhatsApp and IVR calls. Would you like to know anything else, or may I help "
-            "you check rates or with onboarding?"
+            "ShipKia has four main services. First, you can manage shipments across multiple "
+            "courier partners from one platform. Second, a dedicated account manager helps with "
+            "support queries and ticketing. Third, order confirmation is sent on WhatsApp first, "
+            "with a call fallback when there is no response. Fourth, delivery NDR follow-up uses "
+            "both WhatsApp and IVR calls. Would you like to know anything else, or may I help you "
+            "check rates or with onboarding?"
         )
     else:
         response = (
-            "ShipKia par aap ek hi platform se multiple courier partners ke saath shipments manage "
-            "kar sakte hain. Operations mein ticket ya support query aaye to dedicated account "
-            "manager coordination mein help karta hai. Order confirmation pehle WhatsApp se hota "
-            "hai, aur response na aane par call fallback hota hai. Delivery attempt mein issue aaye "
-            "to NDR follow-up ke liye WhatsApp aur IVR calls ka support milta hai. Aap kuch aur "
-            "jaanna chahenge, ya main aapko rates check karne ya onboarding mein help karun?"
+            "ShipKia ki chaar main services hain. Pehli, aap ek platform par multiple courier "
+            "partners ke saath shipments manage kar sakte hain. Dusri, support queries aur ticketing "
+            "ke liye dedicated account manager help karta hai. Teesri, order confirmation pehle "
+            "WhatsApp se hota hai, aur response na aane par call fallback hota hai. Chauthi, delivery "
+            "NDR follow-up mein WhatsApp aur IVR calls dono use hote hain. Aap kuch aur jaanna "
+            "chahenge, ya main aapko rates check karne ya onboarding mein help karun?"
         )
     return (
         "This is a controlled detailed-services response in an active call. Say exactly once and "
