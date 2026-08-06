@@ -3298,6 +3298,10 @@ class GatedConversationState:
     def guidance(self) -> str:
         pending = self.pending_field()
         pricing_mode = self.pricing_mode()
+        early_side_query_resume = (
+            "Then ask exactly: 'Iske alawa aap kuch aur jaanna chahenge, ya main aapko "
+            "shipping rates check karne ya onboarding mein help kar doon?'"
+        )
         if self.v4_strict_flow:
             if self.onboarding_link_due:
                 return (
@@ -3375,10 +3379,7 @@ class GatedConversationState:
                     provider_resume = "Then ask exactly: 'Kya aap kuch aur jaanna chahenge?'"
                 else:
                     provider_resume = {
-                        "assistance_intent": (
-                            "Then resume by asking only whether they want to check rates or need "
-                            "onboarding help."
-                        ),
+                        "assistance_intent": early_side_query_resume,
                         "business_name": "Then resume by asking only for their business or brand name.",
                         "business_type": "Then resume by asking only whether their business is B2C or D2C.",
                         "current_shipping_arrangement": (
@@ -3392,7 +3393,7 @@ class GatedConversationState:
                             "Then resume by asking only their current comparable shipping rate."
                         ),
                         "current_problem": "Then resume by asking only their main shipping problem.",
-                    }.get(pending, "Then ask only whether they want rates or onboarding help.")
+                    }.get(pending, early_side_query_resume)
                 return (
                     "The customer asked which courier partners or services ShipKia has, without "
                     "explicitly requesting their rates. Give these known partner names directly: "
@@ -3404,7 +3405,7 @@ class GatedConversationState:
                 )
             if self.last_usp_query:
                 resume = {
-                    "assistance_intent": "Then ask only whether they want rates or onboarding help.",
+                    "assistance_intent": early_side_query_resume,
                     "business_name": "Then resume by asking only for their business or brand name.",
                     "business_type": "Then resume by asking only whether their business is B2C or D2C.",
                     "current_shipping_arrangement": "Then resume by asking only which courier or shipping provider they use.",
@@ -3522,7 +3523,9 @@ class GatedConversationState:
             pending_directions = {
                 "conversation_consent": "Ask only whether this is a convenient time to talk.",
                 "assistance_intent": (
-                    "Ask only whether they want to check shipping rates or need onboarding help."
+                    early_side_query_resume
+                    if self.last_turn_disposition in {"unrelated", "mixed"}
+                    else "Ask only whether they want to check shipping rates or need onboarding help."
                 ),
                 "business_name": (
                     "Say exactly: 'Rates batane se pehle main aapse kuch zaroori details jaan "

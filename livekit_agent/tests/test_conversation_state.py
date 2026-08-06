@@ -41,6 +41,49 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_early_side_queries_use_natural_help_continuation(self):
+        expected = (
+            "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "
+            "check karne ya onboarding mein help kar doon?"
+        )
+        for customer_text in (
+            "ShipKia ki services kya kya hain?",
+            "Aur kaun kaun se courier options available hain?",
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+                state.apply_deterministic_answers("haan", turn_id="consent")
+                state.apply_deterministic_answers(customer_text, turn_id="side-query")
+
+                self.assertEqual(state.pending_field(), "assistance_intent")
+                self.assertIn(expected, state.guidance())
+                self.assertNotIn("want rates or onboarding", state.guidance())
+
+    def test_initial_assistance_choice_remains_short_before_any_side_query(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+
+        guidance = state.guidance()
+
+        self.assertIn("check shipping rates or need onboarding help", guidance)
+        self.assertNotIn("Iske alawa aap kuch aur jaanna chahenge", guidance)
+
+    def test_generic_early_side_question_uses_natural_help_continuation(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_classifier_result(
+            {"turn_disposition": "unrelated", "decisions": []},
+            customer_text="Aapka office kahan hai?",
+            turn_id="side-query",
+            pending_field_at_turn_start="assistance_intent",
+        )
+
+        self.assertIn(
+            "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "
+            "check karne ya onboarding mein help kar doon?",
+            state.guidance(),
+        )
+
     def test_call_1698_delivery_pincode_never_becomes_monthly_shipments(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("haan", turn_id="consent")
@@ -271,7 +314,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("names directly", guidance.casefold())
         self.assertIn("do not quote any rate", guidance.casefold())
         self.assertNotIn("Rs ", guidance)
-        self.assertIn("rates or onboarding help", guidance)
+        self.assertIn("aap kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
         self.assertIn("do not jump to the move-forward", guidance.casefold())
 
     def test_call_1662_rate_list_is_information_not_dissatisfaction(self):
@@ -350,7 +394,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("names-only", guidance)
         self.assertIn("do not quote any rate", guidance)
         self.assertNotIn("Rs ", guidance)
-        self.assertIn("rates or need onboarding help", guidance)
+        self.assertIn("aap kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
 
     def test_call_1668_hindi_no_thanks_advances_once_to_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -416,7 +461,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("Amazon", guidance)
         self.assertIn("Xpressbees", guidance)
         self.assertIn("do not quote any rate", guidance.casefold())
-        self.assertIn("rates or need onboarding help", guidance)
+        self.assertIn("aap kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
 
     def test_call_1677_sparse_followup_preserves_verified_provider_rates(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -1434,7 +1480,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("dedicated account manager", guidance)
         self.assertIn("WhatsApp order confirmation", guidance)
         self.assertIn("IVR-call", guidance)
-        self.assertIn("rates or onboarding", guidance)
+        self.assertIn("aap kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
         self.assertEqual(state.pending_field(), "assistance_intent")
 
     def test_v5_problem_solution_continues_directly_to_retained_route_rate(self):
