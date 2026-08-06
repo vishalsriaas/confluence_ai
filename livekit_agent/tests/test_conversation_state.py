@@ -228,6 +228,41 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(semantic, [])
         self.assertEqual(state.pending_field(), "business_name")
 
+    def test_call_1726_asr_what_shipkia_does_requests_all_services_once(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        state.apply_deterministic_answers(
+            "Mai pehle janana chahta hu, Ship kya ki-kya-kya kar dethe hain?",
+            turn_id="services-asr",
+            previous_agent_text="Aap shipping rates check karna chahenge ya onboarding mein help chahiye?",
+        )
+        guidance = state.guidance()
+
+        self.assertTrue(state.last_usp_query)
+        self.assertTrue(state.last_detailed_usp_query)
+        self.assertIn("explain all four verified facts", guidance)
+        self.assertIn("WhatsApp order confirmation", guidance)
+        self.assertIn("IVR-call", guidance)
+        self.assertEqual(guidance.count("Aap kuch aur jaanna chahenge"), 1)
+
+    def test_call_1726_contextual_aur_kya_kya_keeps_detailed_services_context(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        state.apply_deterministic_answers(
+            "यह भी चीज और और क्या-क्या?",
+            turn_id="more-services",
+            previous_agent_text=(
+                "ShipKia par multiple courier partners ke saath shipments manage hote hain. "
+                "Dedicated account manager support bhi milta hai."
+            ),
+        )
+
+        self.assertTrue(state.last_usp_query)
+        self.assertTrue(state.last_detailed_usp_query)
+        self.assertIn("explain all four verified facts", state.guidance())
+
     def test_initial_assistance_choice_remains_short_before_any_side_query(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("haan", turn_id="consent")

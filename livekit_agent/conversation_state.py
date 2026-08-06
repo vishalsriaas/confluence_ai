@@ -247,6 +247,7 @@ _USP_QUERY_PATTERN = re.compile(
     r"facility|facilities|fayda|fayde|faayda|faayde)\b|\b(?:what|tell me|batao|bata do|bataye)\b.{0,35}"
     r"\bship\s*kia\b|\b(?:what\s+is|about)\s+ship\s*kia\b|"
     r"\bship\s*kia\b.{0,25}\b(?:kya\s+hai|what\s+is|about)\b|"
+    r"\bship\b.{0,55}(?:kya[\s-]*){2}.{0,25}\b(?:kar|karte|karta|dete|deta)\b|"
     r"\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e|"
     r"(?:\u0936\u093f\u092a\s*\u0915\u093f\u092f\u093e|\u0936\u093f\u092a\u0915\u093f\u092f\u093e).{0,25}"
     r"\u0915\u094d\u092f\u093e\s+\u0939\u0948)",
@@ -264,6 +265,16 @@ _GENERIC_SERVICES_QUERY_PATTERN = re.compile(
     r"\bservices?\b.{0,45}\b(?:provide|provided|offer|offered|available|dete|karte|kya|hai)\b|"
     r"\u0938\u0930\u094d\u0935\u093f\u0938(?:\u0947\u091c)?|"
     r"\u0938\u0947\u0935\u093e(?:\u090f\u0902|\u092f\u0947\u0902)?|\u0938\u0941\u0935\u093f\u0927\u093e",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_MORE_SERVICES_PATTERN = re.compile(
+    r"\b(?:aur\s+){1,2}kya[\s-]*kya\b|\bwhat\s+else\b|"
+    r"और.{0,25}क्या[\s-]*क्या|"
+    r"यहs+भी.{0,30}और.{0,20}क्या",
+    re.IGNORECASE,
+)
+_PREVIOUS_USP_ANSWER_PATTERN = re.compile(
+    r"\bship\s*kia\b.{0,120}\b(?:courier|shipment|account\s+manager|confirmation|ndr|ivr)\b",
     re.IGNORECASE,
 )
 _PROVIDER_RATE_ASR_PATTERN = re.compile(
@@ -368,7 +379,8 @@ _PROVIDER_OPTIONS_QUERY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DETAILED_USP_QUERY_PATTERN = re.compile(
-    r"\b(?:detail|detailed|poori|puri|pura|complete|all|sabhi|saare|sare|kya\s+kya)\b|"
+    r"\b(?:detail|detailed|poori|puri|pura|complete|all|sabhi|saare|sare)\b|"
+    r"\bkya[\s-]*kya\b|"
     r"(?:डिटेल|पूरी|पूरा|सभी|क्या\s+क्या)",
     re.IGNORECASE,
 )
@@ -1337,6 +1349,7 @@ class GatedConversationState:
         clean = normalize_text(customer_text)
         if not clean:
             return []
+        previous_clean = normalize_text(previous_agent_text)
 
         applied: list[dict[str, Any]] = []
         self.last_monthly_quantity_captured = False
@@ -1362,17 +1375,27 @@ class GatedConversationState:
                 re.IGNORECASE,
             )
         )
+        contextual_more_services = bool(
+            self.v5_company_pair_flow
+            and _CONTEXTUAL_MORE_SERVICES_PATTERN.search(clean)
+            and _PREVIOUS_USP_ANSWER_PATTERN.search(previous_clean)
+        )
         self.last_usp_query = bool(
             self.v5_company_pair_flow
             and (
                 _USP_QUERY_PATTERN.search(clean)
                 or _BROAD_USP_QUERY_PATTERN.search(clean)
                 or generic_services_query
+                or contextual_more_services
             )
         )
         self.last_detailed_usp_query = bool(
             self.last_usp_query
-            and (generic_services_query or _DETAILED_USP_QUERY_PATTERN.search(clean))
+            and (
+                generic_services_query
+                or contextual_more_services
+                or _DETAILED_USP_QUERY_PATTERN.search(clean)
+            )
         )
         self.last_provider_options_query = bool(
             self.v5_company_pair_flow
@@ -1507,7 +1530,6 @@ class GatedConversationState:
                 self.unsatisfied_problem_due = True
                 self.unsatisfied_resolution_due = False
         pending = self.pending_field()
-        previous_clean = normalize_text(previous_agent_text)
         self.last_rate_repeat_requested = bool(
             self.v5_company_pair_flow
             and self.verified_rate_presented()

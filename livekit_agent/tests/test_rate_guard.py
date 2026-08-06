@@ -164,7 +164,7 @@ class TestRateGateResponse(unittest.TestCase):
             conversation_state=state,
         )
 
-        self.assertEqual(violation, "unexpected_anything_else_checkpoint")
+        self.assertEqual(violation, "usp_ignored")
 
     def test_call_1725_complete_service_answer_allows_one_combined_continuation(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -186,6 +186,38 @@ class TestRateGateResponse(unittest.TestCase):
         )
 
         self.assertEqual(violation, "")
+
+    def test_call_1726_asr_service_answer_requires_all_workflow_details(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        customer_text = "Ship kya ki-kya-kya kar dethe hain?"
+        state.apply_deterministic_answers(customer_text, turn_id="services-asr")
+
+        generic_labels = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier shipments manage karta hai. Order confirmation, NDR "
+                "assistance aur dedicated account manager support milta hai. Kya aap kuch aur "
+                "jaanna chahenge?"
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Aap rates check karna chahenge ya onboarding mein help chahiye?",
+            conversation_state=state,
+        )
+        complete = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners ke shipments manage karta hai, dedicated "
+                "account manager ticketing support deta hai, WhatsApp order confirmation ke "
+                "baad call fallback deta hai, aur NDR ke liye WhatsApp aur IVR follow-up karta "
+                "hai. Aap kuch aur jaanna chahenge, ya main aapko rates check karne ya "
+                "onboarding mein help karun?"
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Aap rates check karna chahenge ya onboarding mein help chahiye?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(generic_labels, "usp_ignored")
+        self.assertEqual(complete, "")
 
     def test_information_checkpoint_remains_allowed_at_authorized_post_rate_stage(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

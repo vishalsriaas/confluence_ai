@@ -944,17 +944,6 @@ def _shipkia_flow_response_violation(
     if unauthorized_better_plan:
         return "unauthorized_better_plan"
 
-    if (
-        _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
-        and not conversation_state.anything_else_question_due
-        and not early_information_resume
-    ):
-        # The information checkpoint belongs to one worker-authorized point
-        # after the first verified rate and monthly quantity. It must not be
-        # improvised during discovery, service answers, or later catalog/rate
-        # follow-ups.
-        return "unexpected_anything_else_checkpoint"
-
     if _CUSTOMER_USP_QUERY_RE.search(customer_clean) or conversation_state.last_usp_query:
         if _UNSUPPORTED_USP_CLAIM_RE.search(agent_clean):
             return "unsupported_usp_claim"
@@ -987,6 +976,18 @@ def _shipkia_flow_response_violation(
             required_usp_count = 4 if conversation_state.last_detailed_usp_query else 2
             if verified_usp_count < required_usp_count:
                 return "usp_ignored"
+
+    if (
+        _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+        and not conversation_state.anything_else_question_due
+        and not early_information_resume
+    ):
+        # The information checkpoint belongs to one worker-authorized point
+        # after the first verified rate and monthly quantity. It must not be
+        # improvised during discovery, service answers, or later catalog/rate
+        # follow-ups. USP completeness is checked first so a correction still
+        # answers every requested service instead of emitting only a closing.
+        return "unexpected_anything_else_checkpoint"
 
     pending = conversation_state.pending_field()
     asked_fields = _assistant_question_fields(agent_text)
