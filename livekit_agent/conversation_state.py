@@ -354,7 +354,9 @@ _MOVE_FORWARD_QUESTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MOVE_FORWARD_YES_PATTERN = re.compile(
-    r"^(?:yes|yes\s+please|haan|han|haan\s+ji|ji\s+haan|bilkul|sure|okay|ok|"
+    r"^(?:yes|yes\s+please|haan|han|haan\s+ji|ji\s+haan|bilkul|sure|"
+    r"(?:ok|okay)(?:\s+(?:ok|okay))*(?:\s+(?:theek|thik)\s+hai|\s+\u0920\u0940\u0915\s+\u0939\u0948)?|"
+    r"(?:theek|thik)\s+hai|\u0920\u0940\u0915\s+\u0939\u0948|"
     r"aage\s+(?:badhna|badna|badho)|karna\s+chahta\s+hoo?n|karna\s+chahti\s+hoo?n|"
     r"\u0939\u093e\u0901|\u0939\u093e\u0902|\u091c\u0940\s+\u0939\u093e\u0901|\u091c\u0940\s+\u0939\u093e\u0902|\u092c\u093f\u0932\u094d\u0915\u0941\u0932)[.!?\u0964]*$",
     re.IGNORECASE,
@@ -2869,7 +2871,7 @@ class GatedConversationState:
             if self.onboarding_link_due:
                 return (
                     "The customer explicitly said yes to moving forward with ShipKia. Say exactly "
-                    "once: 'Theek hai, main aapko WhatsApp par onboarding ke liye link bhej raha "
+                    "once: 'Theek hai, main aapko WhatsApp par onboarding ka link bhej raha "
                     "hoon. Aap us link se apni onboarding complete kar lijiye.' Then close warmly. "
                     "Do not restart qualification, repeat a rate, speak the URL aloud, or ask "
                     "another question."
@@ -2931,10 +2933,14 @@ class GatedConversationState:
                     "Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'",
                 )
                 return (
-                    "Answer the ShipKia benefits question completely but concisely. Mention all three: "
-                    "(1) a dedicated account manager for ticketing and support; (2) WhatsApp order "
-                    "confirmation when an order is patched, followed by call confirmation if WhatsApp "
-                    "gets no response; and (3) WhatsApp plus IVR-call follow-up for same-delivery NDR. "
+                    "Answer the ShipKia information or benefits question naturally and concisely. "
+                    "Choose two or three facts that are most relevant to what the customer asked: "
+                    "ShipKia helps manage shipments across multiple courier partners; it provides a "
+                    "dedicated account manager for ticketing and support; it supports WhatsApp order "
+                    "confirmation followed by call confirmation when WhatsApp gets no response; and "
+                    "it supports WhatsApp plus IVR-call follow-up for same-delivery NDR. You may vary "
+                    "the wording and give a brief practical explanation, but never invent a feature, "
+                    "guarantee, saving, discount, or delivery promise. "
                     f"{resume} Do not change or clear any already captured detail, and do not infer "
                     "satisfaction from this side question."
                 )

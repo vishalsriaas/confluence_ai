@@ -521,6 +521,17 @@ _CUSTOMER_USP_QUERY_RE = re.compile(
     r"\u092a\u094d\u0930\u094b\u0938\u0947\u0938|\u0915\u0948\u0938\u0947.{0,20}\u0915\u093e\u092e)",
     re.IGNORECASE,
 )
+_UNSUPPORTED_USP_CLAIM_RE = re.compile(
+    r"\b(?:guaranteed?|guarantee|assured?)\s+(?:saving|savings|discount|delivery|rate)\b|"
+    r"\b(?:fixed|minimum)\s+(?:saving|savings|discount)\b|"
+    r"\b\d+(?:\.\d+)?\s*(?:percent|%)\s+(?:saving|savings|discount)\b|"
+    r"\bdelivery\s+(?:is\s+)?guaranteed\b",
+    re.IGNORECASE,
+)
+_SPOKEN_ONBOARDING_URL_RE = re.compile(
+    r"\bauth(?:\s+dot|\.)\s*shipkia(?:\s+dot|\.)\s*com(?:\s+slash|/)\s*signup\b",
+    re.IGNORECASE,
+)
 _AGENT_MOVE_FORWARD_RE = re.compile(
     r"(?:ship\s*kia.{0,40}aage\s+(?:badhna|badna|badh)|"
     r"aage\s+(?:badhna|badna|badh).{0,40}ship\s*kia)",
@@ -702,6 +713,9 @@ def _shipkia_flow_response_violation(
     if not agent_clean:
         return ""
 
+    if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
+        return "spoken_onboarding_url"
+
     reasked_field = _assistant_reasked_handled_field(
         agent_text,
         customer_text,
@@ -720,6 +734,8 @@ def _shipkia_flow_response_violation(
         return "unauthorized_better_plan"
 
     if _CUSTOMER_USP_QUERY_RE.search(customer_clean):
+        if _UNSUPPORTED_USP_CLAIM_RE.search(agent_clean):
+            return "unsupported_usp_claim"
         support_specific = bool(re.search(r"\b(?:support|ticket|account manager)\b", customer_clean))
         order_specific = bool(re.search(r"\b(?:order|confirmation|whatsapp)\b", customer_clean))
         ndr_specific = bool(re.search(r"\b(?:ndr|rto|delivery exception|ivr)\b", customer_clean))
@@ -731,14 +747,23 @@ def _shipkia_flow_response_violation(
             )
             if not answered_specific:
                 return "usp_ignored"
-        elif not all(
-            (
-                "account manager" in agent_clean,
-                "whatsapp" in agent_clean and "confirmation" in agent_clean,
-                "ivr" in agent_clean or "call confirmation" in agent_clean,
+        else:
+            verified_usp_count = sum(
+                (
+                    bool(
+                        re.search(
+                            r"\b(?:multiple|different|several)\s+courier(?:\s+partners?)?\b"
+                            r"|\bshipment(?:s)?\s+manage(?:ment)?\b",
+                            agent_clean,
+                        )
+                    ),
+                    "account manager" in agent_clean,
+                    "whatsapp" in agent_clean and "confirmation" in agent_clean,
+                    "ndr" in agent_clean and ("ivr" in agent_clean or "whatsapp" in agent_clean),
+                )
             )
-        ):
-            return "usp_ignored"
+            if verified_usp_count < 2:
+                return "usp_ignored"
 
     pending = conversation_state.pending_field()
     asked_fields = _assistant_question_fields(agent_text)
@@ -3634,6 +3659,11 @@ class ShipKiaAssistant(Agent):
   Never guess, cache, or repeat an amount after a blocked or failed call.
 - Never speak tool names, field names, JSON, metadata, record IDs, or implementation details.
 - Keep the locked response language and speak naturally in short, complete sentences.
+- When the customer asks about ShipKia, its working, benefits, or USPs, answer the actual question
+  before resuming the sales flow. Use two or three relevant verified capabilities and natural,
+  conversational wording. You may give a brief practical explanation, but never invent a feature,
+  guarantee, saving, discount, delivery promise, or numeric rate. Every amount and zone remains
+  authorized only by a successful pricing-tool result.
 - After giving the requested verified rate, ask once whether the customer wants to know anything
   else. Never decide satisfaction yourself and never speak the satisfied/onboarding URL close from
   this general rule. That close is allowed only when the current private turn direction explicitly
@@ -4339,11 +4369,28 @@ async def entrypoint(ctx: JobContext) -> None:
                         if flow_violation == "usp_ignored":
                             correction_direction = (
                                 "Answer the customer's ShipKia procedure/benefits question now. "
-                                "Mention all three verified facilities concisely: dedicated account "
-                                "manager support for ticketing; WhatsApp order confirmation followed "
-                                "by call confirmation if there is no WhatsApp response; and WhatsApp "
-                                "plus IVR follow-up for delivery NDR. Then resume only the current "
+                                "Use two or three verified facilities relevant to their question: "
+                                "multi-courier shipment management; dedicated account-manager support "
+                                "for ticketing; WhatsApp order confirmation with call fallback; or "
+                                "WhatsApp plus IVR follow-up for delivery NDR. Explain them naturally "
+                                "without inventing a feature, guarantee, saving, discount, delivery "
+                                "promise, or numeric rate. Then resume only the current "
                                 "authoritative pending question. Do not skip directly to qualification."
+                            )
+                        elif flow_violation == "unsupported_usp_claim":
+                            correction_direction = (
+                                "Answer using only the verified ShipKia capabilities in the current "
+                                "instructions. Do not claim or imply a guaranteed delivery, saving, "
+                                "discount, or rate. Use natural wording, then resume the current "
+                                "authoritative action."
+                            )
+                        elif flow_violation == "spoken_onboarding_url":
+                            correction_direction = (
+                                "Never speak the raw signup URL. If onboarding-close authorization "
+                                "is active, say exactly once: 'Theek hai, main aapko WhatsApp par "
+                                "onboarding ka link bhej raha hoon. Aap us link se apni onboarding "
+                                "complete kar lijiye.' Otherwise follow only the current "
+                                "authoritative action."
                             )
                         elif flow_violation.startswith("reasked_handled:"):
                             repeated_field = flow_violation.split(":", 1)[1]

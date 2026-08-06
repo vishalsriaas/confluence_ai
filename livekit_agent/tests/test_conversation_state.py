@@ -482,13 +482,47 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.customer_satisfied)
         self.assertEqual(state.move_forward_decision, "Yes")
         self.assertTrue(state.onboarding_link_due)
-        self.assertIn("onboarding ke liye link bhej raha", state.guidance())
+        self.assertIn("onboarding ka link bhej raha", state.guidance())
         self.assertIn("onboarding complete kar lijiye", state.guidance())
         self.assertIn("Do not", state.guidance())
         self.assertIn("speak the URL aloud", state.guidance())
         state.mark_onboarding_link_presented()
         self.assertFalse(state.onboarding_link_due)
         self.assertTrue(state.onboarding_link_presented)
+
+    def test_v5_contextual_okay_theek_hai_accepts_move_forward(self):
+        for answer in ("okay", "okay okay", "theek hai", "ठीक है", "Okay Okay, ठीक है"):
+            with self.subTest(answer=answer):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+                state.seed_context({"monthly_shipments": 1000})
+                state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+                state.apply_deterministic_answers("flat rates batao", turn_id="flat")
+                state.mark_flat_catalog_presented()
+                state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
+
+                state.apply_deterministic_answers(
+                    answer,
+                    turn_id=f"move-forward-{answer}",
+                    previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+                )
+
+                self.assertEqual(state.move_forward_decision, "Yes")
+                self.assertTrue(state.onboarding_link_due)
+                self.assertIn("WhatsApp par onboarding ka link", state.guidance())
+
+    def test_v5_theek_hai_outside_move_forward_context_is_not_consent(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("shipping rates", turn_id="intent")
+
+        state.apply_deterministic_answers(
+            "ठीक है",
+            turn_id="ordinary-acknowledgement",
+            previous_agent_text="Aapke business ka naam kya hai?",
+        )
+
+        self.assertEqual(state.move_forward_decision, "")
+        self.assertFalse(state.onboarding_link_due)
 
     def test_v5_unclear_audio_never_authorizes_onboarding_close(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

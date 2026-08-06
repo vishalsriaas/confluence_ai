@@ -344,6 +344,50 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(specific_answer, "")
 
+        flexible_general_answer = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners ke shipments ek jagah manage karne mein help "
+                "karta hai, aur ticketing ke liye dedicated account manager support milta hai."
+            ),
+            customer_text="ShipKia ke benefits aur working ke baare mein bataiye.",
+            previous_agent_text="Aapko kis cheez mein help chahiye?",
+            conversation_state=state,
+        )
+        self.assertEqual(flexible_general_answer, "")
+
+        incomplete_general_answer = _shipkia_flow_response_violation(
+            agent_text="ShipKia mein dedicated account manager support milta hai.",
+            customer_text="ShipKia ke benefits aur working ke baare mein bataiye.",
+            previous_agent_text="Aapko kis cheez mein help chahiye?",
+            conversation_state=state,
+        )
+        self.assertEqual(incomplete_general_answer, "usp_ignored")
+
+        unsupported_claim = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners deta hai aur 50 percent savings guarantee karta hai."
+            ),
+            customer_text="ShipKia ke benefits aur working ke baare mein bataiye.",
+            previous_agent_text="Aapko kis cheez mein help chahiye?",
+            conversation_state=state,
+        )
+        self.assertEqual(unsupported_claim, "unsupported_usp_claim")
+
+    def test_v5_flow_guard_blocks_spoken_onboarding_url(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.onboarding_link_due = True
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "Aap auth.shipkia.com/signup par account create karke onboarding start kar sakte hain."
+            ),
+            customer_text="Okay, theek hai.",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "spoken_onboarding_url")
+
     def test_v5_flow_guard_blocks_premature_or_unexplained_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.monthly_quantity_due = True
