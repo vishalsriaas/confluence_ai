@@ -606,6 +606,11 @@ _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"anything\s+else)",
     re.IGNORECASE,
 )
+_AGENT_EARLY_INFO_CONTINUATION_RE = re.compile(
+    r"(?:kuch\s+aur|aur\s+kuch).{0,100}\brates?\b.{0,100}\bonboarding\b|"
+    r"\brates?\b.{0,100}\bonboarding\b.{0,100}(?:kuch\s+aur|aur\s+kuch)",
+    re.IGNORECASE,
+)
 _AGENT_FLAT_ZONAL_CLAIM_RE = re.compile(
     r"\bflat[\s-]*zonal\b.{0,120}\b(?:rates?\s+available|rs\s*\d|zones?\s+[a-f])\b|"
     r"\be[\s-]*kart\s+express\b.{0,80}\bzones?\s+[a-f]",
@@ -854,6 +859,11 @@ def _shipkia_flow_response_violation(
 
     previous_questions = _assistant_question_fields(previous_agent_text)
     draft_questions = _assistant_question_fields(agent_text)
+    early_information_resume = bool(
+        conversation_state.pending_field() == "assistance_intent"
+        and (conversation_state.last_usp_query or conversation_state.last_provider_options_query)
+        and _AGENT_EARLY_INFO_CONTINUATION_RE.search(agent_clean)
+    )
     if _CUSTOMER_OPTIONAL_REFUSAL_RE.search(customer_clean):
         refused_optional = next(
             (field for field in previous_questions if field in OPTIONAL_QUALIFICATION_FIELDS),
@@ -937,6 +947,7 @@ def _shipkia_flow_response_violation(
     if (
         _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
         and not conversation_state.anything_else_question_due
+        and not early_information_resume
     ):
         # The information checkpoint belongs to one worker-authorized point
         # after the first verified rate and monthly quantity. It must not be
@@ -983,6 +994,7 @@ def _shipkia_flow_response_violation(
         pending
         and pending in asked_fields
         and pending in _assistant_question_fields(previous_agent_text)
+        and not early_information_resume
     ):
         return f"repeated_pending:{pending}"
     if (
@@ -4050,8 +4062,6 @@ class ShipKiaAssistant(Agent):
 - Never proactively ask whether the customer wants normal rates. Calculate or discuss normal rates
   only when the customer independently asks for them. If they decline normal rates once, do not
   mention or offer them again unless the customer later explicitly requests them.
-- Never ask the customer for monthly shipment volume at any point in this voice call. If they
-  volunteer it, remember it without commenting or calling calculate_shipkia_rate solely to save it.
 - If saving fails, acknowledge internally and continue naturally; do not repeatedly ask the customer for the same answer.
 - Never send a message or invoke a messaging channel from this voice worker.
 """
@@ -4081,22 +4091,17 @@ class ShipKiaAssistant(Agent):
 - Never speak tool names, field names, JSON, metadata, record IDs, or implementation details.
 - Keep the locked response language and speak naturally in short, complete sentences.
 - When the customer asks about ShipKia, its working, benefits, or USPs, answer the actual question
-  before resuming the sales flow. Use two or three relevant verified capabilities and natural,
-  conversational wording. You may give a brief practical explanation, but never invent a feature,
-  guarantee, saving, discount, delivery promise, or numeric rate. Every amount and zone remains
-  authorized only by a successful pricing-tool result.
-- After giving the first requested verified rate, ask once whether the customer wants to know anything
-  else. Never decide satisfaction yourself and never speak the satisfied/onboarding URL close from
-  this general rule. That close is allowed only when the current private turn direction explicitly
-  says onboarding-close authorization is TRUE and supplies the exact response. Yes/haan/ji/si,
-  unclear audio, a partial word, silence, or thank-you by itself never authorizes this close.
+  before resuming the sales flow. Use two or three relevant verified capabilities for a general or
+  specific question; when the customer explicitly asks what all services/facilities are available or
+  asks for detail, explain all four verified capabilities. Use natural conversational wording, but
+  never invent a feature, guarantee, saving, discount, delivery promise, or numeric rate. Every
+  amount and zone remains authorized only by a successful pricing-tool result.
 """
         if conversation_state.v5_company_pair_flow:
             v4_runtime_rules += """
 
-## V5 quantity and close override
-- This section overrides the general V4 post-rate follow-up above. After a verified V5 rate, ask
-  the monthly shipment quantity once when it is missing. Capture a numeric or ranged answer before
+## V5 quantity and close flow
+- After a verified V5 rate, ask the monthly shipment quantity once when it is missing. Capture a numeric or ranged answer before
   moving on. Then ask exactly "Kya aap kuch aur jaanna chahenge?" Ask this checkpoint only once.
   Answer any requested follow-up fully without automatically appending the checkpoint again. After
   later Flat, Flat-Zonal, provider-rate, or repeated-rate answers, do not re-arm this checkpoint. After
@@ -4107,6 +4112,17 @@ class ShipKiaAssistant(Agent):
   explanation. Never repeat the bare move-forward question without answering the objection.
 - A no/nahi response to the move-forward question, including no/nahi followed by a reason,
   authorizes the better-plan team-discussion close. Do not repeat the question after that decision.
+"""
+        else:
+            v4_runtime_rules += """
+
+## V4 post-rate close flow
+- After giving the first requested verified rate, ask once whether the customer wants to know
+  anything else. Never decide satisfaction yourself and never speak the satisfied/onboarding URL
+  close from this general rule. That close is allowed only when the current private turn direction
+  explicitly says onboarding-close authorization is TRUE and supplies the exact response.
+  Yes/haan/ji/si, unclear audio, a partial word, silence, or thank-you by itself never authorizes
+  this close.
 """
         instructions += (
             v4_runtime_rules

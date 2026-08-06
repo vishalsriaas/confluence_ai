@@ -710,6 +710,7 @@ def _current_provider_evidence(text: object, previous_agent_text: object) -> str
 
 def _assistance_intent(text: object, previous_agent_text: object = "") -> str:
     clean = normalize_text(text)
+    previous = normalize_text(previous_agent_text)
     if _ONBOARDING_REQUEST_PATTERN.search(clean):
         return "Onboarding"
     # A benefits/features side-question is not consent to enter the pricing
@@ -746,7 +747,14 @@ def _assistance_intent(text: object, previous_agent_text: object = "") -> str:
         return "Rates"
     if re.search(r"\b(?:rash|rush)\s+(?:check|dekh|bata)\b", clean):
         return "Rates"
-    previous = normalize_text(previous_agent_text)
+    if (
+        re.search(r"(?:रेट|डेट)\s*(?:चेक|देख|बता)", clean)
+        and re.search(r"\brates?\b", previous)
+        and re.search(r"\bonboarding\b", previous)
+    ):
+        # Hindi ASR occasionally renders "rate check" as "date check".
+        # Correct it only while answering the explicit rates/onboarding choice.
+        return "Rates"
     route_reply = bool(
         re.search(
             rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)\s+(?:to|se|à¤Ÿà¥‚|à¤¸à¥‡)\s+"
@@ -1251,6 +1259,15 @@ class GatedConversationState:
                 # a field already confirmed from the same utterance. Besides
                 # duplicate transitions this could append/rewrite the value
                 # and advance discovery twice.
+                continue
+            if (
+                pending_field_at_turn_start == "assistance_intent"
+                and field == "current_problem"
+            ):
+                # A rates/onboarding selection can be misheard as a problem
+                # description (for example ASR "date check"). Keep legitimate
+                # out-of-order positive facts available, but never let this
+                # specific semantic spillover contaminate discovery.
                 continue
             if (
                 pending_field_at_turn_start == "current_shipping_rate"
@@ -3419,8 +3436,9 @@ class GatedConversationState:
         pending = self.pending_field()
         pricing_mode = self.pricing_mode()
         early_side_query_resume = (
-            "Then resume by asking exactly: 'Aap shipping rates check karna chahenge ya "
-            "onboarding mein help chahiye?' Do not ask whether they want to know anything else."
+            "Then end by asking exactly once: 'Aap kuch aur jaanna chahenge, ya main aapko "
+            "rates check karne ya onboarding mein help karun?' Do not add or repeat another "
+            "question after it."
         )
         if self.v4_strict_flow:
             if self.onboarding_link_due:
@@ -3780,9 +3798,14 @@ class GatedConversationState:
                     "customer-facing result it returns. Never describe this private direction."
                 )
             if pending:
+                using_early_side_query_resume = bool(
+                    pending == "assistance_intent"
+                    and self.last_turn_disposition in {"unrelated", "mixed"}
+                )
                 retry = (
                     " The last reply did not answer it, so ask the same question naturally again."
                     if self.last_turn_disposition in {"unrelated", "mixed", "guard_failed"}
+                    and not using_early_side_query_resume
                     else ""
                 )
                 return (

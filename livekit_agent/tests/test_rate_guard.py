@@ -166,6 +166,27 @@ class TestRateGateResponse(unittest.TestCase):
 
         self.assertEqual(violation, "unexpected_anything_else_checkpoint")
 
+    def test_call_1725_complete_service_answer_allows_one_combined_continuation(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        customer_text = "ShipKia ki services kya kya hain?"
+        state.apply_deterministic_answers(customer_text, turn_id="services")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners ke shipments manage karta hai, dedicated "
+                "account manager support deta hai, WhatsApp order confirmation ke baad call "
+                "fallback deta hai, aur NDR ke liye WhatsApp aur IVR follow-up karta hai. "
+                "Aap kuch aur jaanna chahenge, ya main aapko rates check karne ya onboarding "
+                "mein help karun?"
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Aap shipping rates check karna chahenge ya onboarding mein help chahiye?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "")
+
     def test_information_checkpoint_remains_allowed_at_authorized_post_rate_stage(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.anything_else_question_due = True
@@ -207,6 +228,13 @@ class TestRateGateResponse(unittest.TestCase):
         instructions = agent_init.call_args.kwargs["instructions"]
         self.assertIn("Pending field: conversation_consent", instructions)
         self.assertIn("Ask only whether this is a convenient time to talk", instructions)
+        self.assertIn("## V5 quantity and close flow", instructions)
+        self.assertNotIn("## V4 post-rate close flow", instructions)
+        self.assertNotIn(
+            "Never ask the customer for monthly shipment volume at any point",
+            instructions,
+        )
+        self.assertIn("explain all four verified capabilities", instructions)
 
     def test_empty_pending_field_returns_safe_gate_instead_of_crashing(self):
         result = _rate_gate_response(
