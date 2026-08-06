@@ -1232,6 +1232,13 @@ class GatedConversationState:
             and transition.get("field") == "monthly_shipments"
             for transition in self.transitions
         )
+        deterministically_updated_this_turn = {
+            str(transition.get("field") or "")
+            for transition in self.transitions
+            if transition.get("turn_id") == turn_id
+            and transition.get("event") == "field_updated"
+            and transition.get("source") == "deterministic"
+        }
         self.last_turn_disposition = str(result.get("turn_disposition") or "").strip().lower()
         for raw in decisions:
             if not isinstance(raw, dict):
@@ -1239,6 +1246,12 @@ class GatedConversationState:
             field = str(raw.get("field") or "").strip()
             disposition = str(raw.get("disposition") or "").strip().lower()
             confidence = _number(raw.get("confidence"))
+            if field in deterministically_updated_this_turn:
+                # Do not apply the semantic model's second interpretation of
+                # a field already confirmed from the same utterance. Besides
+                # duplicate transitions this could append/rewrite the value
+                # and advance discovery twice.
+                continue
             if (
                 pending_field_at_turn_start == "current_shipping_rate"
                 and field in ROUTE_FIELDS
@@ -1252,6 +1265,20 @@ class GatedConversationState:
             ):
                 # Shipment volume such as 5,000 must never replace an already
                 # captured Rs 35 current courier rate.
+                continue
+            if (
+                field == "current_shipping_rate"
+                and pending_field_at_turn_start != "current_shipping_rate"
+                and not re.search(
+                    r"\b(?:rs\.?|inr|rupees?|rate|rates|price|pricing|charge|charges)\b",
+                    normalize_text(customer_text),
+                    re.IGNORECASE,
+                )
+            ):
+                # A stray decimal/number heard while another question is
+                # pending is commonly ASR noise or a shipment quantity. Only
+                # accept an out-of-order current rate when the customer
+                # explicitly labels it as money/rate.
                 continue
             allow_semantic_negative = bool(
                 disposition in {"unknown", "refused", "not_applicable"}
@@ -1481,9 +1508,11 @@ class GatedConversationState:
         current_rate_question_context = bool(
             pending == "current_shipping_rate"
             or (
-                re.search(r"\b(?:rate|rates|price|pricing|charge|charges)\b", previous_clean)
-                and re.search(
-                    r"\b(?:current|abhi|mil|chal|provider|courier|ship\s*rocket|shipping\s*rocket)\b",
+                re.search(
+                    r"\b(?:aapka|aapko|current|abhi|mil|chal)\b.{0,80}"
+                    r"\b(?:rate|rates|price|pricing|charge|charges)\b|"
+                    r"\b(?:rate|rates|price|pricing|charge|charges)\b.{0,80}"
+                    r"\b(?:aapka|aapko|current|abhi|mil|chal)\b",
                     previous_clean,
                 )
             )

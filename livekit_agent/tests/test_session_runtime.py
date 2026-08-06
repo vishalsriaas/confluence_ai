@@ -45,6 +45,7 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.runtime.transcript(), "CUSTOMER: Work Shop")
         self.assertEqual(self.runtime.metrics()["turn_count"], 1)
+        self.assertEqual(self.runtime.user_turn_count, 1)
 
     async def test_recovers_once_after_response_timeout(self) -> None:
         async def recover(_customer_text: str, _reason: str) -> None:

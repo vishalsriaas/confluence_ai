@@ -2490,6 +2490,15 @@ class GuardedTurnProcessor:
 
         previous_task = self._latest_task
         clean_turn_id = str(turn_id or f"user:{time.time()}")
+        prepared_turn = None
+        if previous_task is None or previous_task.done():
+            # Gemini native audio can begin drafting as soon as its final
+            # transcript event fires. Apply evidence-backed deterministic
+            # answers before yielding back to the event loop so that draft is
+            # based on the newly advanced authoritative state, not the prior
+            # pending question. The slower semantic classifier still runs in
+            # order below.
+            prepared_turn = self._prepare_turn(clean_text, turn_id=clean_turn_id)
 
         async def run_in_order() -> None:
             if previous_task is not None and not previous_task.done():
@@ -2497,7 +2506,11 @@ class GuardedTurnProcessor:
                     await asyncio.shield(previous_task)
                 except (asyncio.CancelledError, Exception):
                     pass
-            await self._process(clean_text, turn_id=clean_turn_id)
+            await self._process(
+                clean_text,
+                turn_id=clean_turn_id,
+                prepared_turn=prepared_turn,
+            )
 
         task = asyncio.create_task(run_in_order())
         task.add_done_callback(VoiceSessionRuntime._log_task_exception)
@@ -2524,7 +2537,7 @@ class GuardedTurnProcessor:
             # callback/audit failure must not let model arguments bypass state.
             return
 
-    async def _process(self, customer_text: str, *, turn_id: str) -> None:
+    def _prepare_turn(self, customer_text: str, *, turn_id: str) -> dict[str, Any]:
         previous_agent_text = ""
         for turn in reversed(self._runtime.turns):
             if turn.get("role") == "AGENT":
@@ -2537,6 +2550,25 @@ class GuardedTurnProcessor:
             turn_id=turn_id,
             previous_agent_text=previous_agent_text,
         )
+        return {
+            "previous_agent_text": previous_agent_text,
+            "pending_field_at_turn_start": pending_field_at_turn_start,
+            "state_snapshot_at_turn_start": state_snapshot_at_turn_start,
+            "deterministic_transitions": deterministic_transitions,
+        }
+
+    async def _process(
+        self,
+        customer_text: str,
+        *,
+        turn_id: str,
+        prepared_turn: dict[str, Any] | None = None,
+    ) -> None:
+        prepared = prepared_turn or self._prepare_turn(customer_text, turn_id=turn_id)
+        previous_agent_text = str(prepared["previous_agent_text"])
+        pending_field_at_turn_start = prepared["pending_field_at_turn_start"]
+        state_snapshot_at_turn_start = prepared["state_snapshot_at_turn_start"]
+        deterministic_transitions = prepared["deterministic_transitions"]
         if deterministic_transitions:
             # Native realtime can start drafting before the semantic classifier
             # returns. Publish deterministic facts immediately so the ongoing
@@ -4547,8 +4579,8 @@ async def entrypoint(ctx: JobContext) -> None:
         if getattr(event, "is_final", False):
             turn_id = f"user:{getattr(event, 'created_at', time.time())}"
             transcript = getattr(event, "transcript", "")
-            runtime.add_user_turn(transcript, turn_id=turn_id)
-            turn_processor.schedule(transcript, turn_id=turn_id)
+            if runtime.add_user_turn(transcript, turn_id=turn_id):
+                turn_processor.schedule(transcript, turn_id=turn_id)
 
     @session.on("conversation_item_added")
     def _conversation_item_added(event):
@@ -4558,7 +4590,7 @@ async def entrypoint(ctx: JobContext) -> None:
         if str(item.role) == "user":
             turn_id = getattr(item, "id", None)
             customer_text = item.text_content or ""
-            runtime.add_user_turn(customer_text, turn_id=turn_id)
+            is_new_turn = runtime.add_user_turn(customer_text, turn_id=turn_id)
             assistant._response_language = _response_language_for_turn(
                 customer_text,
                 assistant._response_language,
@@ -4566,7 +4598,8 @@ async def entrypoint(ctx: JobContext) -> None:
             # Gemini native realtime skips Agent.on_user_turn_completed when
             # server-side turn detection is enabled. This event is the fallback
             # that guarantees the authoritative state still sees every turn.
-            turn_processor.schedule(customer_text, turn_id=turn_id)
+            if is_new_turn:
+                turn_processor.schedule(customer_text, turn_id=turn_id)
         elif str(item.role) == "assistant":
             agent_text = item.text_content or ""
             previous_agent_text = next(
@@ -4585,6 +4618,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 ),
                 "",
             )
+            response_turn_epoch = runtime.user_turn_count
             flow_violation = _shipkia_flow_response_violation(
                 agent_text=agent_text,
                 customer_text=latest_customer_text,
@@ -4647,6 +4681,8 @@ async def entrypoint(ctx: JobContext) -> None:
                         return
                     correction_active = True
                     try:
+                        if runtime.user_turn_count != response_turn_epoch:
+                            return
                         await session.interrupt()
                         await emit_runtime_event(
                             "unverified_pricing_output_blocked",
@@ -4658,6 +4694,8 @@ async def entrypoint(ctx: JobContext) -> None:
                             unverified_zones=unverified_zones,
                             agent_text=agent_text[:500],
                         )
+                        if runtime.user_turn_count != response_turn_epoch:
+                            return
                         pending = conversation_state.pending_field()
                         pending_label = _RATE_FIELD_LABELS.get(
                             pending, pending.replace("_", " ")
@@ -4743,6 +4781,8 @@ async def entrypoint(ctx: JobContext) -> None:
                         return
                     correction_active = True
                     try:
+                        if runtime.user_turn_count != response_turn_epoch:
+                            return
                         await session.interrupt()
                         await emit_runtime_event(
                             "shipkia_flow_output_blocked",
@@ -4750,6 +4790,8 @@ async def entrypoint(ctx: JobContext) -> None:
                             violation=flow_violation,
                             agent_text=agent_text[:500],
                         )
+                        if runtime.user_turn_count != response_turn_epoch:
+                            return
                         if (
                             flow_violation.startswith("repeated_pending:")
                             and _NOISE_ONLY_GREETING_RE.fullmatch(
@@ -4995,6 +5037,7 @@ async def entrypoint(ctx: JobContext) -> None:
         runtime.record_error(getattr(event, "error", event))
 
     async def recover_from_silence(customer_text: str, reason: str) -> None:
+        recovery_turn_epoch = runtime.user_turn_count
         memory = runtime.same_call_context(
             current_user_text=customer_text,
             max_turns=_SAME_CALL_MEMORY_MAX_TURNS,
@@ -5012,6 +5055,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 "for the short delay, answer their latest request in one short natural turn, and "
                 "continue the ShipKia conversation."
             )
+        if runtime.user_turn_count != recovery_turn_epoch:
+            return
         reply = session.generate_reply(
             instructions=(
                 f"{recovery_direction}\n"

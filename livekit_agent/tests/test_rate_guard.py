@@ -1913,6 +1913,21 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_deterministic_intent_is_visible_before_native_draft_runs(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        processor = GuardedTurnProcessor(
+            conversation_state=state,
+            answer_guard=_AnswerGuard(delay=0.02),
+            runtime=_Runtime(),
+        )
+
+        processor.schedule("Theek hai, rates bata do", turn_id="rates-intent")
+
+        self.assertEqual(state.value("assistance_intent"), "Rates")
+        self.assertEqual(state.pending_field(), "business_name")
+        await processor.wait_latest()
+
     async def test_rate_tool_waits_for_latest_native_turn_guard(self):
         state = GatedConversationState()
         processor = GuardedTurnProcessor(

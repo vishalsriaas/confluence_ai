@@ -152,6 +152,11 @@ class VoiceSessionRuntime:
         self._spawn(self._emit_checkpoint("transcript_checkpoint"))
         return True
 
+    @property
+    def user_turn_count(self) -> int:
+        """Monotonic customer-turn epoch used to reject stale async replies."""
+        return self._last_user_turn
+
     def mark_agent_speaking(self) -> None:
         self._record_response_latency()
 

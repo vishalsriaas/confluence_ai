@@ -1202,6 +1202,80 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("current_shipping_rate"), 35.0)
         self.assertEqual(state.pending_field(), "current_problem")
 
+    def test_v5_stray_decimal_does_not_become_rate_before_rate_question(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        transitions = state.apply_deterministic_answers(
+            "1.7",
+            turn_id="asr-noise",
+            previous_agent_text=(
+                "ShipKia multiple courier partners ke saath shipments manage karta hai. "
+                "Kya aap rates ke baare mein jaanna chahenge?"
+            ),
+        )
+        semantic = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [decision("current_shipping_rate", 1.7, "1.7")],
+            },
+            customer_text="1.7",
+            turn_id="asr-noise",
+            pending_field_at_turn_start="assistance_intent",
+        )
+
+        self.assertEqual(transitions, [])
+        self.assertEqual(semantic, [])
+        self.assertFalse(state.is_handled("current_shipping_rate"))
+        self.assertEqual(state.pending_field(), "assistance_intent")
+
+    def test_same_turn_classifier_does_not_rewrite_deterministic_problem(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_shipping_rate": 35,
+            }
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates batao", turn_id="intent")
+        customer_text = "Koi problem nahi, bas services mein dikkat hai."
+
+        deterministic = state.apply_deterministic_answers(
+            customer_text,
+            turn_id="problem-turn",
+            previous_agent_text="Shiprocket ke saath kya problem ya dikkat aa rahi hai?",
+        )
+        semantic = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [
+                    decision("current_problem", "Services mein dikkat", "services mein dikkat")
+                ],
+            },
+            customer_text=customer_text,
+            turn_id="problem-turn",
+            pending_field_at_turn_start="current_problem",
+        )
+
+        self.assertEqual(len(deterministic), 1)
+        self.assertEqual(semantic, [])
+        self.assertEqual(state.value("current_problem"), customer_text.rstrip("."))
+        self.assertEqual(
+            len(
+                [
+                    item
+                    for item in state.transitions
+                    if item.get("turn_id") == "problem-turn"
+                    and item.get("field") == "current_problem"
+                ]
+            ),
+            1,
+        )
+
     def test_multiple_explicit_same_turn_problems_are_preserved(self):
         state = GatedConversationState()
         apply(
