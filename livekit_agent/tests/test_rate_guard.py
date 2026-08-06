@@ -337,6 +337,26 @@ class _RouteFakeClientSession(_FakeClientSession):
 
 
 class TestRateGuard(unittest.IsolatedAsyncioTestCase):
+    def test_call_1693_stale_state_does_not_reject_contextual_move_forward(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_question_due = True
+
+        allowed = _shipkia_flow_response_violation(
+            agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+            customer_text="a nahin nahin.",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+        unrelated = _shipkia_flow_response_violation(
+            agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+            customer_text="a nahin nahin.",
+            previous_agent_text="Aapka current shipping rate kya hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(allowed, "")
+        self.assertEqual(unrelated, "premature_move_forward")
+
     def test_noise_resistant_gemini_vad_profile_is_configurable(self):
         with patch.dict(
             os.environ,

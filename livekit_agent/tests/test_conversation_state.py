@@ -41,6 +41,37 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1693_filler_repeated_no_advances_once_to_move_forward(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_question_due = True
+
+        transitions = state.apply_deterministic_answers(
+            "a nahin nahin.",
+            turn_id="anything-else-no",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(transitions[0]["event"], "anything_else_decided")
+        self.assertEqual(state.anything_else_decision, "No")
+        self.assertFalse(state.anything_else_question_due)
+        self.assertTrue(state.move_forward_question_due)
+        self.assertIn("ShipKia ke saath aage", state.guidance())
+
+    def test_filler_repeated_no_is_not_a_close_without_checkpoint_context(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_question_due = True
+
+        transitions = state.apply_deterministic_answers(
+            "a nahin nahin.",
+            turn_id="unrelated-no",
+            previous_agent_text="Aapka current shipping rate kya hai?",
+        )
+
+        self.assertEqual(transitions, [])
+        self.assertTrue(state.anything_else_question_due)
+        self.assertFalse(state.move_forward_question_due)
+
     def test_call_1688_monthly_volume_cannot_overwrite_current_rate(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("haan", turn_id="consent")

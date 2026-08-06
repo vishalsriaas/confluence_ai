@@ -35,6 +35,7 @@ try:
         PINCODE_FIELDS,
         STATE_MANAGED_RATE_FIELDS,
         SemanticAnswerGuard,
+        is_anything_else_no_answer,
     )
     from session_runtime import VoiceSessionRuntime
 except ModuleNotFoundError:  # Package imports used by the unit-test runner.
@@ -44,6 +45,7 @@ except ModuleNotFoundError:  # Package imports used by the unit-test runner.
         PINCODE_FIELDS,
         STATE_MANAGED_RATE_FIELDS,
         SemanticAnswerGuard,
+        is_anything_else_no_answer,
     )
     from .session_runtime import VoiceSessionRuntime
 
@@ -941,9 +943,16 @@ def _shipkia_flow_response_violation(
 
     if not _AGENT_MOVE_FORWARD_RE.search(agent_clean):
         return ""
+    contextual_anything_else_no = bool(
+        _AGENT_ANYTHING_ELSE_RE.search(previous_clean)
+        and is_anything_else_no_answer(customer_clean)
+    )
     if (
         conversation_state.monthly_quantity_due
-        or not conversation_state.move_forward_question_due
+        or (
+            not conversation_state.move_forward_question_due
+            and not contextual_anything_else_no
+        )
         or conversation_state.onboarding_link_due
         or conversation_state.better_plan_close_due
     ):

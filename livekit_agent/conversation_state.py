@@ -558,6 +558,29 @@ def _contains_phrase(text: object, phrases: set[str]) -> bool:
     )
 
 
+def normalize_closing_answer(value: object) -> str:
+    """Normalize harmless ASR fillers/repetition only for closing yes/no gates."""
+    answer = " ".join(normalize_text(value).replace(",", " ").split())
+    answer = answer.strip(" .!?\u0964")
+    answer = re.sub(
+        r"^(?:(?:a+|ah+|uh+|um+|hmm+|er+)\s+)+",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    if re.fullmatch(
+        r"(?:(?:no|nahi|nahin|nhi|\u0928\u0939\u0940\u0902)\s*){1,4}",
+        answer,
+        re.IGNORECASE,
+    ):
+        return "nahin"
+    return answer
+
+
+def is_anything_else_no_answer(value: object) -> bool:
+    return bool(_ANYTHING_ELSE_NO_PATTERN.fullmatch(normalize_closing_answer(value)))
+
+
 def _spoken_business_type(text: object) -> tuple[str, str] | None:
     """Recognize short business-type acronyms despite common realtime ASR spacing."""
     clean = normalize_text(text).rstrip(".!?")
@@ -1678,13 +1701,13 @@ class GatedConversationState:
             self._append_transition(transition)
             applied.append(transition)
 
-        move_forward_answer = " ".join(clean.replace(",", " ").split())
+        move_forward_answer = normalize_closing_answer(clean)
         anything_else_context = bool(
             self.v5_company_pair_flow
             and self.anything_else_question_due
             and _ANYTHING_ELSE_QUESTION_PATTERN.search(previous_clean)
         )
-        if anything_else_context and _ANYTHING_ELSE_NO_PATTERN.fullmatch(move_forward_answer):
+        if anything_else_context and is_anything_else_no_answer(move_forward_answer):
             self.anything_else_question_due = False
             self.anything_else_detail_due = False
             self.anything_else_decision = "No"
