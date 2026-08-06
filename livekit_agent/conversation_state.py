@@ -256,8 +256,8 @@ _BROAD_USP_QUERY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_SERVICES_QUERY_PATTERN = re.compile(
-    r"\b(?:what|which|kaun|kon|kya|aur)\b.{0,45}\bservices?\b|"
-    r"\bservices?\b.{0,45}\b(?:provide|provided|offer|offered|available|dete|karte)\b|"
+    r"\b(?:what|which|kaun|kon|kya|aur|or)\b.{0,45}\bservices?\b|"
+    r"\bservices?\b.{0,45}\b(?:provide|provided|offer|offered|available|dete|karte|kya|hai)\b|"
     r"\u0938\u0930\u094d\u0935\u093f\u0938(?:\u0947\u091c)?|"
     r"\u0938\u0947\u0935\u093e(?:\u090f\u0902|\u092f\u0947\u0902)?|\u0938\u0941\u0935\u093f\u0927\u093e",
     re.IGNORECASE,
@@ -884,6 +884,7 @@ class GatedConversationState:
         self.ekart_rate_choice_due = False
         self.last_monthly_quantity_captured = False
         self.monthly_quantity_due = False
+        self.qualification_bridge_presented = False
         self.last_rate_repeat_requested = False
         self.provider_clarification_due = False
         self.last_customer_dissatisfied = False
@@ -1796,8 +1797,23 @@ class GatedConversationState:
             re.IGNORECASE,
         )
         quantity_text = ""
+        quantity_alias_value: int | None = None
         if (quantity_context or self.monthly_quantity_due) and quantity_match:
             quantity_text = quantity_match.group(1)
+        elif (
+            self.monthly_quantity_due
+            and quantity_context
+            and re.fullmatch(
+                r"(?:pytant|pie\s*tant|five\s*tant|five\s*thousand)\s*[.!?]*",
+                clean,
+                re.IGNORECASE,
+            )
+        ):
+            # In recent Hindi-English calls Gemini STT rendered the isolated
+            # answer "five thousand" as "Pytant". Only accept this narrow
+            # alias while the worker is explicitly waiting for monthly volume.
+            quantity_text = str(customer_text or "").strip()
+            quantity_alias_value = 5000
         elif quantity_context:
             # Realtime ASR often renders an approximate range as a full
             # sentence (for example, "200 se 250 shipments month ki"). The
@@ -1816,7 +1832,7 @@ class GatedConversationState:
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
         if quantity_text:
-            quantity_value = int(quantity_text.replace(",", ""))
+            quantity_value = quantity_alias_value or int(quantity_text.replace(",", ""))
             if quantity_value > 0:
                 transition = self.apply_decision(
                     field="monthly_shipments",
@@ -3113,6 +3129,26 @@ class GatedConversationState:
             return
         self._presented_starting_rates.add(key)
 
+    def qualification_bridge_due(self) -> bool:
+        """Whether the first rates-discovery question needs a polite preface."""
+        return bool(
+            self.v5_company_pair_flow
+            and self.value("assistance_intent") == "Rates"
+            and self.pending_field() == "business_name"
+            and not self.qualification_bridge_presented
+        )
+
+    def mark_qualification_bridge_presented(self) -> None:
+        if not self.qualification_bridge_due():
+            return
+        self.qualification_bridge_presented = True
+        self._append_transition(
+            {
+                "event": "qualification_bridge_presented",
+                "created_at": time.time(),
+            }
+        )
+
     def mark_pricing_verified(self, tool_name: str, *, payment_basis: str = "") -> None:
         self.verified_pricing_path = self.requested_rate_type or self.pricing_mode()
         self.verified_pricing_tool = str(tool_name or "")
@@ -3430,7 +3466,12 @@ class GatedConversationState:
                 "assistance_intent": (
                     "Ask only whether they want to check shipping rates or need onboarding help."
                 ),
-                "business_name": "Ask only for their business or brand name.",
+                "business_name": (
+                    "Say exactly: 'Rates batane se pehle main aapse kuch zaroori details jaan "
+                    "lena chahunga. Aapke business ya brand ka naam kya hai?'"
+                    if self.qualification_bridge_due()
+                    else "Ask only for their business or brand name."
+                ),
                 "business_type": "Ask only whether their business is B2C or D2C.",
                 "current_shipping_arrangement": (
                     "Ask only what courier or shipping arrangement they currently use."
@@ -3633,6 +3674,8 @@ class GatedConversationState:
             "ekart_rate_choice_due": self.ekart_rate_choice_due,
             "monthly_shipments_handled": self.is_handled("monthly_shipments"),
             "monthly_quantity_due": self.monthly_quantity_due,
+            "qualification_bridge_presented": self.qualification_bridge_presented,
+            "qualification_bridge_due": self.qualification_bridge_due(),
             "last_rate_repeat_requested": self.last_rate_repeat_requested,
             "primary_rate_amount": self.primary_rate_amount,
             "provider_clarification_due": self.provider_clarification_due,

@@ -41,6 +41,51 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1684_pytant_captures_five_thousand_once(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+        state.monthly_quantity_due = True
+
+        state.apply_deterministic_answers(
+            "Pytant",
+            turn_id="monthly-volume",
+            previous_agent_text="Aapki monthly shipments kitni hoti hain?",
+        )
+
+        self.assertEqual(state.value("monthly_shipments"), 5000)
+        self.assertTrue(state.is_handled("monthly_shipments"))
+        self.assertFalse(state.monthly_quantity_due)
+        self.assertTrue(state.anything_else_question_due)
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+        state.mark_pricing_verified("get_shipkia_flat_zonal_rates")
+        self.assertFalse(state.monthly_quantity_due)
+        self.assertTrue(state.anything_else_question_due)
+
+    def test_call_1684_or_services_query_requests_all_verified_usps(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        state.apply_deterministic_answers("Or services kya kya hai?", turn_id="services")
+
+        self.assertTrue(state.last_usp_query)
+        self.assertTrue(state.last_detailed_usp_query)
+        self.assertFalse(state.last_provider_options_query)
+        guidance = state.guidance().lower()
+        for expected in ("multiple courier", "account manager", "whatsapp", "ivr"):
+            self.assertIn(expected, guidance)
+
+    def test_rates_intent_adds_one_time_qualification_bridge(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+
+        self.assertEqual(state.pending_field(), "business_name")
+        self.assertTrue(state.qualification_bridge_due())
+        self.assertIn("Rates batane se pehle", state.guidance())
+        state.mark_qualification_bridge_presented()
+        self.assertFalse(state.qualification_bridge_due())
+        self.assertNotIn("Rates batane se pehle", state.guidance())
+
     def test_call_1660_options_query_lists_verified_rates_before_close(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"business_name": "Harsh Enterprises", "business_type": "D2C"})
@@ -1060,7 +1105,7 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.requested_rate_type, "Normal")
         self.assertEqual(state.pending_field(), "business_name")
         self.assertEqual(state.pricing_mode(), "pending")
-        self.assertIn("business or brand name", state.guidance())
+        self.assertIn("business ya brand ka naam", state.guidance())
         self.assertEqual(
             state.next_route_for_lookup(),
             {"pickup_location": "Bengaluru", "delivery_location": "Delhi"},

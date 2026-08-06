@@ -334,6 +334,60 @@ class _RouteFakeClientSession(_FakeClientSession):
 
 
 class TestRateGuard(unittest.IsolatedAsyncioTestCase):
+    def test_v5_rate_discovery_business_name_requires_natural_bridge_once(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+
+        omitted = _shipkia_flow_response_violation(
+            agent_text="Aapke business ya brand ka naam kya hai?",
+            customer_text="rates janna chahta hoon",
+            previous_agent_text="Rates chahiye ya onboarding help?",
+            conversation_state=state,
+        )
+        allowed = _shipkia_flow_response_violation(
+            agent_text=(
+                "Rates batane se pehle main aapse kuch zaroori details jaan lena chahunga. "
+                "Aapke business ya brand ka naam kya hai?"
+            ),
+            customer_text="rates janna chahta hoon",
+            previous_agent_text="Rates chahiye ya onboarding help?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(omitted, "qualification_bridge_omitted")
+        self.assertEqual(allowed, "")
+        state.mark_qualification_bridge_presented()
+        self.assertEqual(
+            _shipkia_flow_response_violation(
+                agent_text="Aapke business ya brand ka naam kya hai?",
+                customer_text="dobara bataiye",
+                previous_agent_text="",
+                conversation_state=state,
+            ),
+            "",
+        )
+
+    def test_v5_captured_pytant_volume_cannot_be_reasked(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+        state.monthly_quantity_due = True
+        state.apply_deterministic_answers(
+            "Pytant",
+            turn_id="monthly-volume",
+            previous_agent_text="Aapki monthly shipments kitni hoti hain?",
+        )
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Aapki monthly shipments kitni hoti hain?",
+            customer_text="Pytant",
+            previous_agent_text="Aapki monthly shipments kitni hoti hain?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "reasked_handled:monthly_shipments")
+
     def test_v5_flow_guard_blocks_ignored_benefits_query(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 

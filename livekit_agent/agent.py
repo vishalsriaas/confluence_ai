@@ -590,6 +590,11 @@ _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"anything\s+else)",
     re.IGNORECASE,
 )
+_QUALIFICATION_BRIDGE_RE = re.compile(
+    r"\brates?\s+batane\s+se\s+pehle\b.{0,90}"
+    r"\b(?:details?|cheezein|cheezen|baatein)\b.{0,70}\b(?:jaan|pooch)",
+    re.IGNORECASE,
+)
 _CUSTOMER_CORRECTION_RE = re.compile(
     r"\b(?:change|changed|correct|correction|actually|instead|update|galat|sahi|theek\s+karo)\b|"
     r"\u092c\u0926\u0932|\u0917\u0932\u0924|\u0938\u0939\u0940\s+\u0915\u0930",
@@ -782,6 +787,13 @@ def _shipkia_flow_response_violation(
 
     if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
         return "spoken_onboarding_url"
+
+    if (
+        conversation_state.qualification_bridge_due()
+        and "business_name" in _assistant_question_fields(agent_text)
+        and not _QUALIFICATION_BRIDGE_RE.search(agent_clean)
+    ):
+        return "qualification_bridge_omitted"
 
     if (
         conversation_state.better_plan_close_presented
@@ -4645,6 +4657,12 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "complete kar lijiye.' Otherwise follow only the current "
                                 "authoritative action."
                             )
+                        elif flow_violation == "qualification_bridge_omitted":
+                            correction_direction = (
+                                "Say exactly: 'Rates batane se pehle main aapse kuch zaroori "
+                                "details jaan lena chahunga. Aapke business ya brand ka naam kya "
+                                "hai?' Ask no other question in this turn."
+                            )
                         elif flow_violation.startswith("reasked_handled:"):
                             repeated_field = flow_violation.split(":", 1)[1]
                             repeated_label = _RATE_FIELD_LABELS.get(
@@ -4740,6 +4758,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
                 task = asyncio.create_task(correct_flow_output())
                 task.add_done_callback(VoiceSessionRuntime._log_task_exception)
+            if (
+                conversation_state.qualification_bridge_due()
+                and _QUALIFICATION_BRIDGE_RE.search(normalized_agent_text)
+            ):
+                conversation_state.mark_qualification_bridge_presented()
             if (
                 "auth dot shipkia dot com slash signup" in normalized_agent_text
                 or "auth.shipkia.com/signup" in normalized_agent_text
