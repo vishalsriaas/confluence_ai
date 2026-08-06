@@ -175,6 +175,28 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("E-Kart Surface ke Flat rates chahiye", prompt)
         self.assertIn('or "thank you" by\n  itself is not', prompt)
 
+    def test_voice_v5_prompt_matches_authoritative_current_flow_contract(self):
+        prompt = " ".join(get_shipkia_voice_prompt("shipkia-voice-v5").split())
+
+        self.assertIn("worker-updated private current action is the sole authority", prompt)
+        self.assertIn(
+            "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "
+            "check karne ya onboarding mein help kar doon?",
+            prompt,
+        )
+        self.assertNotIn("ask the rates/onboarding choice again", prompt)
+        self.assertIn("choose two or three relevant USPs", prompt)
+        self.assertIn("all four verified USPs", prompt)
+        self.assertIn(
+            "Theek hai, main aapko WhatsApp par onboarding ka link bhej raha hoon",
+            prompt,
+        )
+        self.assertNotIn("auth dot shipkia dot com slash signup", prompt)
+        self.assertIn(
+            'remember it, then ask exactly: "Kya aap kuch aur jaanna chahenge?"',
+            prompt,
+        )
+
     def test_shipkia_production_metadata_defaults_to_current_v5_prompt(self):
         class FakeTask:
             assigned_agent = "agent-445"
