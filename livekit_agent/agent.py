@@ -61,6 +61,16 @@ MCP_GATEWAY = os.getenv("MCP_SERVER_URL", "").strip()
 CONFLUENCE_CALLBACK = os.getenv("CONFLUENCE_LIVEKIT_WEBHOOK_URL", "").strip()
 CONSOLE_MCP_SCOPE = "livekit-console-sandbox"
 
+_SHIPKIA_COURIER_PARTNERS = (
+    "Amazon",
+    "Bluedart",
+    "Delhivery",
+    "E-Kart",
+    "Shadowfax",
+    "Shree Maruti",
+    "Xpressbees",
+)
+
 ALLOWED_TOOLS = {
     "lookup_shipkia_crm_lead",
     "create_or_update_shipkia_lead",
@@ -1097,6 +1107,65 @@ def _detailed_services_reply_instruction(response_language: str) -> str:
         "This is a controlled detailed-services response in an active call. Say exactly once and "
         f"say nothing else: \"{response}\" Never greet, split it into another response, call a "
         "tool, or repeat the closing question."
+    )
+
+
+def _provider_options_reply_instruction(
+    response_language: str,
+    conversation_state: GatedConversationState,
+) -> str:
+    names = ", ".join(
+        conversation_state.available_courier_partners
+        or _SHIPKIA_COURIER_PARTNERS
+    )
+    pending = conversation_state.pending_field()
+    if response_language == "English":
+        answer = (
+            f"ShipKia has courier partners including {names}. Applicable services and rates are "
+            "verified from the relevant shipment details."
+        )
+        continuation = {
+            "conversation_consent": " Is this a convenient time for a two-minute conversation?",
+            "assistance_intent": " Would you like to check shipping rates or get onboarding help?",
+            "business_name": (
+                " Before sharing rates, I would like to know a few necessary details. What is "
+                "your business or brand name?"
+            ),
+            "business_type": " Is your business B2C or D2C?",
+            "current_shipping_arrangement": (
+                " Which courier or shipping arrangement do you currently use?"
+            ),
+            "current_provider_name": " Which courier or aggregator do you currently use?",
+            "current_shipping_rate": " What is your current comparable shipping rate?",
+            "current_problem": " What is your main current shipping challenge?",
+        }.get(pending, " Would you like to know anything else?")
+    else:
+        answer = (
+            f"ShipKia par {names} jaise courier partners available hain. Applicable services aur "
+            "rates relevant shipment details ke basis par verify hote hain."
+        )
+        continuation = {
+            "conversation_consent": " Kya abhi hum do minute baat kar sakte hain?",
+            "assistance_intent": (
+                " Aap shipping rates check karna chahenge ya onboarding mein help chahiye?"
+            ),
+            "business_name": (
+                " Rates batane se pehle main aapse kuch zaroori details jaan lena chahunga. "
+                "Aapke business ya brand ka naam kya hai?"
+            ),
+            "business_type": " Aapka business B2C hai ya D2C?",
+            "current_shipping_arrangement": (
+                " Aap abhi kaunsa courier ya shipping arrangement use karte hain?"
+            ),
+            "current_provider_name": " Aap abhi kaunsa courier ya aggregator use karte hain?",
+            "current_shipping_rate": " Aapka current comparable shipping rate kya hai?",
+            "current_problem": " Aapki main current shipping problem kya hai?",
+        }.get(pending, " Kya aap kuch aur jaanna chahenge?")
+    response = answer + continuation
+    return (
+        "This is a controlled courier-partner response in an active call. Say exactly once and "
+        f"say nothing else: \"{response}\" Never greet, split it into another response, quote a "
+        "rate, call a tool, repeat any information, or ask any other question."
     )
 
 
@@ -4632,28 +4701,34 @@ async def entrypoint(ctx: JobContext) -> None:
     close_reason = "maximum_call_duration"
     correction_active = False
     ignored_opening_noise: dict[str, float] = {}
-    detailed_reply_scheduled_epochs: set[int] = set()
-    controlled_detailed_reply_epochs: set[int] = set()
+    information_reply_scheduled_epochs: set[int] = set()
+    controlled_information_reply_epochs: set[int] = set()
     flow_correction_epochs: set[int] = set()
 
-    def schedule_detailed_services_reply(
+    def schedule_controlled_information_reply(
         state_task: asyncio.Task[None] | None,
         turn_epoch: int,
     ) -> None:
         if (
             state_task is None
-            or turn_epoch in detailed_reply_scheduled_epochs
+            or turn_epoch in information_reply_scheduled_epochs
         ):
             return
-        detailed_reply_scheduled_epochs.add(turn_epoch)
-        detailed_at_schedule = conversation_state.last_detailed_usp_query
-        if detailed_at_schedule:
+        information_reply_scheduled_epochs.add(turn_epoch)
+        controlled_at_schedule = bool(
+            conversation_state.last_detailed_usp_query
+            or (
+                conversation_state.last_provider_options_query
+                and not conversation_state.last_provider_rates_query
+            )
+        )
+        if controlled_at_schedule:
             # Mark it before yielding so an incomplete native draft cannot
             # start a second, post-generation USP correction for this turn.
-            controlled_detailed_reply_epochs.add(turn_epoch)
+            controlled_information_reply_epochs.add(turn_epoch)
 
         async def reply_once() -> None:
-            if detailed_at_schedule:
+            if controlled_at_schedule:
                 try:
                     await session.interrupt()
                 except RuntimeError:
@@ -4664,13 +4739,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 return
             except Exception:
                 return
-            if (
-                runtime.user_turn_count != turn_epoch
-                or not conversation_state.last_detailed_usp_query
+            detailed_services = conversation_state.last_detailed_usp_query
+            provider_options = bool(
+                conversation_state.last_provider_options_query
+                and not conversation_state.last_provider_rates_query
+            )
+            if runtime.user_turn_count != turn_epoch or not (
+                detailed_services or provider_options
             ):
                 return
-            controlled_detailed_reply_epochs.add(turn_epoch)
-            if not detailed_at_schedule:
+            controlled_information_reply_epochs.add(turn_epoch)
+            if not controlled_at_schedule:
                 # A preceding serialized state update delayed classification.
                 # Interrupt as soon as the detailed intent becomes authoritative.
                 try:
@@ -4679,8 +4758,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     pass
             await assistant.sync_pricing_tools()
             reply = session.generate_reply(
-                instructions=_detailed_services_reply_instruction(
-                    assistant._response_language,
+                instructions=(
+                    _detailed_services_reply_instruction(assistant._response_language)
+                    if detailed_services
+                    else _provider_options_reply_instruction(
+                        assistant._response_language,
+                        conversation_state,
+                    )
                 )
             )
             if hasattr(reply, "wait_for_playout"):
@@ -4744,7 +4828,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     assistant._response_language,
                 )
                 state_task = turn_processor.schedule(transcript, turn_id=turn_id)
-                schedule_detailed_services_reply(
+                schedule_controlled_information_reply(
                     state_task,
                     runtime.user_turn_count,
                 )
@@ -4777,7 +4861,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # that guarantees the authoritative state still sees every turn.
             if is_new_turn:
                 state_task = turn_processor.schedule(customer_text, turn_id=turn_id)
-                schedule_detailed_services_reply(
+                schedule_controlled_information_reply(
                     state_task,
                     runtime.user_turn_count,
                 )
@@ -4949,7 +5033,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 flow_violation
                 and not correction_active
                 and not (unverified_amounts or unverified_pincodes or unverified_zones)
-                and response_turn_epoch not in controlled_detailed_reply_epochs
+                and response_turn_epoch not in controlled_information_reply_epochs
                 and response_turn_epoch not in flow_correction_epochs
             ):
                 flow_correction_epochs.add(response_turn_epoch)
@@ -5035,7 +5119,9 @@ async def entrypoint(ctx: JobContext) -> None:
                             correction_direction = (
                                 "The one information checkpoint is not authorized at this stage. "
                                 "Do not ask whether the customer wants to know anything else. "
-                                "Continue only with this current authoritative action: "
+                                "The factual side-query answer in the interrupted draft was already "
+                                "delivered. Never repeat, paraphrase, summarize, or acknowledge that "
+                                "answer. Speak only the current authoritative action: "
                                 + conversation_state.guidance()
                             )
                         elif flow_violation == "restarted_opening":

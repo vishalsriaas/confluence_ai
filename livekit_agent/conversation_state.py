@@ -616,6 +616,15 @@ def is_anything_else_no_answer(value: object) -> bool:
 def _spoken_business_type(text: object) -> tuple[str, str] | None:
     """Recognize short business-type acronyms despite common realtime ASR spacing."""
     clean = normalize_text(text).rstrip(".!?")
+    # Gemini has repeatedly transcribed a clearly spoken "D2C" as
+    # "due to x". Keep this narrowly scoped to a full short answer so the
+    # observed phonetic variant cannot leave business_type pending.
+    if re.fullmatch(
+        r"(?:(?:sorry|actually|correction)\s+)?(?:d|day|dee|due)\s*"
+        r"(?:2|to)\s*(?:c|see|sea|x|ex)",
+        clean,
+    ):
+        return "D2C", clean
     match = re.fullmatch(
         r"(?:(?:sorry|actually|correction)\s+)?"
         r"(?:my|mera|mere)?\s*(?:business(?:\s+type)?\s*(?:is|hai)?\s*)?"

@@ -17,6 +17,7 @@ from livekit_agent.agent import (
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
+    _provider_options_reply_instruction,
     _rate_gate_response,
     _response_language_for_turn,
     _assistant_pincode_claims,
@@ -69,6 +70,28 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertEqual(instruction.count("Aap kuch aur jaanna chahenge"), 1)
         self.assertIn("Say exactly once", instruction)
         self.assertIn("repeat the closing question", instruction)
+
+    def test_controlled_provider_reply_lists_names_once_then_only_pending_question(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates", turn_id="intent")
+
+        instruction = _provider_options_reply_instruction("Hinglish", state)
+
+        for provider in (
+            "Amazon",
+            "Bluedart",
+            "Delhivery",
+            "E-Kart",
+            "Shadowfax",
+            "Shree Maruti",
+            "Xpressbees",
+        ):
+            with self.subTest(provider=provider):
+                self.assertEqual(instruction.count(provider), 1)
+        self.assertEqual(instruction.count("business ya brand ka naam kya hai"), 1)
+        self.assertNotIn("Aap kuch aur jaanna chahenge", instruction)
+        self.assertIn("repeat any information", instruction)
 
     def test_opening_ignores_short_non_actionable_asr_noise(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

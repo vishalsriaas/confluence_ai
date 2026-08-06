@@ -2219,7 +2219,12 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("end the conversation", state.guidance())
 
     def test_realtime_asr_business_type_variants_do_not_leave_a_pending_gap(self):
-        for spoken, expected in (("G2C", "G2C"), ("day 2c", "D2C"), ("dee to c", "D2C")):
+        for spoken, expected in (
+            ("G2C", "G2C"),
+            ("day 2c", "D2C"),
+            ("dee to c", "D2C"),
+            ("due to x", "D2C"),
+        ):
             with self.subTest(spoken=spoken):
                 state = GatedConversationState()
                 apply(
