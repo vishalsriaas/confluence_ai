@@ -996,6 +996,32 @@ def _response_language_for_turn(text: object, current_language: str) -> str:
     return current_language
 
 
+def _gemini_start_sensitivity() -> genai_types.StartSensitivity:
+    """Return the configured speech-start profile, defaulting fail-safe for noise."""
+    configured = os.getenv("GEMINI_VAD_START_SENSITIVITY", "LOW").strip().upper()
+    if configured == "HIGH":
+        return genai_types.StartSensitivity.START_SENSITIVITY_HIGH
+    if configured != "LOW":
+        logger.warning(
+            "Invalid GEMINI_VAD_START_SENSITIVITY=%s; using LOW",
+            configured,
+        )
+    return genai_types.StartSensitivity.START_SENSITIVITY_LOW
+
+
+def _gemini_end_sensitivity() -> genai_types.EndSensitivity:
+    """Keep normal endpoint responsiveness unless explicitly tuned."""
+    configured = os.getenv("GEMINI_VAD_END_SENSITIVITY", "HIGH").strip().upper()
+    if configured == "LOW":
+        return genai_types.EndSensitivity.END_SENSITIVITY_LOW
+    if configured != "HIGH":
+        logger.warning(
+            "Invalid GEMINI_VAD_END_SENSITIVITY=%s; using HIGH",
+            configured,
+        )
+    return genai_types.EndSensitivity.END_SENSITIVITY_HIGH
+
+
 def _normal_rates_declined(text: object, previous_agent_text: object = "") -> bool:
     clean = _normalized_text(text)
     if not clean:
@@ -4239,9 +4265,9 @@ class ShipKiaAssistant(Agent):
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.20")),
+        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.35")),
         min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_DURATION", "0.40")),
-        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.50")),
+        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.60")),
     )
 
 
@@ -4365,10 +4391,10 @@ async def entrypoint(ctx: JobContext) -> None:
             # Gemini Live does not support commit_audio, so its server-side AAD
             # must remain enabled for microphone turns to be transcribed.
             disabled=False,
-            start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
-            end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
+            start_of_speech_sensitivity=_gemini_start_sensitivity(),
+            end_of_speech_sensitivity=_gemini_end_sensitivity(),
             prefix_padding_ms=int(os.getenv("GEMINI_VAD_PREFIX_PADDING_MS", "300")),
-            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "500")),
+            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "700")),
         )
     )
     model = google.realtime.RealtimeModel(
@@ -4397,7 +4423,7 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption={
                 "enabled": True,
                 "min_duration": float(
-                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.50")
+                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.90")
                 ),
                 "resume_false_interruption": True,
                 "false_interruption_timeout": float(

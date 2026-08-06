@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ from livekit_agent.agent import (
     GuardedTurnProcessor,
     ShipKiaAssistant,
     _authoritative_rate_request_arguments,
+    _gemini_end_sensitivity,
+    _gemini_start_sensitivity,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
     _rate_gate_response,
@@ -334,6 +337,38 @@ class _RouteFakeClientSession(_FakeClientSession):
 
 
 class TestRateGuard(unittest.IsolatedAsyncioTestCase):
+    def test_noise_resistant_gemini_vad_profile_is_configurable(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GEMINI_VAD_START_SENSITIVITY": "LOW",
+                "GEMINI_VAD_END_SENSITIVITY": "HIGH",
+            },
+        ):
+            self.assertEqual(_gemini_start_sensitivity().value, "START_SENSITIVITY_LOW")
+            self.assertEqual(_gemini_end_sensitivity().value, "END_SENSITIVITY_HIGH")
+
+        with patch.dict(
+            os.environ,
+            {
+                "GEMINI_VAD_START_SENSITIVITY": "HIGH",
+                "GEMINI_VAD_END_SENSITIVITY": "LOW",
+            },
+        ):
+            self.assertEqual(_gemini_start_sensitivity().value, "START_SENSITIVITY_HIGH")
+            self.assertEqual(_gemini_end_sensitivity().value, "END_SENSITIVITY_LOW")
+
+    def test_invalid_gemini_vad_profile_falls_back_safely(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GEMINI_VAD_START_SENSITIVITY": "invalid",
+                "GEMINI_VAD_END_SENSITIVITY": "invalid",
+            },
+        ):
+            self.assertEqual(_gemini_start_sensitivity().value, "START_SENSITIVITY_LOW")
+            self.assertEqual(_gemini_end_sensitivity().value, "END_SENSITIVITY_HIGH")
+
     def test_v5_blocks_plan_offer_immediately_after_monthly_quantity(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 
