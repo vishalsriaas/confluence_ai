@@ -537,6 +537,10 @@ _AGENT_MOVE_FORWARD_RE = re.compile(
     r"aage\s+(?:badhna|badna|badh).{0,40}ship\s*kia)",
     re.IGNORECASE,
 )
+_AGENT_RESOLUTION_CLOSE_RE = re.compile(
+    r"(?=.*\bbetter\s+plan\b)(?=.*\bteam\b)(?=.*\b(?:discuss|solution)\b)",
+    re.IGNORECASE,
+)
 _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"(?:kya\s+aap\s+(?:kuch\s+aur|aur\s+kuch)\s+(?:jaan-?na|jaanna|janna)|"
     r"anything\s+else)",
@@ -734,6 +738,12 @@ def _shipkia_flow_response_violation(
 
     if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
         return "spoken_onboarding_url"
+
+    if (
+        conversation_state.better_plan_close_presented
+        or conversation_state.unsatisfied_resolution_presented
+    ) and _AGENT_RESOLUTION_CLOSE_RE.search(agent_clean):
+        return "repeated_resolution_close"
 
     reasked_field = _assistant_reasked_handled_field(
         agent_text,
@@ -4478,6 +4488,12 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "Do not repeat the same move-forward sentence. Briefly acknowledge "
                                 "the customer's latest words and ask one short yes-or-no clarification "
                                 "without restarting discovery or repeating any rate."
+                            )
+                        elif flow_violation == "repeated_resolution_close":
+                            correction_direction = (
+                                "The approved resolution close was already spoken. Do not repeat "
+                                "the team, solution, or better-plan promise. Give only one brief "
+                                "polite farewell and end."
                             )
                         else:
                             correction_direction = conversation_state.guidance()

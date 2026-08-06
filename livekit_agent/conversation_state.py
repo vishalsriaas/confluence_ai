@@ -330,6 +330,8 @@ _PROVIDER_OPTIONS_QUERY_PATTERN = re.compile(
     r"\b(?:courier|provider|service|option)s?\b.{0,55}"
     r"\b(?:available|option|rate|rates|kaun|kon|bata)\b|"
     r"\b(?:sabke|sabhi|saare|sare|all)\b.{0,25}\b(?:rates?|prices?)\b|"
+    r"(?:\u0907\u0928\s+|\u0909\u0928\s+)?\u0938\u092c\s*\u0915\u0947\s+\u0930\u0947\u091f(?:\u094d\u0938)?|"
+    r"\u0938\u092d\u0940\s+\u0915\u0947\s+\u0930\u0947\u091f(?:\u094d\u0938)?|"
     r"\b(?:char|chaar|four|panch|paanch|five)\b.{0,25}\brates?\b|"
     r"(?:कौन[\s-]*कौन|और\s+क्या|क्या\s+क्या).{0,55}"
     r"(?:कूरियर|प्रोवाइडर|सर्विस|ऑप्शन)|"
@@ -358,8 +360,11 @@ _UNEXPLAINED_PRICING_PATTERN = re.compile(
     r"\b(?:explain|clarify|nahi|nahin|nhi)\b|"
     r"\b(?:explain|bataye|bataya)\b.{0,25}\b(?:nahi|nahin|nhi)\b|"
     r"(?:\u0906\u092a\u0928\u0947).{0,35}(?:\u092c\u0924\u093e\u092f\u093e|\u090f\u0915\u094d\u0938\u092a\u094d\u0932\u0947\u0928).{0,20}"
-    r"(?:\u0928\u0939\u0940\u0902)|(?:\u0915\u0902\u092a\u0948\u0930\u093f\u091c\u0928|\u092a\u094d\u0930\u093e\u0907\u0938|\u0930\u0947\u091f).{0,30}"
-    r"(?:\u092c\u0924\u093e|\u0926\u094b|\u0938\u092e\u091d\u093e))",
+    r"(?:\u0928\u0939\u0940\u0902)|"
+    r"(?:\u0915\u0902\u092a\u0948\u0930\u093f\u091c\u0928|\u092a\u094d\u0930\u093e\u0907\u0938|\u0930\u0947\u091f).{0,30}"
+    r"(?:\u0928\u0939\u0940\u0902).{0,20}(?:\u092c\u0924\u093e\u092f\u093e|\u0938\u092e\u091d\u093e\u092f\u093e|\u090f\u0915\u094d\u0938\u092a\u094d\u0932\u0947\u0928)|"
+    r"(?:\u092c\u0924\u093e\u092f\u093e|\u0938\u092e\u091d\u093e\u092f\u093e|\u090f\u0915\u094d\u0938\u092a\u094d\u0932\u0947\u0928).{0,20}"
+    r"(?:\u0928\u0939\u0940\u0902))",
     re.IGNORECASE,
 )
 _ANYTHING_ELSE_QUESTION_PATTERN = re.compile(

@@ -210,6 +210,55 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.move_forward_question_due)
         self.assertIn("ShipKia ke saath aage badhna", state.guidance())
 
+    def test_call_1670_hindi_all_rates_is_information_not_dissatisfaction(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 5000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Zone C rate batao", turn_id="rate")
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "amount": 31.15,
+                "starting_rate_options": [
+                    {
+                        "courier": "Shree Maruti",
+                        "service": "Shree Maruti Surface",
+                        "amount": 31.15,
+                        "weight_slab_g": 500,
+                        "movement_type": "Forward",
+                        "gst_inclusive": True,
+                    },
+                    {
+                        "courier": "Amazon",
+                        "service": "Amazon Shipping Standard",
+                        "amount": 36.34,
+                        "weight_slab_g": 500,
+                        "movement_type": "Forward",
+                        "gst_inclusive": True,
+                    },
+                ],
+            }
+        )
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+
+        for index, customer_text in enumerate(
+            ("इन सबके रेट बता दीजिए।", "मैंने पूछा है सबके रेट बता दीजिए।")
+        ):
+            state.apply_deterministic_answers(
+                customer_text,
+                turn_id=f"all-rates-{index}",
+                previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            )
+            self.assertTrue(state.last_provider_options_query)
+            self.assertTrue(state.last_provider_rates_query)
+            self.assertFalse(state.last_customer_dissatisfied)
+            self.assertFalse(state.unsatisfied_resolution_due)
+            self.assertFalse(state.better_plan_close_due)
+            guidance = state.guidance()
+            self.assertIn("list every", guidance.casefold())
+            self.assertIn("Shree Maruti Surface", guidance)
+
     def test_explicit_detailed_shipkia_query_requests_all_verified_facts(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 

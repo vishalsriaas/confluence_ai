@@ -501,6 +501,26 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(violation, "")
 
+    def test_call_1670_guard_blocks_repeated_resolution_close(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.unsatisfied_resolution_presented = True
+        state.better_plan_close_presented = True
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "Main aapki is problem ko apni team ke saath discuss karke aapko solution ya "
+                "better plan deta hoon. Thank you for calling ShipKia."
+            ),
+            customer_text="Maine sabke rates pooche hain.",
+            previous_agent_text=(
+                "Main aapki is problem ko apni team ke saath discuss karke aapko solution ya "
+                "better plan deta hoon. Thank you for calling ShipKia."
+            ),
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "repeated_resolution_close")
+
         provider_state = GatedConversationState(
             v4_strict_flow=True,
             v5_company_pair_flow=True,
