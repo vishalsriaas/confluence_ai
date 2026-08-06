@@ -41,6 +41,25 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1698_delivery_pincode_never_becomes_monthly_shipments(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+        state.monthly_quantity_due = True
+
+        state.apply_deterministic_answers(
+            "166403",
+            turn_id="delivery-pincode",
+            previous_agent_text=(
+                "Pan India shipments ke liye mujhe aapka delivery pincode chahiye. "
+                "Kya aap bata sakte hain?"
+            ),
+        )
+
+        self.assertEqual(state.value("delivery_pincode"), "166403")
+        self.assertFalse(state.is_handled("monthly_shipments"))
+        self.assertTrue(state.monthly_quantity_due)
+
     def test_call_1693_filler_repeated_no_advances_once_to_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.anything_else_question_due = True

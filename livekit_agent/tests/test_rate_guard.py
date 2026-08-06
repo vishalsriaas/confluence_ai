@@ -337,6 +337,22 @@ class _RouteFakeClientSession(_FakeClientSession):
 
 
 class TestRateGuard(unittest.IsolatedAsyncioTestCase):
+    def test_call_1698_noise_greeting_is_detected_as_repeated_pending_question(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+        state.mark_qualification_bridge_presented()
+        question = "Aapke business ya brand ka naam kya hai?"
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=question,
+            customer_text="Hallo.",
+            previous_agent_text=question,
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "repeated_pending:business_name")
+
     def test_call_1693_stale_state_does_not_reject_contextual_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.anything_else_question_due = True

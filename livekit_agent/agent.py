@@ -616,6 +616,7 @@ _CUSTOMER_CORRECTION_RE = re.compile(
     r"\u092c\u0926\u0932|\u0917\u0932\u0924|\u0938\u0939\u0940\s+\u0915\u0930",
     re.IGNORECASE,
 )
+_NOISE_ONLY_GREETING_RE = re.compile(r"^(?:hello|hallo|halo|alo|hi|hey)[.!?]*$", re.IGNORECASE)
 _HANDLED_QUESTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "conversation_consent",
@@ -4434,6 +4435,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 "min_duration": float(
                     os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.90")
                 ),
+                "min_words": int(os.getenv("LIVEKIT_INTERRUPTION_MIN_WORDS", "2")),
                 "resume_false_interruption": True,
                 "false_interruption_timeout": float(
                     os.getenv("LIVEKIT_FALSE_INTERRUPTION_TIMEOUT_SECONDS", "1.0")
@@ -4696,6 +4698,15 @@ async def entrypoint(ctx: JobContext) -> None:
                             violation=flow_violation,
                             agent_text=agent_text[:500],
                         )
+                        if (
+                            flow_violation.startswith("repeated_pending:")
+                            and _NOISE_ONLY_GREETING_RE.fullmatch(
+                                _normalized_text(latest_customer_text)
+                            )
+                        ):
+                            # A one-word mic/echo greeting must not cause the
+                            # same pending question to be spoken yet again.
+                            return
                         if flow_violation == "usp_ignored":
                             usp_scope = (
                                 "Explain all four verified facilities"

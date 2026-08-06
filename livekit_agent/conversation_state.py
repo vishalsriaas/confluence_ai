@@ -1807,8 +1807,10 @@ class GatedConversationState:
             self._append_transition(transition)
             applied.append(transition)
 
+        pincode_answer_context = bool(_pincode_question_target(previous_agent_text))
         quantity_context = bool(
-            re.search(
+            not pincode_answer_context
+            and re.search(
                 r"\b(?:monthly|month|per month|shipment quantity|shipment volume|"
                 r"shipments|orders)\b|मंथली|महीने|शिपमेंट",
                 normalize_text(previous_agent_text),
@@ -1831,10 +1833,15 @@ class GatedConversationState:
         )
         quantity_text = ""
         quantity_alias_value: int | None = None
-        if (quantity_context or self.monthly_quantity_due) and quantity_match:
+        if (
+            not pincode_answer_context
+            and (quantity_context or self.monthly_quantity_due)
+            and quantity_match
+        ):
             quantity_text = quantity_match.group(1)
         elif (
-            self.monthly_quantity_due
+            not pincode_answer_context
+            and self.monthly_quantity_due
             and quantity_context
             and re.fullmatch(
                 r"(?:pytant|pie\s*tant|five\s*tant|five\s*thousand)\s*[.!?]*",
@@ -1854,9 +1861,9 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
-        elif volunteered_quantity:
+        elif not pincode_answer_context and volunteered_quantity:
             quantity_text = volunteered_quantity.group(1) or volunteered_quantity.group(2)
-        elif self.monthly_quantity_due and re.search(
+        elif not pincode_answer_context and self.monthly_quantity_due and re.search(
             r"\b(?:monthly|month|shipments?|orders?)\b|मंथली|महीने|शिपमेंट|ऑर्डर",
             clean,
             re.IGNORECASE,
