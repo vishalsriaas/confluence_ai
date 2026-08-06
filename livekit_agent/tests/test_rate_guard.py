@@ -742,6 +742,91 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["pricing_backend_called"])
         self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
 
+    async def test_call_1677_duplicate_starting_lookup_keeps_provider_options(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "available_courier_partners": ["Shree Maruti", "Amazon"],
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                ],
+            }
+        )
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_starting_rate",
+            "call-1677-starting-duplicate",
+            conversation_state=state,
+        )
+        _StartingFakeClientSession.captured_payload = None
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _StartingFakeClientSession):
+            result = json.loads(await forwarder({"zone": "invented"}))
+
+        self.assertEqual(result["status"], "duplicate_suppressed")
+        self.assertFalse(result["pricing_backend_called"])
+        self.assertIsNone(_StartingFakeClientSession.captured_payload)
+        self.assertEqual(len(state.verified_starting_options), 2)
+
+    def test_call_1677_guard_requires_all_requested_provider_rates(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                ],
+            }
+        )
+        customer_text = "Main sabke rates individually janna chahunga."
+        state.apply_deterministic_answers(customer_text, turn_id="all-provider-rates")
+
+        incomplete = _shipkia_flow_response_violation(
+            agent_text="Shree Maruti ka starting rate Rs 31.15 hai. Kya aap kuch aur jaanna chahenge?",
+            customer_text=customer_text,
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+        complete = _shipkia_flow_response_violation(
+            agent_text=(
+                "Starting rates: Shree Maruti Surface Rs 31.15 aur Amazon Standard "
+                "Rs 36.34. Kya aap kuch aur jaanna chahenge?"
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(incomplete, "provider_rates_incomplete")
+        self.assertEqual(complete, "")
+
+    def test_call_1677_guard_blocks_anything_else_before_verified_rate_and_quantity(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {"status": "success", "response_type": "zone_starting", "zone": "C", "amount": 31.15}
+        )
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="ShipKia mein multiple courier options hain. Kya aap kuch aur jaanna chahenge?",
+            customer_text="Rate zyada lag raha hai.",
+            previous_agent_text="Aapko Shiprocket ke saath kya problem aa rahi hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "verified_rate_omitted")
+
     def test_verified_route_contradiction_is_a_flow_violation(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.mark_route_zone_verified("D", starting_presented=True)

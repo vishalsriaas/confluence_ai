@@ -545,6 +545,7 @@ def _spoken_business_type(text: object) -> tuple[str, str] | None:
     """Recognize short business-type acronyms despite common realtime ASR spacing."""
     clean = normalize_text(text).rstrip(".!?")
     match = re.fullmatch(
+        r"(?:(?:sorry|actually|correction)\s+)?"
         r"(?:my|mera|mere)?\s*(?:business(?:\s+type)?\s*(?:is|hai)?\s*)?"
         r"(b|bee|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])",
         clean,
@@ -1826,7 +1827,9 @@ class GatedConversationState:
                 applied.append(transition)
 
         provider_match = re.search(
-            r"\b(?:ship\s*rocket|shipping\s*rocket|shirocket|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b",
+            r"\b(?:ship\s*rocket|shipping\s*rocket|shirocket|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b|"
+            r"\u0ab8\u0ac0\u0aaa\u0acd\u0ab0\u0acb\u0a95\u0ac7\u0a9f|"
+            r"\u0ab6\u0abf\u0aaa\u0ab0\u0acb\u0a95\u0ac7\u0a9f",
             clean,
         )
         provider_none_evidence = _current_arrangement_none_evidence(
@@ -2383,6 +2386,24 @@ class GatedConversationState:
                 normalized = "Unknown" if disposition == "unknown" else "Not Shared"
 
         previous = self.fields.get(field)
+        if (
+            field == "business_type"
+            and disposition == "answered"
+            and previous
+            and previous.status == "confirmed"
+            and previous.value != normalized
+            and pending_before != "business_type"
+            and not re.search(
+                r"\b(?:sorry|actually|correct|correction|change|instead|galat)\b|"
+                r"\u0917\u0932\u0924|\u0938\u0939\u0940\s+\u0915\u0930|\u092c\u0926\u0932",
+                normalize_text(customer_text),
+                re.IGNORECASE,
+            )
+        ):
+            # Short ASR fragments such as "g to c" often arrive after the
+            # business-type turn has already completed. They are not strong
+            # enough to overwrite a confirmed value without correction intent.
+            return None
         if previous and previous.turn_id == turn_id and previous.value != normalized:
             if (
                 field == "current_problem"
@@ -2780,6 +2801,8 @@ class GatedConversationState:
         # Keep authorization scoped to the latest successful pricing response.
         # Otherwise an old Flat amount remains speakable after a newer
         # Flat-Zonal result.
+        previous_options = list(self.verified_starting_options)
+        previous_partners = list(self.available_courier_partners)
         self.authorized_rate_amounts.clear()
         self.primary_rate_amount = None
         self.verified_starting_options = []
@@ -2794,7 +2817,7 @@ class GatedConversationState:
                 self.authorized_rate_amounts.add(normalized_amount)
                 self.primary_rate_amount = normalized_amount
             raw_options = payload.get("starting_rate_options")
-            if isinstance(raw_options, list):
+            if isinstance(raw_options, list) and raw_options:
                 for raw_option in raw_options[:5]:
                     if not isinstance(raw_option, dict):
                         continue
@@ -2813,11 +2836,20 @@ class GatedConversationState:
                     }
                     self.verified_starting_options.append(option)
                     self.authorized_rate_amounts.add(option["amount"])
+            elif previous_options and self.route_zone_lookup_status == "verified_starting":
+                # A later top-level starting-rate response must not erase the
+                # richer provider options already verified for this route.
+                self.verified_starting_options = previous_options
+                self.authorized_rate_amounts.update(
+                    option["amount"] for option in previous_options
+                )
             raw_partners = payload.get("available_courier_partners")
-            if isinstance(raw_partners, list):
+            if isinstance(raw_partners, list) and raw_partners:
                 self.available_courier_partners = [
                     str(partner).strip() for partner in raw_partners if str(partner).strip()
                 ]
+            elif previous_partners and self.route_zone_lookup_status == "verified_starting":
+                self.available_courier_partners = previous_partners
             return
         monetary_keys = {
             "amount",

@@ -256,6 +256,72 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("do not quote any rate", guidance.casefold())
         self.assertIn("rates or need onboarding help", guidance)
 
+    def test_call_1677_sparse_followup_preserves_verified_provider_rates(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "available_courier_partners": ["Shree Maruti", "Amazon"],
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Shipping Standard", "amount": 36.34},
+                ],
+            }
+        )
+
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "available_courier_partners": [],
+                "starting_rate_options": [],
+            }
+        )
+
+        self.assertEqual(
+            [option["amount"] for option in state.verified_starting_options],
+            [31.15, 36.34],
+        )
+        self.assertEqual(state.available_courier_partners, ["Shree Maruti", "Amazon"])
+        self.assertEqual(state.authorized_rate_amounts, {31.15, 36.34})
+
+    def test_call_1677_stray_business_type_fragment_cannot_overwrite_confirmation(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("D2C", turn_id="business-type")
+
+        transitions = state.apply_deterministic_answers("g to c", turn_id="stray-fragment")
+
+        self.assertEqual(transitions, [])
+        self.assertEqual(state.value("business_type"), "D2C")
+
+        corrected = state.apply_deterministic_answers(
+            "sorry G2C",
+            turn_id="explicit-correction",
+        )
+        self.assertTrue(any(item.get("field") == "business_type" for item in corrected))
+        self.assertEqual(state.value("business_type"), "G2C")
+
+    def test_call_1677_gujarati_asr_shiprocket_is_recognized_without_garbage(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"business_name": "Har Shankar", "business_type": "D2C"})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("shipping rates", turn_id="intent")
+
+        state.apply_deterministic_answers(
+            "\u0a9c\u0ac0 \u0ab8\u0ac0\u0aaa\u0acd\u0ab0\u0acb\u0a95\u0ac7\u0a9f \u0aaf\u0ac1\u0a9d \u0a95\u0ab0 \u0ab0\u0ab9\u0abe \u0ab9\u0ac1\u0a82.",
+            turn_id="provider",
+            previous_agent_text="Kya aap abhi koi courier ya shipping aggregator use karte hain?",
+        )
+
+        self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
+        self.assertEqual(state.value("current_provider_name"), "Shiprocket")
+
     def test_call_1670_hindi_all_rates_is_information_not_dissatisfaction(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"monthly_shipments": 5000})

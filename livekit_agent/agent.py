@@ -553,6 +553,13 @@ _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"anything\s+else)",
     re.IGNORECASE,
 )
+_CUSTOMER_ALL_PROVIDER_RATES_RE = re.compile(
+    r"\b(?:sabke|sabhi|saare|sare|all|each|every|individually|har\s+ek)\b.{0,45}"
+    r"\b(?:rate|rates|price|prices|provider|providers|courier|couriers)\b|"
+    r"\b(?:rate|rates|price|prices)\b.{0,35}\b(?:sabke|all|each|individually)\b|"
+    r"\u0938\u092c\s*\u0915\u0947.{0,30}\u0930\u0947\u091f|\u0938\u092d\u0940.{0,30}\u0930\u0947\u091f",
+    re.IGNORECASE,
+)
 _CUSTOMER_CORRECTION_RE = re.compile(
     r"\b(?:change|changed|correct|correction|actually|instead|update|galat|sahi|theek\s+karo)\b|"
     r"\u092c\u0926\u0932|\u0917\u0932\u0924|\u0938\u0939\u0940\s+\u0915\u0930",
@@ -772,6 +779,36 @@ def _shipkia_flow_response_violation(
         )
     ):
         return "contradicted_verified_route"
+
+    if (
+        conversation_state.monthly_quantity_due
+        and conversation_state.primary_rate_amount is not None
+        and _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+    ):
+        return "verified_rate_omitted"
+
+    if (
+        conversation_state.last_provider_rates_query
+        and conversation_state.verified_starting_options
+        and _CUSTOMER_ALL_PROVIDER_RATES_RE.search(customer_clean)
+    ):
+        missing_options = []
+        for option in conversation_state.verified_starting_options:
+            courier = _normalized_text(option.get("courier"))
+            service = _normalized_text(option.get("service"))
+            amount = float(option.get("amount") or 0)
+            name_present = bool(
+                courier and courier in agent_clean
+                or service and service in agent_clean
+            )
+            amount_present = any(
+                abs(spoken - amount) < 0.011
+                for spoken in _shipkia_rate_claim_amounts(agent_text)
+            )
+            if not name_present or not amount_present:
+                missing_options.append(option)
+        if missing_options:
+            return "provider_rates_incomplete"
 
     unauthorized_better_plan = bool(
         "better plan" in agent_clean
@@ -2755,6 +2792,24 @@ def make_mcp_forwarder(
                             ),
                         }
                     )
+                if (
+                    conversation_state.v5_company_pair_flow
+                    and not shadowfax_surface_request
+                    and conversation_state.verified_rate_presented()
+                    and not conversation_state.starting_rate_due()
+                ):
+                    return compact_json(
+                        {
+                            "status": "duplicate_suppressed",
+                            "worker_state_authoritative": True,
+                            "pricing_backend_called": False,
+                            "spoken_response_instruction": (
+                                "Do not call the starting-rate tool again or clear retained "
+                                "provider options. Follow only this current action: "
+                                + conversation_state.guidance()
+                            ),
+                        }
+                    )
                 if not shadowfax_surface_request:
                     arguments = (
                         {"zone": conversation_state.value("zone")}
@@ -3148,6 +3203,15 @@ def make_mcp_forwarder(
                             "rate_card": result.get("rate_card"),
                             "message": result.get("message", ""),
                             "basis": starting_basis,
+                            "available_courier_partners": list(
+                                result.get("available_courier_partners") or []
+                            ),
+                            "starting_rate_options": list(
+                                result.get("starting_rate_options") or []
+                            ),
+                            "starting_rate_options_note": result.get(
+                                "starting_rate_options_note"
+                            ),
                             "spoken_response_instruction": spoken_instruction,
                         }
                         if (
@@ -4557,6 +4621,23 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "The route and zone are already worker-verified. Do not say they "
                                 "are unverified, call a pricing tool, or ask for a city or pincode "
                                 "again. Follow only this current authoritative action: "
+                                + conversation_state.guidance()
+                            )
+                        elif flow_violation == "verified_rate_omitted":
+                            correction_direction = (
+                                f"State the already worker-verified Zone "
+                                f"{conversation_state.value('zone')} starting rate Rs "
+                                f"{conversation_state.primary_rate_amount:.2f}, GST included, "
+                                "then ask only for the customer's monthly shipment quantity. "
+                                "Do not ask anything else yet and do not call another pricing tool."
+                            )
+                        elif flow_violation == "provider_rates_incomplete":
+                            correction_direction = (
+                                "The customer asked for all individual provider rates. List every "
+                                "worker-verified option with its courier/service and exact "
+                                "GST-inclusive 500 g Forward starting amount. Do not omit an "
+                                "option, invent a seventh rate, or call another pricing tool. "
+                                "Follow this authoritative data and close question: "
                                 + conversation_state.guidance()
                             )
                         else:
