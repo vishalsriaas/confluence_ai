@@ -372,9 +372,19 @@ _ANYTHING_ELSE_QUESTION_PATTERN = re.compile(
 _ANYTHING_ELSE_NO_PATTERN = re.compile(
     r"^(?:no|no\s+thanks?|nahi(?:\s+thank\s*you)?|nahin(?:\s+thank\s*you)?|"
     r"nhi(?:\s+thank\s*you)?|bas|bas\s+itna|aur\s+kuch\s+nahi|"
-    r"kuch\s+aur\s+nahi|nothing\s+else|no\s+more|\u0928\u0939\u0940\u0902|"
+    r"kuch\s+aur\s+nahi|nothing\s+else|no\s+more|"
+    r"\u0928\u0939\u0940\u0902(?:\s+(?:\u0925\u0948\u0902\u0915\s*\u092f\u0942|\u0927\u0928\u094d\u092f\u0935\u093e\u0926))?|"
     r"\u092c\u0938|\u0914\u0930\s+\u0915\u0941\u091b\s+\u0928\u0939\u0940\u0902)[.!?\u0964]*$",
     re.IGNORECASE,
+)
+_KNOWN_COURIER_PARTNERS = (
+    "Amazon",
+    "Bluedart",
+    "Delhivery",
+    "E-Kart",
+    "Shadowfax",
+    "Shree Maruti",
+    "Xpressbees",
 )
 _ANYTHING_ELSE_YES_PATTERN = re.compile(
     r"^(?:yes|haan|han|haan\s+ji|ji|bilkul|sure|\u0939\u093e\u0901|\u0939\u093e\u0902|"
@@ -840,6 +850,7 @@ class GatedConversationState:
         self.last_usp_query = False
         self.last_detailed_usp_query = False
         self.last_provider_options_query = False
+        self.last_provider_rates_query = False
         self.last_problem_captured = False
         self.shadowfax_surface_rate_due = False
         self.shadowfax_surface_rate_presented = False
@@ -1160,6 +1171,14 @@ class GatedConversationState:
         )
         self.last_provider_options_query = bool(
             self.v5_company_pair_flow and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
+        )
+        self.last_provider_rates_query = bool(
+            self.last_provider_options_query
+            and re.search(
+                r"\b(?:rate|rates|price|prices|pricing)\b|\u0930\u0947\u091f(?:\u094d\u0938)?|\u0915\u0940\u092e\u0924",
+                clean,
+                re.IGNORECASE,
+            )
         )
         informational_followup = bool(
             self.last_provider_options_query
@@ -3094,7 +3113,7 @@ class GatedConversationState:
                     "rahe?' Do not assume either answer and do not continue to current rate yet."
                 )
             if self.last_provider_options_query:
-                if self.verified_starting_options:
+                if self.last_provider_rates_query and self.verified_starting_options:
                     options = json.dumps(
                         self.verified_starting_options,
                         ensure_ascii=False,
@@ -3112,12 +3131,38 @@ class GatedConversationState:
                         "Finish by asking exactly: 'Kya aap kuch aur jaanna chahenge?' Do not ask "
                         "the move-forward question in this response."
                     )
+                partner_names = self.available_courier_partners or list(_KNOWN_COURIER_PARTNERS)
+                known_partners = ", ".join(partner_names)
+                if self.verified_rate_presented():
+                    provider_resume = "Then ask exactly: 'Kya aap kuch aur jaanna chahenge?'"
+                else:
+                    provider_resume = {
+                        "assistance_intent": (
+                            "Then resume by asking only whether they want to check rates or need "
+                            "onboarding help."
+                        ),
+                        "business_name": "Then resume by asking only for their business or brand name.",
+                        "business_type": "Then resume by asking only whether their business is B2C or D2C.",
+                        "current_shipping_arrangement": (
+                            "Then resume by asking only whether they currently use a courier or "
+                            "shipping aggregator."
+                        ),
+                        "current_provider_name": (
+                            "Then resume by asking only which courier or aggregator they use."
+                        ),
+                        "current_shipping_rate": (
+                            "Then resume by asking only their current comparable shipping rate."
+                        ),
+                        "current_problem": "Then resume by asking only their main shipping problem.",
+                    }.get(pending, "Then ask only whether they want rates or onboarding help.")
                 return (
-                    "The customer asked for courier/provider options, but no detailed option list is "
-                    "authorized in current worker state. Explain that the exact options and rates "
-                    "must be checked against the active rate card; do not invent names or amounts, "
-                    "then ask exactly: 'Kya aap kuch aur jaanna chahenge?' Do not jump to the "
-                    "move-forward close."
+                    "The customer asked which courier partners or services ShipKia has, without "
+                    "explicitly requesting their rates. Give these known partner names directly: "
+                    f"{known_partners}. This is a names-only answer; do not "
+                    "quote any rate, promise serviceability, or imply every partner serves every "
+                    "route. Explain briefly that applicable services and rates require the relevant "
+                    f"shipment details and a verified pricing check. {provider_resume} Do not jump "
+                    "to the move-forward close."
                 )
             if self.last_usp_query:
                 resume = {
@@ -3455,6 +3500,7 @@ class GatedConversationState:
             "verified_starting_options": list(self.verified_starting_options),
             "available_courier_partners": list(self.available_courier_partners),
             "last_provider_options_query": self.last_provider_options_query,
+            "last_provider_rates_query": self.last_provider_rates_query,
             "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
             "state_revision": self.revision,
