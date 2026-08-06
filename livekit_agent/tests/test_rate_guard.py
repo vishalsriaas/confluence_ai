@@ -109,6 +109,37 @@ class TestRateGateResponse(unittest.TestCase):
         )
         self.assertEqual(repeated, "repeated_anything_else_checkpoint")
 
+    def test_information_checkpoint_is_blocked_during_early_service_answer(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        customer_text = "ShipKia ki services kya kya hain?"
+        state.apply_deterministic_answers(customer_text, turn_id="services")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners ke shipments manage karta hai aur dedicated "
+                "account manager support deta hai. Kya aap kuch aur jaanna chahenge?"
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Aap rates check karna chahenge ya onboarding help chahiye?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "unexpected_anything_else_checkpoint")
+
+    def test_information_checkpoint_remains_allowed_at_authorized_post_rate_stage(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_question_due = True
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Kya aap kuch aur jaanna chahenge?",
+            customer_text="around 1000",
+            previous_agent_text="Aapki monthly shipments kitni hoti hain?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "")
+
     def test_initial_authoritative_instruction_seeds_consent_before_realtime_draft(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 
@@ -1040,7 +1071,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         complete = _shipkia_flow_response_violation(
             agent_text=(
                 "Starting rates: Shree Maruti Surface Rs 31.15 aur Amazon Standard "
-                "Rs 36.34. Kya aap kuch aur jaanna chahenge?"
+                "Rs 36.34."
             ),
             customer_text=customer_text,
             previous_agent_text="Kya aap kuch aur jaanna chahenge?",

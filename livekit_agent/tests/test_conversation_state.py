@@ -180,8 +180,7 @@ class TestGatedConversationState(unittest.TestCase):
 
     def test_early_side_queries_use_natural_help_continuation(self):
         expected = (
-            "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "
-            "check karne ya onboarding mein help kar doon?"
+            "Aap shipping rates check karna chahenge ya onboarding mein help chahiye?"
         )
         for customer_text in (
             "ShipKia ki services kya kya hain?",
@@ -194,7 +193,7 @@ class TestGatedConversationState(unittest.TestCase):
 
                 self.assertEqual(state.pending_field(), "assistance_intent")
                 self.assertIn(expected, state.guidance())
-                self.assertNotIn("want rates or onboarding", state.guidance())
+                self.assertNotIn("kuch aur jaanna chahenge", state.guidance())
 
     def test_initial_assistance_choice_remains_short_before_any_side_query(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -216,10 +215,22 @@ class TestGatedConversationState(unittest.TestCase):
         )
 
         self.assertIn(
-            "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "
-            "check karne ya onboarding mein help kar doon?",
+            "Aap shipping rates check karna chahenge ya onboarding mein help chahiye?",
             state.guidance(),
         )
+        self.assertNotIn("kuch aur jaanna chahenge", state.guidance())
+
+    def test_consumed_checkpoint_is_not_reasked_after_late_quantity_answer(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.last_monthly_quantity_captured = True
+        state.anything_else_checkpoint_consumed = True
+
+        guidance = state.guidance()
+
+        self.assertIn("acknowledge", guidance)
+        self.assertIn("then stop", guidance)
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", guidance)
 
     def test_call_1698_delivery_pincode_never_becomes_monthly_shipments(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -451,8 +462,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("names directly", guidance.casefold())
         self.assertIn("do not quote any rate", guidance.casefold())
         self.assertNotIn("Rs ", guidance)
-        self.assertIn("aap kuch aur jaanna chahenge", guidance)
-        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
+        self.assertNotIn("kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karna chahenge ya onboarding", guidance)
         self.assertIn("do not jump to the move-forward", guidance.casefold())
 
     def test_call_1662_rate_list_is_information_not_dissatisfaction(self):
@@ -533,8 +544,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("names-only", guidance)
         self.assertIn("do not quote any rate", guidance)
         self.assertNotIn("Rs ", guidance)
-        self.assertIn("aap kuch aur jaanna chahenge", guidance)
-        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
+        self.assertNotIn("kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karna chahenge ya onboarding", guidance)
 
     def test_call_1668_hindi_no_thanks_advances_once_to_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -600,8 +611,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("Amazon", guidance)
         self.assertIn("Xpressbees", guidance)
         self.assertIn("do not quote any rate", guidance.casefold())
-        self.assertIn("aap kuch aur jaanna chahenge", guidance)
-        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
+        self.assertNotIn("kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karna chahenge ya onboarding", guidance)
 
     def test_call_1677_sparse_followup_preserves_verified_provider_rates(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -1693,8 +1704,8 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("dedicated account manager", guidance)
         self.assertIn("WhatsApp order confirmation", guidance)
         self.assertIn("IVR-call", guidance)
-        self.assertIn("aap kuch aur jaanna chahenge", guidance)
-        self.assertIn("shipping rates check karne ya onboarding mein help", guidance)
+        self.assertNotIn("kuch aur jaanna chahenge", guidance)
+        self.assertIn("shipping rates check karna chahenge ya onboarding", guidance)
         self.assertEqual(state.pending_field(), "assistance_intent")
 
     def test_v5_problem_solution_continues_directly_to_retained_route_rate(self):

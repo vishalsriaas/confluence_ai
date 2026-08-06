@@ -903,6 +903,16 @@ def _shipkia_flow_response_violation(
     if unauthorized_better_plan:
         return "unauthorized_better_plan"
 
+    if (
+        _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+        and not conversation_state.anything_else_question_due
+    ):
+        # The information checkpoint belongs to one worker-authorized point
+        # after the first verified rate and monthly quantity. It must not be
+        # improvised during discovery, service answers, or later catalog/rate
+        # follow-ups.
+        return "unexpected_anything_else_checkpoint"
+
     if _CUSTOMER_USP_QUERY_RE.search(customer_clean) or conversation_state.last_usp_query:
         if _UNSUPPORTED_USP_CLAIM_RE.search(agent_clean):
             return "unsupported_usp_claim"
@@ -4044,7 +4054,7 @@ class ShipKiaAssistant(Agent):
   conversational wording. You may give a brief practical explanation, but never invent a feature,
   guarantee, saving, discount, delivery promise, or numeric rate. Every amount and zone remains
   authorized only by a successful pricing-tool result.
-- After giving the requested verified rate, ask once whether the customer wants to know anything
+- After giving the first requested verified rate, ask once whether the customer wants to know anything
   else. Never decide satisfaction yourself and never speak the satisfied/onboarding URL close from
   this general rule. That close is allowed only when the current private turn direction explicitly
   says onboarding-close authorization is TRUE and supplies the exact response. Yes/haan/ji/si,
@@ -4058,6 +4068,7 @@ class ShipKiaAssistant(Agent):
   the monthly shipment quantity once when it is missing. Capture a numeric or ranged answer before
   moving on. Then ask exactly "Kya aap kuch aur jaanna chahenge?" Ask this checkpoint only once.
   Answer any requested follow-up fully without automatically appending the checkpoint again. After
+  later Flat, Flat-Zonal, provider-rate, or repeated-rate answers, do not re-arm this checkpoint. After
   an acknowledgement, forgotten question, or no-current-question response, ask the exact ShipKia
   move-forward question once.
 - If the customer asks for explanation, comparison, or quantity-specific pricing, answer that
@@ -4801,6 +4812,12 @@ async def entrypoint(ctx: JobContext) -> None:
                             # A one-word mic/echo greeting must not cause the
                             # same pending question to be spoken yet again.
                             return
+                        if flow_violation == "repeated_anything_else_checkpoint":
+                            # The customer's requested follow-up was already
+                            # answered in the interrupted draft. Generating a
+                            # second model turn here previously made the model
+                            # repeat the prohibited checkpoint verbatim.
+                            return
                         if flow_violation == "usp_ignored":
                             usp_scope = (
                                 "Explain all four verified facilities"
@@ -4838,12 +4855,11 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "Flat amounts as Flat-Zonal amounts. Follow only this current action: "
                                 + conversation_state.guidance()
                             )
-                        elif flow_violation == "repeated_anything_else_checkpoint":
+                        elif flow_violation == "unexpected_anything_else_checkpoint":
                             correction_direction = (
-                                "The one post-rate anything-else checkpoint was already consumed. "
-                                "Do not repeat or rephrase it. Answer only the customer's current "
-                                "request, or follow the current authoritative action without adding "
-                                "another information checkpoint: "
+                                "The one information checkpoint is not authorized at this stage. "
+                                "Do not ask whether the customer wants to know anything else. "
+                                "Continue only with this current authoritative action: "
                                 + conversation_state.guidance()
                             )
                         elif flow_violation == "qualification_bridge_omitted":

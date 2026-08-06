@@ -3419,8 +3419,8 @@ class GatedConversationState:
         pending = self.pending_field()
         pricing_mode = self.pricing_mode()
         early_side_query_resume = (
-            "Then ask exactly: 'Iske alawa aap kuch aur jaanna chahenge, ya main aapko "
-            "shipping rates check karne ya onboarding mein help kar doon?'"
+            "Then resume by asking exactly: 'Aap shipping rates check karna chahenge ya "
+            "onboarding mein help chahiye?' Do not ask whether they want to know anything else."
         )
         if self.v4_strict_flow:
             if self.onboarding_link_due:
@@ -3636,6 +3636,12 @@ class GatedConversationState:
                     "amount, ask permission, or ask another question first."
                 )
             if self.last_monthly_quantity_captured:
+                if self.anything_else_checkpoint_consumed:
+                    return (
+                        "Briefly acknowledge the captured monthly shipment quantity, then stop. "
+                        "The one information checkpoint was already consumed, so do not ask it "
+                        "again or add another question."
+                    )
                 return (
                     "Briefly acknowledge the captured monthly shipment quantity, then ask exactly: "
                     "'Kya aap kuch aur jaanna chahenge?' Do not ask for the "
