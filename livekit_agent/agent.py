@@ -1075,6 +1075,31 @@ def _response_language_for_turn(text: object, current_language: str) -> str:
     return current_language
 
 
+def _detailed_services_reply_instruction(response_language: str) -> str:
+    if response_language == "English":
+        response = (
+            "ShipKia helps you manage shipments across multiple courier partners. You get a "
+            "dedicated account manager for ticketing and support. Order confirmation is sent on "
+            "WhatsApp first, with a call fallback when there is no response. Delivery NDR "
+            "follow-up is supported through WhatsApp and IVR calls. Would you like to know "
+            "anything else, or may I help you check rates or with onboarding?"
+        )
+    else:
+        response = (
+            "ShipKia se aap multiple courier partners ke saath shipments manage kar sakte hain. "
+            "Ticketing aur support ke liye dedicated account manager milta hai. Order "
+            "confirmation pehle WhatsApp se hota hai, aur response na aane par call fallback "
+            "hota hai. Delivery NDR ke follow-up ke liye WhatsApp aur IVR calls ka support "
+            "milta hai. Aap kuch aur jaanna chahenge, ya main aapko rates check karne ya "
+            "onboarding mein help karun?"
+        )
+    return (
+        "This is a controlled detailed-services response in an active call. Say exactly once and "
+        f"say nothing else: \"{response}\" Never greet, split it into another response, call a "
+        "tool, or repeat the closing question."
+    )
+
+
 def _gemini_start_sensitivity() -> genai_types.StartSensitivity:
     """Return the configured speech-start profile, defaulting fail-safe for noise."""
     configured = os.getenv("GEMINI_VAD_START_SENSITIVITY", "LOW").strip().upper()
@@ -4607,6 +4632,64 @@ async def entrypoint(ctx: JobContext) -> None:
     close_reason = "maximum_call_duration"
     correction_active = False
     ignored_opening_noise: dict[str, float] = {}
+    detailed_reply_scheduled_epochs: set[int] = set()
+    controlled_detailed_reply_epochs: set[int] = set()
+    flow_correction_epochs: set[int] = set()
+
+    def schedule_detailed_services_reply(
+        state_task: asyncio.Task[None] | None,
+        turn_epoch: int,
+    ) -> None:
+        if (
+            state_task is None
+            or turn_epoch in detailed_reply_scheduled_epochs
+        ):
+            return
+        detailed_reply_scheduled_epochs.add(turn_epoch)
+        detailed_at_schedule = conversation_state.last_detailed_usp_query
+        if detailed_at_schedule:
+            # Mark it before yielding so an incomplete native draft cannot
+            # start a second, post-generation USP correction for this turn.
+            controlled_detailed_reply_epochs.add(turn_epoch)
+
+        async def reply_once() -> None:
+            if detailed_at_schedule:
+                try:
+                    await session.interrupt()
+                except RuntimeError:
+                    pass
+            try:
+                await asyncio.shield(state_task)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                return
+            if (
+                runtime.user_turn_count != turn_epoch
+                or not conversation_state.last_detailed_usp_query
+            ):
+                return
+            controlled_detailed_reply_epochs.add(turn_epoch)
+            if not detailed_at_schedule:
+                # A preceding serialized state update delayed classification.
+                # Interrupt as soon as the detailed intent becomes authoritative.
+                try:
+                    await session.interrupt()
+                except RuntimeError:
+                    pass
+            await assistant.sync_pricing_tools()
+            reply = session.generate_reply(
+                instructions=_detailed_services_reply_instruction(
+                    assistant._response_language,
+                )
+            )
+            if hasattr(reply, "wait_for_playout"):
+                await reply.wait_for_playout()
+            else:
+                await reply
+
+        task = asyncio.create_task(reply_once())
+        task.add_done_callback(VoiceSessionRuntime._log_task_exception)
 
     @ctx.room.on("participant_connected")
     def _participant_connected(participant):
@@ -4656,7 +4739,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 task.add_done_callback(VoiceSessionRuntime._log_task_exception)
                 return
             if runtime.add_user_turn(transcript, turn_id=turn_id):
-                turn_processor.schedule(transcript, turn_id=turn_id)
+                assistant._response_language = _response_language_for_turn(
+                    transcript,
+                    assistant._response_language,
+                )
+                state_task = turn_processor.schedule(transcript, turn_id=turn_id)
+                schedule_detailed_services_reply(
+                    state_task,
+                    runtime.user_turn_count,
+                )
 
     @session.on("conversation_item_added")
     def _conversation_item_added(event):
@@ -4685,7 +4776,11 @@ async def entrypoint(ctx: JobContext) -> None:
             # server-side turn detection is enabled. This event is the fallback
             # that guarantees the authoritative state still sees every turn.
             if is_new_turn:
-                turn_processor.schedule(customer_text, turn_id=turn_id)
+                state_task = turn_processor.schedule(customer_text, turn_id=turn_id)
+                schedule_detailed_services_reply(
+                    state_task,
+                    runtime.user_turn_count,
+                )
         elif str(item.role) == "assistant":
             agent_text = item.text_content or ""
             previous_agent_text = next(
@@ -4854,7 +4949,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 flow_violation
                 and not correction_active
                 and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and response_turn_epoch not in controlled_detailed_reply_epochs
+                and response_turn_epoch not in flow_correction_epochs
             ):
+                flow_correction_epochs.add(response_turn_epoch)
                 logger.error(
                     "Blocked ShipKia V5 flow violation=%s text=%s",
                     flow_violation,

@@ -11,6 +11,7 @@ from livekit_agent.agent import (
     ShipKiaAssistant,
     _authoritative_call_state_instruction,
     _authoritative_rate_request_arguments,
+    _detailed_services_reply_instruction,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
     _is_opening_noise_turn,
@@ -52,6 +53,23 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_controlled_detailed_services_reply_is_complete_and_single(self):
+        instruction = _detailed_services_reply_instruction("Hinglish")
+
+        for expected in (
+            "multiple courier partners",
+            "dedicated account manager",
+            "WhatsApp",
+            "call fallback",
+            "NDR",
+            "IVR calls",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, instruction)
+        self.assertEqual(instruction.count("Aap kuch aur jaanna chahenge"), 1)
+        self.assertIn("Say exactly once", instruction)
+        self.assertIn("repeat the closing question", instruction)
+
     def test_opening_ignores_short_non_actionable_asr_noise(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 
