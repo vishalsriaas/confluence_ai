@@ -537,6 +537,11 @@ _AGENT_MOVE_FORWARD_RE = re.compile(
     r"aage\s+(?:badhna|badna|badh).{0,40}ship\s*kia)",
     re.IGNORECASE,
 )
+_AGENT_ANYTHING_ELSE_RE = re.compile(
+    r"(?:kya\s+aap\s+(?:kuch\s+aur|aur\s+kuch)\s+(?:jaan-?na|jaanna|janna)|"
+    r"anything\s+else)",
+    re.IGNORECASE,
+)
 _CUSTOMER_CORRECTION_RE = re.compile(
     r"\b(?:change|changed|correct|correction|actually|instead|update|galat|sahi|theek\s+karo)\b|"
     r"\u092c\u0926\u0932|\u0917\u0932\u0924|\u0938\u0939\u0940\s+\u0915\u0930",
@@ -645,6 +650,14 @@ def _assistant_reasked_handled_field(
     )
     if not is_question:
         return ""
+    # In "Ye prepaid rates hain. Kya aap kuch aur jaanna chahenge?", the
+    # only question is the anything-else checkpoint; "prepaid" is an answer,
+    # not a repeated payment-mode question. Scope field detection to that
+    # question so the guard does not interrupt a valid answer and regenerate.
+    question_scope = agent_clean
+    anything_else_match = _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+    if anything_else_match:
+        question_scope = agent_clean[anything_else_match.start() :]
     pending = conversation_state.pending_field()
 
     def must_not_reask(field: str) -> bool:
@@ -665,7 +678,7 @@ def _assistant_reasked_handled_field(
         return conversation_state.is_handled(field)
 
     for field, pattern in _HANDLED_QUESTION_PATTERNS:
-        if not pattern.search(agent_clean) or not must_not_reask(field):
+        if not pattern.search(question_scope) or not must_not_reask(field):
             continue
         if field == "current_shipping_arrangement" and pending == "current_provider_name":
             # "Which courier/provider do you use?" can naturally contain the
@@ -694,7 +707,13 @@ def _assistant_question_fields(agent_text: object) -> list[str]:
     )
     if not is_question:
         return []
-    return [field for field, pattern in _HANDLED_QUESTION_PATTERNS if pattern.search(agent_clean)]
+    question_scope = agent_clean
+    anything_else_match = _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+    if anything_else_match:
+        question_scope = agent_clean[anything_else_match.start() :]
+    return [
+        field for field, pattern in _HANDLED_QUESTION_PATTERNS if pattern.search(question_scope)
+    ]
 
 
 def _shipkia_flow_response_violation(

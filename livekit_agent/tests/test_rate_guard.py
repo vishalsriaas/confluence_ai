@@ -484,6 +484,23 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.pending_field(), "business_type")
         self.assertEqual(violation, "")
 
+    def test_call_1665_guard_allows_answer_then_anything_else_checkpoint(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"payment_type": "Prepaid", "monthly_shipments": 5000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat rates batao", turn_id="flat")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Ye prepaid rates hain. Kya aap kuch aur jaanna chahenge?",
+            customer_text="Order value 1000 hai.",
+            previous_agent_text="Prepaid hai ya COD?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "")
+
         provider_state = GatedConversationState(
             v4_strict_flow=True,
             v5_company_pair_flow=True,

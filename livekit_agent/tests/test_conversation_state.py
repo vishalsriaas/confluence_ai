@@ -790,6 +790,41 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(call_1605.requested_rate_type, "Flat Zonal")
         self.assertTrue(call_1605.flat_zonal_catalog_due())
 
+    def test_call_1665_flat_zonal_asr_switches_catalog_and_breaks_checkpoint_loop(self):
+        for customer_text in (
+            "Par flood zone rate available?",
+            "Mai puch raha hoon, flat, 2 night rate available hai.",
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(
+                    v4_strict_flow=True,
+                    v5_company_pair_flow=True,
+                )
+                state.seed_context(
+                    {
+                        "pickup_location": "Delhi",
+                        "delivery_location": "Bengaluru",
+                        "monthly_shipments": 5000,
+                    }
+                )
+                state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+                state.apply_deterministic_answers("flat rates batao", turn_id="flat")
+                state.mark_flat_catalog_presented()
+                state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
+                self.assertTrue(state.anything_else_question_due)
+
+                state.apply_deterministic_answers(customer_text, turn_id="flat-zonal-asr")
+
+                self.assertEqual(state.requested_rate_type, "Flat Zonal")
+                self.assertTrue(state.flat_zonal_catalog_due())
+                self.assertFalse(state.anything_else_question_due)
+                self.assertFalse(state.move_forward_question_due)
+                self.assertEqual(state.value("pickup_location"), "Delhi")
+                self.assertEqual(state.value("delivery_location"), "Bengaluru")
+                guidance = state.guidance()
+                self.assertIn("Call get_shipkia_flat_zonal_rates exactly once", guidance)
+                self.assertNotIn("location", guidance.casefold())
+
     def test_v5_call_1609_letter_to_asr_selects_flat_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")

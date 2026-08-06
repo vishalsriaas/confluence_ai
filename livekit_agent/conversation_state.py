@@ -257,6 +257,9 @@ _BROAD_USP_QUERY_PATTERN = re.compile(
 )
 _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"(?:\bflat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\b(?:flat|flatt|flood)[\s,.-]*(?:zone|zonal)\s*(?:rate|rates|pricing|available)?\b|"
+    r"\bflat[\s,.-]*(?:2|two|to)?\s*(?:night|nite|nait|tonight)\s*"
+    r"(?:rate|rates|pricing|available)\b|"
     r"\bflat\s+(?:channel|chainal|journal)\b|"
     r"\b(?:zonal|donal|jonal)[\s-]*(?:flat|plate|flait)\s*"
     r"(?:rate|rates|pricing|charge|charges)?\b|"
@@ -1391,6 +1394,21 @@ class GatedConversationState:
                 _requested_rate_type(clean)
                 or ("Flat" if contextual_call_1627_flat_asr else "")
             )
+            same_presented_catalog = bool(
+                explicit_rate_type == self.requested_rate_type
+                and (
+                    explicit_rate_type == "Flat" and self.flat_catalog_presented
+                    or explicit_rate_type == "Flat Zonal" and self.flat_zonal_catalog_presented
+                )
+            )
+            if explicit_rate_type and not same_presented_catalog:
+                # A new explicit pricing request supersedes the post-answer
+                # checkpoint. Otherwise guidance can keep asking "anything
+                # else" while the newly requested catalog is still pending.
+                self.anything_else_question_due = False
+                self.anything_else_detail_due = False
+                self.anything_else_decision = ""
+                self.move_forward_question_due = False
             if explicit_rate_type == "Flat Zonal":
                 if self.requested_rate_type != "Flat Zonal":
                     self.flat_zonal_catalog_presented = False
