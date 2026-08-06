@@ -326,6 +326,7 @@ _PROVIDER_OPTIONS_QUERY_PATTERN = re.compile(
     r"\b(?:courier|provider|service|option)s?\b|"
     r"\b(?:courier|provider|service|option)s?\b.{0,55}"
     r"\b(?:available|option|rate|rates|kaun|kon|bata)\b|"
+    r"\b(?:sabke|sabhi|saare|sare|all)\b.{0,25}\b(?:rates?|prices?)\b|"
     r"\b(?:char|chaar|four|panch|paanch|five)\b.{0,25}\brates?\b|"
     r"(?:कौन[\s-]*कौन|और\s+क्या|क्या\s+क्या).{0,55}"
     r"(?:कूरियर|प्रोवाइडर|सर्विस|ऑप्शन)|"
@@ -351,11 +352,30 @@ _UNEXPLAINED_PRICING_PATTERN = re.compile(
     r"(?:\b(?:you|aap(?:ne)?)\b.{0,30}\b(?:did(?:n't| not)|nahi|nahin|nhi)\b.{0,20}"
     r"\b(?:explain|bataya|clarify)\b|"
     r"\b(?:comparison|compare|exact\s+prices?|prices?|rates?)\b.{0,35}"
-    r"\b(?:do|batao|bataye|explain|clarify|nahi|nahin|nhi)\b|"
+    r"\b(?:explain|clarify|nahi|nahin|nhi)\b|"
     r"\b(?:explain|bataye|bataya)\b.{0,25}\b(?:nahi|nahin|nhi)\b|"
     r"(?:\u0906\u092a\u0928\u0947).{0,35}(?:\u092c\u0924\u093e\u092f\u093e|\u090f\u0915\u094d\u0938\u092a\u094d\u0932\u0947\u0928).{0,20}"
     r"(?:\u0928\u0939\u0940\u0902)|(?:\u0915\u0902\u092a\u0948\u0930\u093f\u091c\u0928|\u092a\u094d\u0930\u093e\u0907\u0938|\u0930\u0947\u091f).{0,30}"
     r"(?:\u092c\u0924\u093e|\u0926\u094b|\u0938\u092e\u091d\u093e))",
+    re.IGNORECASE,
+)
+_ANYTHING_ELSE_QUESTION_PATTERN = re.compile(
+    r"(?:aap\s+)?(?:kuch\s+aur|aur\s+kuch)\s+(?:jaan-?na|jaanna|jana|janna|puchna|poochna)\s+"
+    r"(?:chahenge|chahte)|anything\s+else\s+(?:you(?:'d|\s+would)?\s+like\s+to\s+know|"
+    r"you\s+want\s+to\s+know)|\u0906\u092a.{0,12}\u0915\u0941\u091b\s+\u0914\u0930.{0,12}"
+    r"\u091c\u093e\u0928\u0928\u093e",
+    re.IGNORECASE,
+)
+_ANYTHING_ELSE_NO_PATTERN = re.compile(
+    r"^(?:no|no\s+thanks?|nahi(?:\s+thank\s*you)?|nahin(?:\s+thank\s*you)?|"
+    r"nhi(?:\s+thank\s*you)?|bas|bas\s+itna|aur\s+kuch\s+nahi|"
+    r"kuch\s+aur\s+nahi|nothing\s+else|no\s+more|\u0928\u0939\u0940\u0902|"
+    r"\u092c\u0938|\u0914\u0930\s+\u0915\u0941\u091b\s+\u0928\u0939\u0940\u0902)[.!?\u0964]*$",
+    re.IGNORECASE,
+)
+_ANYTHING_ELSE_YES_PATTERN = re.compile(
+    r"^(?:yes|haan|han|haan\s+ji|ji|bilkul|sure|\u0939\u093e\u0901|\u0939\u093e\u0902|"
+    r"\u091c\u0940\s+\u0939\u093e\u0901|\u091c\u0940\s+\u0939\u093e\u0902)[.!?\u0964]*$",
     re.IGNORECASE,
 )
 _EXPLICIT_WEIGHT_PATTERN = re.compile(
@@ -794,6 +814,9 @@ class GatedConversationState:
         self.verified_pricing_tool = ""
         self.verified_payment_basis = ""
         self.customer_satisfied = False
+        self.anything_else_question_due = False
+        self.anything_else_detail_due = False
+        self.anything_else_decision = ""
         self.move_forward_question_due = False
         self.move_forward_decision = ""
         self.onboarding_link_due = False
@@ -1135,6 +1158,23 @@ class GatedConversationState:
         self.last_provider_options_query = bool(
             self.v5_company_pair_flow and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
         )
+        informational_followup = bool(
+            self.last_provider_options_query
+            or self.last_usp_query
+            or re.search(
+                r"\b(?:sabke|saare|sare|all|which|kaun\s+kaun|kitne|total)\b.{0,30}"
+                r"\b(?:rates?|prices?|couriers?|providers?|services?|options?)\b",
+                clean,
+                re.IGNORECASE,
+            )
+        )
+        if self.anything_else_detail_due and (
+            informational_followup or len(clean.split()) > 2
+        ):
+            # A substantive follow-up has arrived. Answer it, then return to
+            # the anything-else checkpoint.
+            self.anything_else_detail_due = False
+            self.anything_else_question_due = True
         self.last_problem_captured = False
         awaiting_unsatisfied_problem = self.unsatisfied_problem_due
         self.last_customer_dissatisfied = bool(
@@ -1478,6 +1518,41 @@ class GatedConversationState:
             applied.append(transition)
 
         move_forward_answer = " ".join(clean.replace(",", " ").split())
+        anything_else_context = bool(
+            self.v5_company_pair_flow
+            and self.anything_else_question_due
+            and _ANYTHING_ELSE_QUESTION_PATTERN.search(previous_clean)
+        )
+        if anything_else_context and _ANYTHING_ELSE_NO_PATTERN.fullmatch(move_forward_answer):
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = False
+            self.anything_else_decision = "No"
+            self.move_forward_question_due = True
+            transition = {
+                "event": "anything_else_decided",
+                "decision": "No",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+        elif anything_else_context and _ANYTHING_ELSE_YES_PATTERN.fullmatch(move_forward_answer):
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = True
+            self.anything_else_decision = "Yes"
+            self.move_forward_question_due = False
+            transition = {
+                "event": "anything_else_decided",
+                "decision": "Yes",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
         move_forward_context = bool(
             self.v5_company_pair_flow
             and self.move_forward_question_due
@@ -1508,6 +1583,8 @@ class GatedConversationState:
         )
         if move_forward_context and _MOVE_FORWARD_YES_PATTERN.fullmatch(move_forward_answer):
             self.customer_satisfied = True
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = False
             self.move_forward_question_due = False
             self.move_forward_decision = "Yes"
             self.onboarding_link_due = True
@@ -1527,6 +1604,8 @@ class GatedConversationState:
             applied.append(transition)
         elif move_forward_context and move_forward_no:
             self.customer_satisfied = False
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = False
             self.move_forward_question_due = False
             self.move_forward_decision = "No"
             self.onboarding_link_due = False
@@ -1602,7 +1681,10 @@ class GatedConversationState:
                     transition["source"] = "deterministic"
                     self.last_monthly_quantity_captured = True
                     self.monthly_quantity_due = False
-                    self.move_forward_question_due = True
+                    self.anything_else_question_due = True
+                    self.anything_else_detail_due = False
+                    self.anything_else_decision = ""
+                    self.move_forward_question_due = False
                     applied.append(transition)
 
         business_name_question_context = bool(
@@ -2856,6 +2938,9 @@ class GatedConversationState:
         self.verified_payment_basis = str(payment_basis or self.value("payment_type") or "")
         if self.v5_company_pair_flow:
             self.customer_satisfied = False
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = False
+            self.anything_else_decision = ""
             self.move_forward_decision = ""
             self.onboarding_link_due = False
             self.better_plan_close_due = False
@@ -2868,7 +2953,8 @@ class GatedConversationState:
                 self.move_forward_question_due = False
             else:
                 self.monthly_quantity_due = False
-                self.move_forward_question_due = True
+                self.anything_else_question_due = True
+                self.move_forward_question_due = False
 
     def mark_route_zone_lookup_unavailable(self, *, fallback_presented: bool = True) -> None:
         """End exact-route pricing when the trusted resolver cannot verify a zone."""
@@ -3004,14 +3090,16 @@ class GatedConversationState:
                         "each amount is a GST-inclusive 500 g Forward starting option for the already "
                         "verified zone, not an exact shipment quote or delivery/serviceability "
                         f"guarantee. Configured courier partners in this result are: {partners}. "
-                        "Do not invent another courier, service, rate, SLA, saving, or discount. Do "
-                        "not ask the move-forward question in this response."
+                        "Do not invent another courier, service, rate, SLA, saving, or discount. "
+                        "Finish by asking exactly: 'Kya aap kuch aur jaanna chahenge?' Do not ask "
+                        "the move-forward question in this response."
                     )
                 return (
                     "The customer asked for courier/provider options, but no detailed option list is "
                     "authorized in current worker state. Explain that the exact options and rates "
                     "must be checked against the active rate card; do not invent names or amounts, "
-                    "and do not jump to the move-forward close."
+                    "then ask exactly: 'Kya aap kuch aur jaanna chahenge?' Do not jump to the "
+                    "move-forward close."
                 )
             if self.last_usp_query:
                 resume = {
@@ -3024,7 +3112,7 @@ class GatedConversationState:
                     "current_problem": "Then resume by asking only their main problem with that provider.",
                 }.get(
                     pending,
-                    "Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'",
+                    "Then ask: 'Kya aap kuch aur jaanna chahenge?'",
                 )
                 detail_scope = (
                     "The customer explicitly requested detail, so explain all four verified facts "
@@ -3083,7 +3171,7 @@ class GatedConversationState:
                 continuation = (
                     " Then ask only for their approximate monthly shipment quantity."
                     if self.monthly_quantity_due
-                    else " Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'"
+                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
                 )
                 return (
                     f"The customer asked how much. Lead with the verified starting rate: Rs "
@@ -3093,8 +3181,19 @@ class GatedConversationState:
             if self.last_monthly_quantity_captured:
                 return (
                     "Briefly acknowledge the captured monthly shipment quantity, then ask exactly: "
-                    "'Kya aap ShipKia ke saath aage badhna chahte hain?' Do not ask for the "
+                    "'Kya aap kuch aur jaanna chahenge?' Do not ask for the "
                     "quantity, business details, route, weight, or payment mode again."
+                )
+            if self.anything_else_detail_due:
+                return (
+                    "The customer said they want more information. Ask exactly: 'Ji, aap kya "
+                    "jaanna chahenge?' Do not ask the ShipKia move-forward question yet."
+                )
+            if self.anything_else_question_due:
+                return (
+                    "Ask exactly once: 'Kya aap kuch aur jaanna chahenge?' If the customer wants "
+                    "more information, answer that request fully. Only a clear no/nothing-else "
+                    "answer may advance to the ShipKia move-forward question."
                 )
             if self.move_forward_question_due:
                 return (
@@ -3311,6 +3410,9 @@ class GatedConversationState:
             "shadowfax_surface_rate_presented": self.shadowfax_surface_rate_presented,
             "customer_satisfied": self.customer_satisfied,
             "move_forward_question_due": self.move_forward_question_due,
+            "anything_else_question_due": self.anything_else_question_due,
+            "anything_else_detail_due": self.anything_else_detail_due,
+            "anything_else_decision": self.anything_else_decision,
             "move_forward_decision": self.move_forward_decision,
             "onboarding_link_due": self.onboarding_link_due,
             "better_plan_close_due": self.better_plan_close_due,

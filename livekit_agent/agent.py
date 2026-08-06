@@ -2069,7 +2069,7 @@ def _voice_flat_catalog_result(
             (
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
-                else " Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'"
+                else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
             )
             if conversation_state is not None
             and conversation_state.v5_company_pair_flow
@@ -2194,7 +2194,7 @@ def _voice_flat_zonal_catalog_result(
             (
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
-                else " Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'"
+                else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
             )
             if conversation_state is not None
             and conversation_state.v5_company_pair_flow
@@ -3231,7 +3231,7 @@ def make_mcp_forwarder(
                                     "customer's approximate monthly shipment quantity."
                                     if not conversation_state.is_handled("monthly_shipments")
                                     else "After stating the verified requested rate, ask exactly: "
-                                    "'Kya aap ShipKia ke saath aage badhna chahte hain?'"
+                                    "'Kya aap kuch aur jaanna chahenge?'"
                                 )
                                 if conversation_state.v5_company_pair_flow
                                 else "After stating the verified requested rate, ask once whether "
@@ -3685,7 +3685,9 @@ class ShipKiaAssistant(Agent):
 ## V5 quantity and close override
 - This section overrides the general V4 post-rate follow-up above. After a verified V5 rate, ask
   the monthly shipment quantity once when it is missing. Capture a numeric or ranged answer before
-  moving on. Then ask the exact ShipKia move-forward question once.
+  moving on. Then ask exactly "Kya aap kuch aur jaanna chahenge?" Answer any requested
+  information and return to that question. Only after a clear no/nothing-else answer, ask the exact
+  ShipKia move-forward question once.
 - If the customer asks for explanation, comparison, or quantity-specific pricing, answer that
   objection first using only the verified starting amount and an honest dedicated-plan/team
   explanation. Never repeat the bare move-forward question without answering the objection.
@@ -3903,6 +3905,16 @@ class ShipKiaAssistant(Agent):
                     "Move-forward decision is pending. Ask the exact ShipKia move-forward question and "
                     "wait for a clear yes or no; never convert thanks or satisfaction into yes."
                 )
+        elif self._conversation_state.anything_else_detail_due:
+            policy_parts.append(
+                "The customer said they want more information. Ask what they want to know; do not "
+                "ask the ShipKia move-forward question yet."
+            )
+        elif self._conversation_state.anything_else_question_due:
+            policy_parts.append(
+                "The information checkpoint is pending. Ask exactly 'Kya aap kuch aur jaanna "
+                "chahenge?' Only a clear no/nothing-else reply may unlock the move-forward question."
+            )
         if memory:
             policy_parts.append(
                 "Same-call memory (confirmed details remain handled; later explicit corrections "

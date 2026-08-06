@@ -106,7 +106,54 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("Shree Maruti Surface", guidance)
         self.assertIn("Amazon Shipping Standard", guidance)
         self.assertIn("list every", guidance.casefold())
+        self.assertIn("Kya aap kuch aur jaanna chahenge", guidance)
         self.assertIn("do not ask the move-forward", guidance.casefold())
+
+    def test_call_1662_rate_list_is_information_not_dissatisfaction(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 3000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Zone C rate batao", turn_id="rate")
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "amount": 31.15,
+                "starting_rate_options": [
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34}
+                ],
+            }
+        )
+        state.mark_pricing_verified("get_shipkia_starting_rate")
+
+        state.apply_deterministic_answers(
+            "sabke rates bata sakte ho tum mujhe",
+            turn_id="all-rates",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        self.assertTrue(state.last_provider_options_query)
+        self.assertFalse(state.last_customer_dissatisfied)
+        self.assertFalse(state.unsatisfied_resolution_due)
+        self.assertFalse(state.better_plan_close_due)
+        self.assertTrue(state.anything_else_question_due)
+        self.assertIn("Kya aap kuch aur jaanna chahenge", state.guidance())
+
+    def test_anything_else_yes_asks_for_detail_before_move_forward(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat rates batao", turn_id="rate")
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+
+        state.apply_deterministic_answers(
+            "haan ji",
+            turn_id="anything-else-yes",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        self.assertTrue(state.anything_else_detail_due)
+        self.assertFalse(state.move_forward_question_due)
+        self.assertIn("aap kya jaanna chahenge", state.guidance())
 
     def test_explicit_detailed_shipkia_query_requests_all_verified_facts(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -287,7 +334,8 @@ class TestGatedConversationState(unittest.TestCase):
 
         self.assertEqual(state.value("monthly_shipments"), 250)
         self.assertFalse(state.monthly_quantity_due)
-        self.assertTrue(state.move_forward_question_due)
+        self.assertTrue(state.anything_else_question_due)
+        self.assertFalse(state.move_forward_question_due)
 
     def test_v5_call_1637_no_with_explanation_uses_better_plan_close(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -298,6 +346,11 @@ class TestGatedConversationState(unittest.TestCase):
             {"status": "success", "response_type": "zone_starting", "amount": 35.05}
         )
         state.mark_pricing_verified("get_shipkia_starting_rate")
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="anything-else-no",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
 
         state.apply_deterministic_answers(
             "Nahi, aapne mujhe explain nahi kara.",
@@ -416,6 +469,11 @@ class TestGatedConversationState(unittest.TestCase):
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("Zone C rate batao", turn_id="rate")
         state.mark_pricing_verified("get_shipkia_starting_rate")
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="anything-else-no",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
 
         state.apply_deterministic_answers(
             "नहीं, थैंक यू।",
@@ -599,6 +657,12 @@ class TestGatedConversationState(unittest.TestCase):
         state.mark_flat_catalog_presented()
         state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
 
+        self.assertIn("kuch aur jaanna", state.guidance())
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="anything-else-no",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
         self.assertIn("ShipKia ke saath aage badhna", state.guidance())
         state.apply_deterministic_answers(
             "haan ji",
@@ -626,6 +690,11 @@ class TestGatedConversationState(unittest.TestCase):
                 state.apply_deterministic_answers("flat rates batao", turn_id="flat")
                 state.mark_flat_catalog_presented()
                 state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
+                state.apply_deterministic_answers(
+                    "nahi",
+                    turn_id="anything-else-no",
+                    previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+                )
 
                 state.apply_deterministic_answers(
                     answer,
@@ -984,6 +1053,13 @@ class TestGatedConversationState(unittest.TestCase):
             turn_id="satisfied",
         )
         self.assertFalse(state.onboarding_link_due)
+        self.assertTrue(state.anything_else_question_due)
+        self.assertFalse(state.move_forward_question_due)
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="anything-else-no",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
         self.assertTrue(state.move_forward_question_due)
         state.apply_deterministic_answers(
             "yes",

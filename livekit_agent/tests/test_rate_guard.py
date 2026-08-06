@@ -538,7 +538,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             conversation_state=state,
         )
 
-        self.assertTrue(state.move_forward_question_due)
+        self.assertTrue(state.anything_else_question_due)
+        self.assertFalse(state.move_forward_question_due)
         self.assertFalse(state.better_plan_close_due)
         self.assertEqual(violation, "unauthorized_better_plan")
 
