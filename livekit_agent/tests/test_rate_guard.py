@@ -827,6 +827,85 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(violation, "verified_rate_omitted")
 
+    def test_call_1681_services_answer_requires_complete_verified_usp_set(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        customer_text = "Aap kaun-kaun si services provide karte hain?"
+        state.apply_deterministic_answers(customer_text, turn_id="services")
+
+        incomplete = _shipkia_flow_response_violation(
+            agent_text="ShipKia par multiple courier partners available hain.",
+            customer_text=customer_text,
+            previous_agent_text="Rates check karna chahenge ya onboarding help chahiye?",
+            conversation_state=state,
+        )
+        complete = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multiple courier partners ke shipments manage karta hai, dedicated "
+                "account manager ticketing aur support mein help karta hai, WhatsApp order "
+                "confirmation ke baad no response par call confirmation available hai, aur "
+                "delivery NDR ke liye WhatsApp plus IVR follow-up workflow milta hai."
+            ),
+            customer_text=customer_text,
+            previous_agent_text="Rates check karna chahenge ya onboarding help chahiye?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(incomplete, "usp_ignored")
+        self.assertEqual(complete, "")
+
+    def test_call_1681_yes_to_anything_else_cannot_repeat_same_question(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_detail_due = True
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Kya aap kuch aur jaanna chahenge?",
+            customer_text="Haan ji.",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "anything_else_detail_not_requested")
+
+    def test_call_1681_provider_amounts_must_match_their_own_services(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                    {"courier": "E-Kart", "service": "E-Kart SURFACE", "amount": 76.58},
+                ],
+            }
+        )
+        state.apply_deterministic_answers("sabke rates batao", turn_id="all-rates")
+
+        swapped = _shipkia_flow_response_violation(
+            agent_text=(
+                "Shree Maruti Surface Rs 31.15, Amazon Standard Rs 76.58 aur "
+                "E-Kart Surface Rs 36.34."
+            ),
+            customer_text="sabke rates batao",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+        exact = _shipkia_flow_response_violation(
+            agent_text=(
+                "Shree Maruti Surface Rs 31.15, Amazon Standard Rs 36.34 aur "
+                "E-Kart Surface Rs 76.58."
+            ),
+            customer_text="sabke rates batao",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(swapped, "provider_rates_incomplete")
+        self.assertEqual(exact, "")
+
     def test_verified_route_contradiction_is_a_flow_violation(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.mark_route_zone_verified("D", starting_presented=True)
@@ -998,6 +1077,29 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["zone"], "A")
+
+    async def test_call_1681_repeated_blocked_route_lookup_is_suppressed(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Delhi to Mumbai rate", turn_id="intent-route")
+        runtime = _Runtime()
+        forwarder = make_mcp_forwarder(
+            "lookup_pincode_serviceability",
+            "call-1681-blocked-loop",
+            runtime=runtime,
+            conversation_state=state,
+        )
+        _RouteFakeClientSession.captured_payloads = []
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
+            first = json.loads(await forwarder({}))
+            repeated = json.loads(await forwarder({}))
+
+        self.assertEqual(first["status"], "qualification_required")
+        self.assertEqual(repeated["status"], "duplicate_suppressed")
+        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
+        self.assertEqual(len(runtime.tool_outcomes), 1)
+        self.assertIn("Do not call this tool again", repeated["spoken_response_instruction"])
 
     async def test_v5_partial_route_lookup_is_blocked_before_backend_call(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

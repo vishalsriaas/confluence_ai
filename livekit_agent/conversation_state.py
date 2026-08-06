@@ -255,6 +255,19 @@ _BROAD_USP_QUERY_PATTERN = re.compile(
     r"\u0915\u0948\u0938\u0947).{0,35}(?:\u0915\u093e\u092e|\u092b\u093e\u092f\u0926\u093e|\u092c\u0947\u0928\u093f\u092b\u093f\u091f))",
     re.IGNORECASE,
 )
+_GENERIC_SERVICES_QUERY_PATTERN = re.compile(
+    r"\b(?:what|which|kaun|kon|kya|aur)\b.{0,45}\bservices?\b|"
+    r"\bservices?\b.{0,45}\b(?:provide|provided|offer|offered|available|dete|karte)\b|"
+    r"\u0938\u0930\u094d\u0935\u093f\u0938(?:\u0947\u091c)?|"
+    r"\u0938\u0947\u0935\u093e(?:\u090f\u0902|\u092f\u0947\u0902)?|\u0938\u0941\u0935\u093f\u0927\u093e",
+    re.IGNORECASE,
+)
+_PROVIDER_RATE_ASR_PATTERN = re.compile(
+    r"\b(?:sabke|sabhi|saare|sare|all)\b.{0,35}\b(?:rates?|dates?|r\s*the)\b|"
+    r"\b(?:rates?|dates?|r\s*the)\b.{0,35}\b(?:sabke|sabhi|saare|sare|all)\b|"
+    r"\u0938\u092c\s*\u0915\u0947.{0,35}\u0930\u0947\u091f|\u0938\u092d\u0940.{0,35}\u0930\u0947\u091f",
+    re.IGNORECASE,
+)
 _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"(?:\bflat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
     r"\b(?:flat|flatt|flood)[\s,.-]*(?:zone|zonal)\s*(?:rate|rates|pricing|available)?\b|"
@@ -882,6 +895,7 @@ class GatedConversationState:
         self.last_detailed_usp_query = False
         self.last_provider_options_query = False
         self.last_provider_rates_query = False
+        self.provider_rates_answer_due = False
         self.last_problem_captured = False
         self.shadowfax_surface_rate_due = False
         self.shadowfax_surface_rate_presented = False
@@ -1106,6 +1120,19 @@ class GatedConversationState:
             or self.unsatisfied_resolution_presented
         )
 
+    def mark_provider_rates_presented(self) -> None:
+        if not self.provider_rates_answer_due:
+            return
+        self.provider_rates_answer_due = False
+        self.last_provider_rates_query = False
+        self.last_provider_options_query = False
+        self._append_transition(
+            {
+                "event": "provider_rates_presented",
+                "created_at": time.time(),
+            }
+        )
+
     def route_input_unavailable(self) -> bool:
         return any(
             self.fields.get(f"{endpoint}_pincode")
@@ -1155,6 +1182,20 @@ class GatedConversationState:
             field = str(raw.get("field") or "").strip()
             disposition = str(raw.get("disposition") or "").strip().lower()
             confidence = _number(raw.get("confidence"))
+            if (
+                pending_field_at_turn_start == "current_shipping_rate"
+                and field in ROUTE_FIELDS
+            ):
+                # A route spoken while answering the current-provider rate is
+                # comparison basis, not a replacement ShipKia quote route.
+                continue
+            if (
+                pending_field_at_turn_start == "monthly_shipments"
+                and field == "current_shipping_rate"
+            ):
+                # Shipment volume such as 5,000 must never replace an already
+                # captured Rs 35 current courier rate.
+                continue
             allow_semantic_negative = bool(
                 disposition in {"unknown", "refused", "not_applicable"}
                 # A negative decision can apply only to the question that was
@@ -1203,27 +1244,55 @@ class GatedConversationState:
             and self.flat_zonal_catalog_presented
             and _ZONE_APPLICABILITY_QUERY_PATTERN.search(clean)
         )
+        generic_services_query = bool(
+            self.v5_company_pair_flow
+            and _GENERIC_SERVICES_QUERY_PATTERN.search(clean)
+            and not re.search(
+                r"\b(?:courier|provider|partner)s?\b|"
+                r"\b(?:amazon|bluedart|blue\s+dart|delhivery|e[\s-]*kart|shadowfax|"
+                r"shree\s+maruti|xpressbees|shiprocket|shipking)\b|"
+                r"\u0915\u0942\u0930\u093f\u092f\u0930|\u092a\u094d\u0930\u094b\u0935\u093e\u0907\u0921\u0930",
+                clean,
+                re.IGNORECASE,
+            )
+        )
         self.last_usp_query = bool(
             self.v5_company_pair_flow
             and (
                 _USP_QUERY_PATTERN.search(clean)
                 or _BROAD_USP_QUERY_PATTERN.search(clean)
+                or generic_services_query
             )
         )
         self.last_detailed_usp_query = bool(
-            self.last_usp_query and _DETAILED_USP_QUERY_PATTERN.search(clean)
+            self.last_usp_query
+            and (generic_services_query or _DETAILED_USP_QUERY_PATTERN.search(clean))
         )
         self.last_provider_options_query = bool(
-            self.v5_company_pair_flow and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
+            self.v5_company_pair_flow
+            and not generic_services_query
+            and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
         )
-        self.last_provider_rates_query = bool(
-            self.last_provider_options_query
-            and re.search(
-                r"\b(?:rate|rates|price|prices|pricing)\b|\u0930\u0947\u091f(?:\u094d\u0938)?|\u0915\u0940\u092e\u0924",
-                clean,
-                re.IGNORECASE,
+        detected_provider_rates_query = bool(
+            self.v5_company_pair_flow
+            and (
+                self.last_provider_options_query
+                and re.search(
+                    r"\b(?:rate|rates|price|prices|pricing)\b|\u0930\u0947\u091f(?:\u094d\u0938)?|\u0915\u0940\u092e\u0924",
+                    clean,
+                    re.IGNORECASE,
+                )
+                or self.verified_starting_options
+                and _PROVIDER_RATE_ASR_PATTERN.search(clean)
             )
         )
+        if detected_provider_rates_query:
+            self.provider_rates_answer_due = True
+        self.last_provider_rates_query = bool(
+            detected_provider_rates_query or self.provider_rates_answer_due
+        )
+        if self.provider_rates_answer_due:
+            self.last_provider_options_query = True
         informational_followup = bool(
             self.last_provider_options_query
             or self.last_usp_query
@@ -3576,6 +3645,7 @@ class GatedConversationState:
             "available_courier_partners": list(self.available_courier_partners),
             "last_provider_options_query": self.last_provider_options_query,
             "last_provider_rates_query": self.last_provider_rates_query,
+            "provider_rates_answer_due": self.provider_rates_answer_due,
             "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
             "state_revision": self.revision,

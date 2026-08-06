@@ -322,6 +322,99 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
         self.assertEqual(state.value("current_provider_name"), "Shiprocket")
 
+    def test_call_1681_generic_services_query_requests_all_verified_usps(self):
+        for customer_text in (
+            "Aur kaun-kaun si services provide karte hain aap?",
+            "\u0906\u092a \u0915\u094c\u0928-\u0915\u094c\u0928 \u0938\u0940 \u0938\u0930\u094d\u0935\u093f\u0938\u0947\u091c \u092a\u094d\u0930\u094b\u0935\u093e\u0907\u0921 \u0915\u0930\u0924\u0947 \u0939\u0948\u0902?",
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+                state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+                state.apply_deterministic_answers(
+                    customer_text,
+                    turn_id="services",
+                    previous_agent_text="Rates check karna chahenge ya onboarding help chahiye?",
+                )
+
+                self.assertTrue(state.last_usp_query)
+                self.assertTrue(state.last_detailed_usp_query)
+                self.assertFalse(state.last_provider_options_query)
+                guidance = state.guidance()
+                self.assertIn("all four verified facts", guidance)
+                self.assertIn("dedicated account manager", guidance)
+                self.assertIn("WhatsApp order confirmation", guidance)
+                self.assertIn("call confirmation", guidance)
+                self.assertIn("IVR-call follow-up", guidance)
+
+        courier_state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        courier_state.apply_deterministic_answers(
+            "E-Kart ki kaun si service available hai?",
+            turn_id="courier-service",
+        )
+        self.assertFalse(courier_state.last_usp_query)
+        self.assertTrue(courier_state.last_provider_options_query)
+
+    def test_call_1681_provider_rate_asr_intent_persists_until_answered(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                ],
+            }
+        )
+
+        state.apply_deterministic_answers("dates to batao sabke", turn_id="asr-rates")
+        self.assertTrue(state.provider_rates_answer_due)
+        self.assertTrue(state.last_provider_rates_query)
+        self.assertIn("List every", state.guidance())
+
+        state.apply_deterministic_answers("dried dates 500 g", turn_id="asr-followup")
+        self.assertTrue(state.provider_rates_answer_due)
+        self.assertTrue(state.last_provider_rates_query)
+        self.assertIn("List every", state.guidance())
+
+        state.mark_provider_rates_presented()
+        self.assertFalse(state.provider_rates_answer_due)
+
+    def test_call_1681_semantic_comparison_route_and_quantity_cannot_corrupt_state(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"current_shipping_rate": 35})
+
+        route_transitions = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [
+                    decision("pickup_location", "Delhi", "Delhi"),
+                    decision("delivery_location", "Bangalore", "Bangalore"),
+                ],
+            },
+            customer_text="Rs 35 from Delhi to Bangalore",
+            turn_id="current-rate",
+            pending_field_at_turn_start="current_shipping_rate",
+        )
+        quantity_transitions = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [decision("current_shipping_rate", 5000, "5,000")],
+            },
+            customer_text="5,000",
+            turn_id="quantity",
+            pending_field_at_turn_start="monthly_shipments",
+        )
+
+        self.assertEqual(route_transitions, [])
+        self.assertEqual(quantity_transitions, [])
+        self.assertFalse(state.is_handled("pickup_location"))
+        self.assertFalse(state.is_handled("delivery_location"))
+        self.assertEqual(state.value("current_shipping_rate"), 35)
+
     def test_call_1670_hindi_all_rates_is_information_not_dissatisfaction(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"monthly_shipments": 5000})

@@ -502,6 +502,43 @@ def _shipkia_rate_claim_amounts(value: object) -> list[float]:
     return amounts
 
 
+def _provider_rate_response_complete(
+    agent_text: object,
+    conversation_state: GatedConversationState,
+) -> bool:
+    """Require each verified option's exact amount beside its courier/service name."""
+    clean = _normalized_text(agent_text)
+    options = conversation_state.verified_starting_options
+    if not clean or not options:
+        return False
+
+    aliases = {
+        "bluedart": ("bluedart", "blue dart"),
+        "e-kart": ("e-kart", "e kart", "ekart"),
+        "xpressbees": ("xpressbees", "xpress bees"),
+    }
+    mentions: list[tuple[int, dict[str, Any]]] = []
+    for option in options:
+        courier = _normalized_text(option.get("courier"))
+        service = _normalized_text(option.get("service"))
+        variants = {courier, service, courier.replace("-", " "), service.replace("-", " ")}
+        variants.update(aliases.get(courier, ()))
+        positions = [clean.find(name) for name in variants if name and name in clean]
+        if not positions:
+            return False
+        mentions.append((min(positions), option))
+
+    mentions.sort(key=lambda item: item[0])
+    for index, (position, option) in enumerate(mentions):
+        end = mentions[index + 1][0] if index + 1 < len(mentions) else len(clean)
+        segment = clean[position:end]
+        amount = float(option.get("amount") or 0)
+        exact_amount = f"{amount:.2f}"
+        if exact_amount not in segment:
+            return False
+    return True
+
+
 def _assistant_pincode_claims(value: object) -> list[str]:
     """Return six-digit route claims from an assistant transcript."""
     return list(dict.fromkeys(re.findall(r"\b\d{6}\b", str(value or ""))))
@@ -551,13 +588,6 @@ _AGENT_RESOLUTION_CLOSE_RE = re.compile(
 _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"(?:kya\s+aap\s+(?:kuch\s+aur|aur\s+kuch)\s+(?:jaan-?na|jaanna|janna)|"
     r"anything\s+else)",
-    re.IGNORECASE,
-)
-_CUSTOMER_ALL_PROVIDER_RATES_RE = re.compile(
-    r"\b(?:sabke|sabhi|saare|sare|all|each|every|individually|har\s+ek)\b.{0,45}"
-    r"\b(?:rate|rates|price|prices|provider|providers|courier|couriers)\b|"
-    r"\b(?:rate|rates|price|prices)\b.{0,35}\b(?:sabke|all|each|individually)\b|"
-    r"\u0938\u092c\s*\u0915\u0947.{0,30}\u0930\u0947\u091f|\u0938\u092d\u0940.{0,30}\u0930\u0947\u091f",
     re.IGNORECASE,
 )
 _CUSTOMER_CORRECTION_RE = re.compile(
@@ -788,26 +818,16 @@ def _shipkia_flow_response_violation(
         return "verified_rate_omitted"
 
     if (
-        conversation_state.last_provider_rates_query
-        and conversation_state.verified_starting_options
-        and _CUSTOMER_ALL_PROVIDER_RATES_RE.search(customer_clean)
+        conversation_state.anything_else_detail_due
+        and _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
     ):
-        missing_options = []
-        for option in conversation_state.verified_starting_options:
-            courier = _normalized_text(option.get("courier"))
-            service = _normalized_text(option.get("service"))
-            amount = float(option.get("amount") or 0)
-            name_present = bool(
-                courier and courier in agent_clean
-                or service and service in agent_clean
-            )
-            amount_present = any(
-                abs(spoken - amount) < 0.011
-                for spoken in _shipkia_rate_claim_amounts(agent_text)
-            )
-            if not name_present or not amount_present:
-                missing_options.append(option)
-        if missing_options:
+        return "anything_else_detail_not_requested"
+
+    if (
+        conversation_state.provider_rates_answer_due
+        and conversation_state.verified_starting_options
+    ):
+        if not _provider_rate_response_complete(agent_text, conversation_state):
             return "provider_rates_incomplete"
 
     unauthorized_better_plan = bool(
@@ -819,7 +839,7 @@ def _shipkia_flow_response_violation(
     if unauthorized_better_plan:
         return "unauthorized_better_plan"
 
-    if _CUSTOMER_USP_QUERY_RE.search(customer_clean):
+    if _CUSTOMER_USP_QUERY_RE.search(customer_clean) or conversation_state.last_usp_query:
         if _UNSUPPORTED_USP_CLAIM_RE.search(agent_clean):
             return "unsupported_usp_claim"
         support_specific = bool(re.search(r"\b(?:support|ticket|account manager)\b", customer_clean))
@@ -848,11 +868,18 @@ def _shipkia_flow_response_violation(
                     "ndr" in agent_clean and ("ivr" in agent_clean or "whatsapp" in agent_clean),
                 )
             )
-            if verified_usp_count < 2:
+            required_usp_count = 4 if conversation_state.last_detailed_usp_query else 2
+            if verified_usp_count < required_usp_count:
                 return "usp_ignored"
 
     pending = conversation_state.pending_field()
     asked_fields = _assistant_question_fields(agent_text)
+    if (
+        pending
+        and pending in asked_fields
+        and pending in _assistant_question_fields(previous_agent_text)
+    ):
+        return f"repeated_pending:{pending}"
     if (
         pending
         and asked_fields
@@ -2488,6 +2515,7 @@ def make_mcp_forwarder(
     presented_flat_services: set[str] = set()
     active_flat_context = False
     blocked_rate_fingerprints: set[tuple[object, ...]] = set()
+    blocked_lookup_fingerprints: set[tuple[object, ...]] = set()
     last_starting_rate_response = ""
 
     async def forwarder(raw_arguments: dict[str, object]) -> str:
@@ -2572,6 +2600,20 @@ def make_mcp_forwarder(
                     "required_next_question": pending_label,
                     "spoken_response_instruction": spoken_instruction,
                 }
+                lookup_fingerprint = (conversation_state.revision, pending)
+                if lookup_fingerprint in blocked_lookup_fingerprints:
+                    return compact_json(
+                        {
+                            **result,
+                            "status": "duplicate_suppressed",
+                            "spoken_response_instruction": (
+                                "The route lookup is still blocked by the same unanswered "
+                                f"{pending_label} question. Do not call this tool again until the "
+                                "customer gives a new answer. " + spoken_instruction
+                            ),
+                        }
+                    )
+                blocked_lookup_fingerprints.add(lookup_fingerprint)
                 if runtime:
                     runtime.record_tool_outcome(
                         tool_name,
@@ -4446,6 +4488,15 @@ async def entrypoint(ctx: JobContext) -> None:
             unverified_zones = [
                 value for value in claimed_zones if value != confirmed_zone
             ]
+            if (
+                conversation_state.provider_rates_answer_due
+                and not flow_violation
+                and not unverified_amounts
+                and not unverified_pincodes
+                and not unverified_zones
+                and _provider_rate_response_complete(agent_text, conversation_state)
+            ):
+                conversation_state.mark_provider_rates_presented()
             if unverified_amounts or unverified_pincodes or unverified_zones:
                 logger.error(
                     "Blocked unverified ShipKia output amounts=%s pincodes=%s zones=%s text=%s",
@@ -4476,7 +4527,18 @@ async def entrypoint(ctx: JobContext) -> None:
                         pending_label = _RATE_FIELD_LABELS.get(
                             pending, pending.replace("_", " ")
                         ) if pending else ""
-                        if pending_label:
+                        provider_rate_recovery = bool(
+                            conversation_state.provider_rates_answer_due
+                            and conversation_state.verified_starting_options
+                        )
+                        if provider_rate_recovery:
+                            next_step = (
+                                "Now list every retained worker-verified provider option with its "
+                                "exact courier/service and GST-inclusive 500 g Forward starting "
+                                "amount, then ask exactly: 'Kya aap kuch aur jaanna chahenge?' "
+                                + conversation_state.guidance()
+                            )
+                        elif pending_label:
                             next_step = (
                                 f"Then ask only for the customer's {pending_label}."
                             )
@@ -4494,8 +4556,14 @@ async def entrypoint(ctx: JobContext) -> None:
                         else:
                             route_correction = ""
                         amount_correction = (
-                            "Say the previous amount was not verified and should be ignored. Do "
-                            "not repeat it or speak another numeric ShipKia amount. "
+                            (
+                                "Say the previous approximate or mismatched amounts should be "
+                                "ignored. Replace them only with the exact worker-verified provider "
+                                "options supplied in the next instruction. "
+                                if provider_rate_recovery
+                                else "Say the previous amount was not verified and should be ignored. Do "
+                                "not repeat it or speak another numeric ShipKia amount. "
+                            )
                             if unverified_amounts
                             else ""
                         )
@@ -4548,15 +4616,19 @@ async def entrypoint(ctx: JobContext) -> None:
                             agent_text=agent_text[:500],
                         )
                         if flow_violation == "usp_ignored":
+                            usp_scope = (
+                                "Explain all four verified facilities"
+                                if conversation_state.last_detailed_usp_query
+                                else "Use two or three verified facilities relevant to their question"
+                            )
                             correction_direction = (
-                                "Answer the customer's ShipKia procedure/benefits question now. "
-                                "Use two or three verified facilities relevant to their question: "
-                                "multi-courier shipment management; dedicated account-manager support "
-                                "for ticketing; WhatsApp order confirmation with call fallback; or "
-                                "WhatsApp plus IVR follow-up for delivery NDR. Explain them naturally "
-                                "without inventing a feature, guarantee, saving, discount, delivery "
-                                "promise, or numeric rate. Then resume only the current "
-                                "authoritative pending question. Do not skip directly to qualification."
+                                "Answer the customer's ShipKia procedure/services/benefits question "
+                                f"now. {usp_scope}: multi-courier shipment management; dedicated "
+                                "account-manager support for ticketing; WhatsApp order confirmation "
+                                "with call fallback; and WhatsApp plus IVR follow-up for delivery "
+                                "NDR. Explain naturally without inventing a feature, guarantee, "
+                                "saving, discount, delivery promise, or numeric rate. Then resume "
+                                "only the current authoritative pending question."
                             )
                         elif flow_violation == "unsupported_usp_claim":
                             correction_direction = (
@@ -4639,6 +4711,17 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "option, invent a seventh rate, or call another pricing tool. "
                                 "Follow this authoritative data and close question: "
                                 + conversation_state.guidance()
+                            )
+                        elif flow_violation == "anything_else_detail_not_requested":
+                            correction_direction = (
+                                "The customer already said yes to knowing more. Do not repeat the "
+                                "anything-else question. Ask only: 'Ji, aap kya jaanna chahenge?'"
+                            )
+                        elif flow_violation.startswith("repeated_pending:"):
+                            correction_direction = (
+                                "The pending question was already asked in the immediately previous "
+                                "assistant response. Do not repeat or rephrase it; wait for the "
+                                "customer's answer."
                             )
                         else:
                             correction_direction = conversation_state.guidance()
