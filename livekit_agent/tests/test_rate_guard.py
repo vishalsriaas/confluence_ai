@@ -9,6 +9,7 @@ from unittest.mock import patch
 from livekit_agent.agent import (
     GuardedTurnProcessor,
     ShipKiaAssistant,
+    _authoritative_call_state_instruction,
     _authoritative_rate_request_arguments,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
@@ -50,6 +51,35 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_initial_authoritative_instruction_seeds_consent_before_realtime_draft(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        instruction = _authoritative_call_state_instruction(state, "Hinglish")
+
+        self.assertIn("Pending field: conversation_consent", instruction)
+        self.assertIn("Current action: Ask only whether this is a convenient time to talk", instruction)
+        self.assertIn("No ShipKia numeric amount is authorized", instruction)
+        self.assertIn("Natural Hinglish in Latin script only", instruction)
+
+    def test_assistant_constructor_sends_initial_consent_state_to_realtime_model(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        with patch("livekit_agent.agent.Agent.__init__", return_value=None) as agent_init:
+            ShipKiaAssistant(
+                system_prompt="ShipKia prompt",
+                personality="",
+                context={},
+                tools=[],
+                available_tool_names=(),
+                runtime=_Runtime(),
+                conversation_state=state,
+                turn_processor=object(),
+            )
+
+        instructions = agent_init.call_args.kwargs["instructions"]
+        self.assertIn("Pending field: conversation_consent", instructions)
+        self.assertIn("Ask only whether this is a convenient time to talk", instructions)
+
     def test_empty_pending_field_returns_safe_gate_instead_of_crashing(self):
         result = _rate_gate_response(
             "starting_rate_required",

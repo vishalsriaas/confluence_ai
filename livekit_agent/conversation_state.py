@@ -245,7 +245,11 @@ _EXPLICIT_RATE_INTENT_PATTERN = re.compile(
 _USP_QUERY_PATTERN = re.compile(
     r"(?:\b(?:feature|features|benefit|benefits|advantage|advantages|usp|usps|"
     r"facility|facilities|fayda|fayde|faayda|faayde)\b|\b(?:what|tell me|batao|bata do|bataye)\b.{0,35}"
-    r"\bship\s*kia\b|\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e)",
+    r"\bship\s*kia\b|\b(?:what\s+is|about)\s+ship\s*kia\b|"
+    r"\bship\s*kia\b.{0,25}\b(?:kya\s+hai|what\s+is|about)\b|"
+    r"\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e|"
+    r"(?:\u0936\u093f\u092a\s*\u0915\u093f\u092f\u093e|\u0936\u093f\u092a\u0915\u093f\u092f\u093e).{0,25}"
+    r"\u0915\u094d\u092f\u093e\s+\u0939\u0948)",
     re.IGNORECASE,
 )
 _BROAD_USP_QUERY_PATTERN = re.compile(
@@ -3379,6 +3383,9 @@ class GatedConversationState:
                     provider_resume = "Then ask exactly: 'Kya aap kuch aur jaanna chahenge?'"
                 else:
                     provider_resume = {
+                        "conversation_consent": (
+                            "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
+                        ),
                         "assistance_intent": early_side_query_resume,
                         "business_name": "Then resume by asking only for their business or brand name.",
                         "business_type": "Then resume by asking only whether their business is B2C or D2C.",
@@ -3405,6 +3412,9 @@ class GatedConversationState:
                 )
             if self.last_usp_query:
                 resume = {
+                    "conversation_consent": (
+                        "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
+                    ),
                     "assistance_intent": early_side_query_resume,
                     "business_name": "Then resume by asking only for their business or brand name.",
                     "business_type": "Then resume by asking only whether their business is B2C or D2C.",

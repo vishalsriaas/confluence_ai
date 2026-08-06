@@ -41,6 +41,53 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1707_about_shipkia_before_consent_resumes_only_consent(self):
+        for customer_text in (
+            "Aap mujhe pehle bataiye, ShipKia kya hai?",
+            "\u0906\u092a \u092e\u0941\u091d\u0947 \u092a\u0939\u0932\u0947 \u092c\u0924\u093e\u0907\u090f, \u0936\u093f\u092a \u0915\u093f\u092f\u093e-\u0915\u094d\u092f\u093e \u0939\u0948?",
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+                transitions = state.apply_deterministic_answers(
+                    customer_text,
+                    turn_id="call-1707-about",
+                )
+                guidance = state.guidance()
+
+                self.assertEqual(transitions, [])
+                self.assertTrue(state.last_usp_query)
+                self.assertEqual(state.pending_field(), "conversation_consent")
+                self.assertIn("Answer the ShipKia information", guidance)
+                self.assertIn("Kya abhi hum do minute baat kar sakte hain?", guidance)
+                self.assertNotIn("shipping rates check karne ya onboarding", guidance)
+
+    def test_call_1707_unclear_first_audio_cannot_advance_consent(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        transitions = state.apply_deterministic_answers("Adios.", turn_id="call-1707-noise")
+        guidance = state.guidance()
+
+        self.assertEqual(transitions, [])
+        self.assertEqual(state.pending_field(), "conversation_consent")
+        self.assertIn("convenient time to talk", guidance)
+        self.assertNotIn("shipping rates check", guidance)
+
+    def test_provider_question_before_consent_answers_then_resumes_consent(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        state.apply_deterministic_answers(
+            "ShipKia mein kaun kaun se courier partners hain?",
+            turn_id="pre-consent-providers",
+        )
+        guidance = state.guidance()
+
+        self.assertTrue(state.last_provider_options_query)
+        self.assertEqual(state.pending_field(), "conversation_consent")
+        self.assertIn("Give these known partner names directly", guidance)
+        self.assertIn("Kya abhi hum do minute baat kar sakte hain?", guidance)
+        self.assertNotIn("shipping rates check karne ya onboarding", guidance)
+
     def test_early_side_queries_use_natural_help_continuation(self):
         expected = (
             "Iske alawa aap kuch aur jaanna chahenge, ya main aapko shipping rates "

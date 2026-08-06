@@ -3786,6 +3786,42 @@ async def fetch_tools(
     return tools, tuple(registered_tool_names)
 
 
+def _authoritative_call_state_instruction(
+    conversation_state: GatedConversationState,
+    response_language: str,
+) -> str:
+    """Render the worker-owned state instruction used before and between turns."""
+    handled_state = {
+        field: {"status": field_state.status, "value": field_state.value}
+        for field, field_state in conversation_state.fields.items()
+        if conversation_state.is_handled(field)
+    }
+    authorized_amounts = sorted(conversation_state.authorized_rate_amounts)
+    rate_authorization = (
+        f"Only these exact ShipKia amounts are authorized: {authorized_amounts}."
+        if authorized_amounts
+        else (
+            "No ShipKia numeric amount is authorized. Do not speak one until a pricing "
+            "tool returns status success."
+        )
+    )
+    language_lock = (
+        "English only; do not use Hindi, Hinglish, or Devanagari."
+        if response_language == "English"
+        else "Natural Hinglish in Latin script only; never output Devanagari."
+    )
+    return (
+        "\n\n## Current authoritative call state (worker-updated)\n"
+        f"- Handled facts; never ask these again: {compact_json(handled_state, max_chars=6000)}\n"
+        f"- Pending field: {conversation_state.pending_field() or '[none]'}\n"
+        f"- Current action: {conversation_state.guidance()}\n"
+        f"- Rate authorization: {rate_authorization}\n"
+        f"- Response language lock: {language_lock}\n"
+        "This section overrides any stale conversational assumption. Ask only the current "
+        "action's question and never restart qualification."
+    )
+
+
 class ShipKiaAssistant(Agent):
     def __init__(
         self,
@@ -4009,7 +4045,17 @@ class ShipKiaAssistant(Agent):
         self._flat_zonal_tool_enabled = conversation_state.flat_zonal_catalog_due()
         self._starting_tool_enabled = conversation_state.starting_rate_due()
         initial_tools = self._active_tools()
-        super().__init__(instructions=instructions, tools=initial_tools)
+        initial_instructions = instructions
+        if conversation_state.v4_strict_flow:
+            # Native Gemini realtime can begin drafting before its first
+            # user-turn callback completes. Seed the initial consent gate so
+            # an ambiguous first utterance cannot jump to rates/onboarding and
+            # then require a second corrective response.
+            initial_instructions += _authoritative_call_state_instruction(
+                conversation_state,
+                self._response_language,
+            )
+        super().__init__(instructions=initial_instructions, tools=initial_tools)
 
     def _active_tools(self) -> list:
         enabled = []
@@ -4040,35 +4086,12 @@ class ShipKiaAssistant(Agent):
         return enabled
 
     async def sync_pricing_tools(self) -> None:
-        handled_state = {
-            field: {"status": field_state.status, "value": field_state.value}
-            for field, field_state in self._conversation_state.fields.items()
-            if self._conversation_state.is_handled(field)
-        }
-        authorized_amounts = sorted(self._conversation_state.authorized_rate_amounts)
-        rate_authorization = (
-            f"Only these exact ShipKia amounts are authorized: {authorized_amounts}."
-            if authorized_amounts
-            else (
-                "No ShipKia numeric amount is authorized. Do not speak one until a pricing "
-                "tool returns status success."
-            )
-        )
-        language_lock = (
-            "English only; do not use Hindi, Hinglish, or Devanagari."
-            if self._response_language == "English"
-            else "Natural Hinglish in Latin script only; never output Devanagari."
-        )
         await self.update_instructions(
             self._base_instructions
-            + "\n\n## Current authoritative call state (worker-updated)\n"
-            + f"- Handled facts; never ask these again: {compact_json(handled_state, max_chars=6000)}\n"
-            + f"- Pending field: {self._conversation_state.pending_field() or '[none]'}\n"
-            + f"- Current action: {self._conversation_state.guidance()}\n"
-            + f"- Rate authorization: {rate_authorization}\n"
-            + f"- Response language lock: {language_lock}\n"
-            + "This section overrides any stale conversational assumption. Ask only the current "
-            + "action's question and never restart qualification."
+            + _authoritative_call_state_instruction(
+                self._conversation_state,
+                self._response_language,
+            )
         )
         should_enable = self._conversation_state.pricing_ready() and (
             not self._conversation_state.v4_strict_flow
