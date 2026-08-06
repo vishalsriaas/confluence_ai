@@ -210,6 +210,52 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.move_forward_question_due)
         self.assertIn("ShipKia ke saath aage badhna", state.guidance())
 
+    def test_call_1675_danda_no_thanks_then_no_closes_without_reopening(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 5000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Zone D rate batao", turn_id="rate")
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+
+        transitions = state.apply_deterministic_answers(
+            "\u0928\u0939\u0940\u0902\u0964 \u0925\u0948\u0902\u0915 \u092f\u0942\u0964",
+            turn_id="anything-else-no-thanks",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        decisions = [item for item in transitions if item.get("event") == "anything_else_decided"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(state.anything_else_decision, "No")
+        self.assertTrue(state.move_forward_question_due)
+
+        state.apply_deterministic_answers(
+            "\u0928\u0939\u0940\u0902\u0964",
+            turn_id="move-forward-no",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahenge?",
+        )
+        self.assertEqual(state.move_forward_decision, "No")
+        self.assertTrue(state.better_plan_close_due)
+        self.assertTrue(state.pricing_close_locked())
+
+    def test_negated_rate_intent_provider_question_stays_names_only(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        state.apply_deterministic_answers(
+            "Haan mein shipping rate check karna nahi chahta. Mujhe yeh janna hai ki "
+            "aapke pass kon kon se providers available hai?",
+            turn_id="provider-side-question",
+            previous_agent_text="Aap shipping rates check karna chahenge ya onboarding mein help chahiye?",
+        )
+
+        self.assertFalse(state.is_handled("assistance_intent"))
+        self.assertTrue(state.last_provider_options_query)
+        guidance = state.guidance()
+        self.assertIn("Amazon", guidance)
+        self.assertIn("Xpressbees", guidance)
+        self.assertIn("do not quote any rate", guidance.casefold())
+        self.assertIn("rates or need onboarding help", guidance)
+
     def test_call_1670_hindi_all_rates_is_information_not_dissatisfaction(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"monthly_shipments": 5000})

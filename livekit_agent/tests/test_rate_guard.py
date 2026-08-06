@@ -700,6 +700,61 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["amount"], 22.07)
         self.assertIn("starting rate", result["spoken_response_instruction"])
 
+    async def test_call_1675_duplicate_verified_route_lookup_is_suppressed(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        route = {"pickup_location": "Bareilly", "delivery_location": "Bangalore"}
+        state.register_requested_route(route)
+        state.mark_route_zone_verified("D", starting_presented=True, route_arguments=route)
+        state.authorize_rate_result(
+            {"status": "success", "response_type": "zone_starting", "zone": "D", "amount": 35.05}
+        )
+        state.mark_starting_rate_presented()
+        forwarder = make_mcp_forwarder(
+            "lookup_pincode_serviceability",
+            "call-1675-duplicate-route",
+            conversation_state=state,
+        )
+        _RouteFakeClientSession.captured_payloads = []
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
+            result = json.loads(await forwarder({"pickup_location": "invented"}))
+
+        self.assertEqual(result["status"], "duplicate_suppressed")
+        self.assertFalse(result["pricing_backend_called"])
+        self.assertEqual(result["zone"], "D")
+        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
+        self.assertIn("already verified", result["spoken_response_instruction"])
+
+    async def test_close_stage_blocks_pricing_tool_without_backend_call(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.move_forward_question_due = True
+        forwarder = make_mcp_forwarder(
+            "lookup_pincode_serviceability",
+            "call-1675-close-lock",
+            conversation_state=state,
+        )
+        _RouteFakeClientSession.captured_payloads = []
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
+            result = json.loads(await forwarder({}))
+
+        self.assertEqual(result["status"], "close_stage_locked")
+        self.assertFalse(result["pricing_backend_called"])
+        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
+
+    def test_verified_route_contradiction_is_a_flow_violation(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.mark_route_zone_verified("D", starting_presented=True)
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Zone verify nahi hua, Bareilly ka pincode bataiye.",
+            customer_text="Nahi.",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahenge?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "contradicted_verified_route")
+
     def test_route_result_preserves_verified_provider_starting_options(self):
         result = _voice_safe_pincode_serviceability_result(
             {

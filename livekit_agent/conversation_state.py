@@ -375,10 +375,11 @@ _ANYTHING_ELSE_QUESTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ANYTHING_ELSE_NO_PATTERN = re.compile(
-    r"^(?:no|no\s+thanks?|nahi(?:\s+thank\s*you)?|nahin(?:\s+thank\s*you)?|"
-    r"nhi(?:\s+thank\s*you)?|bas|bas\s+itna|aur\s+kuch\s+nahi|"
+    r"^(?:no|no[\s,.!?\u0964]+thanks?|nahi(?:[\s,.!?\u0964]+thank\s*you)?|"
+    r"nahin(?:[\s,.!?\u0964]+thank\s*you)?|nhi(?:[\s,.!?\u0964]+thank\s*you)?|"
+    r"bas|bas\s+itna|aur\s+kuch\s+nahi|"
     r"kuch\s+aur\s+nahi|nothing\s+else|no\s+more|"
-    r"\u0928\u0939\u0940\u0902(?:\s+(?:\u0925\u0948\u0902\u0915\s*\u092f\u0942|\u0927\u0928\u094d\u092f\u0935\u093e\u0926))?|"
+    r"\u0928\u0939\u0940\u0902(?:[\s,.!?\u0964]+(?:\u0925\u0948\u0902\u0915\s*\u092f\u0942|\u0927\u0928\u094d\u092f\u0935\u093e\u0926))?|"
     r"\u092c\u0938|\u0914\u0930\s+\u0915\u0941\u091b\s+\u0928\u0939\u0940\u0902)[.!?\u0964]*$",
     re.IGNORECASE,
 )
@@ -655,6 +656,30 @@ def _assistance_intent(text: object, previous_agent_text: object = "") -> str:
     if (
         _USP_QUERY_PATTERN.search(clean) or _BROAD_USP_QUERY_PATTERN.search(clean)
     ) and not _EXPLICIT_RATE_INTENT_PATTERN.search(clean):
+        return ""
+    # A customer can mention rates while explicitly declining them in order to
+    # ask a side question (for example, which courier partners are available).
+    # Treat the negation as authoritative instead of entering qualification.
+    provider_side_question = bool(
+        re.search(
+            r"\b(?:provider|providers|courier|couriers|partner|partners|options?)\b.{0,45}"
+            r"\b(?:available|kaun|kon|kya|which|what)\b|"
+            r"\b(?:kaun|kon|kya|which|what)\b.{0,45}"
+            r"\b(?:provider|providers|courier|couriers|partner|partners|options?)\b",
+            clean,
+        )
+    )
+    rate_intent_declined = bool(
+        re.search(
+            r"\b(?:rate|rates|shipping rate|shipping rates)\b.{0,35}"
+            r"\b(?:nahi|nahin|nhi|not|don't|do not)\b.{0,20}"
+            r"\b(?:chahta|chahti|chahiye|want|check|dekh|bata)\b|"
+            r"\b(?:rate|rates|shipping rate|shipping rates)\b.{0,20}"
+            r"\b(?:check|dekh|bata)\b.{0,20}\b(?:nahi|nahin|nhi|not)\b",
+            clean,
+        )
+    )
+    if provider_side_question and rate_intent_declined:
         return ""
     if _EXPLICIT_RATE_INTENT_PATTERN.search(clean):
         return "Rates"
@@ -1065,6 +1090,19 @@ class GatedConversationState:
         return sum(
             self._route_request_key(route) not in self._resolved_route_keys
             for route in self.requested_routes
+        )
+
+    def pricing_close_locked(self) -> bool:
+        """True once pricing discovery must not be reopened by a model tool call."""
+        return bool(
+            self.move_forward_question_due
+            or self.move_forward_decision
+            or self.onboarding_link_due
+            or self.onboarding_link_presented
+            or self.better_plan_close_due
+            or self.better_plan_close_presented
+            or self.unsatisfied_resolution_due
+            or self.unsatisfied_resolution_presented
         )
 
     def route_input_unavailable(self) -> bool:

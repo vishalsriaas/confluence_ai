@@ -71,6 +71,13 @@ ALLOWED_TOOLS = {
     "get_shipkia_flat_zonal_rates",
     "calculate_shipkia_rate",
 }
+PRICING_TOOLS = {
+    "lookup_pincode_serviceability",
+    "get_shipkia_starting_rate",
+    "get_shipkia_flat_rates",
+    "get_shipkia_flat_zonal_rates",
+    "calculate_shipkia_rate",
+}
 
 _TOOL_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
 _SAME_CALL_MEMORY_MAX_TURNS = 40
@@ -752,6 +759,19 @@ def _shipkia_flow_response_violation(
     )
     if reasked_field:
         return f"reasked_handled:{reasked_field}"
+
+    if (
+        conversation_state.route_zone_lookup_status == "verified_starting"
+        and conversation_state.is_confirmed("zone")
+        and re.search(
+            r"\b(?:zone|route)\b.{0,45}\b(?:not|nahi|nahin|nhi)\b.{0,30}"
+            r"\b(?:verified|verify|available|resolve|confirm)\b|"
+            r"\b(?:zone|route)\b.{0,30}\b(?:verify|resolve|confirm)\b.{0,25}"
+            r"\b(?:nahi|nahin|nhi|couldn't|cannot|can't)\b",
+            agent_clean,
+        )
+    ):
+        return "contradicted_verified_route"
 
     unauthorized_better_plan = bool(
         "better plan" in agent_clean
@@ -2438,10 +2458,48 @@ def make_mcp_forwarder(
         arguments = dict(raw_arguments or {})
         rate_metadata: dict[str, object] = {}
 
+        if turn_processor is not None and tool_name in PRICING_TOOLS:
+            await turn_processor.wait_latest()
+        if (
+            conversation_state is not None
+            and conversation_state.v5_company_pair_flow
+            and tool_name in PRICING_TOOLS
+            and conversation_state.pricing_close_locked()
+        ):
+            return compact_json(
+                {
+                    "status": "close_stage_locked",
+                    "worker_state_authoritative": True,
+                    "pricing_backend_called": False,
+                    "spoken_response_instruction": conversation_state.guidance(),
+                }
+            )
+
         if tool_name == "lookup_pincode_serviceability" and conversation_state is not None:
             if turn_processor is not None:
                 await turn_processor.wait_latest()
             pending = conversation_state.pending_field()
+            if (
+                conversation_state.v5_company_pair_flow
+                and conversation_state.route_zone_lookup_status == "verified_starting"
+                and conversation_state.verified_rate_presented()
+                and conversation_state.unresolved_route_count() == 0
+            ):
+                return compact_json(
+                    {
+                        "status": "duplicate_suppressed",
+                        "worker_state_authoritative": True,
+                        "pricing_backend_called": False,
+                        "zone": conversation_state.value("zone") or None,
+                        "zone_verified": conversation_state.is_confirmed("zone"),
+                        "spoken_response_instruction": (
+                            "The route and starting rate are already verified. Do not call a "
+                            "pricing tool, say the zone is unverified, or ask for either endpoint "
+                            "again. Follow only this current action: "
+                            + conversation_state.guidance()
+                        ),
+                    }
+                )
             if (
                 conversation_state.v5_company_pair_flow
                 and not conversation_state.pan_india_requested
@@ -4215,8 +4273,7 @@ async def entrypoint(ctx: JobContext) -> None:
     call_done = asyncio.Event()
     participant_seen = bool(ctx.room.remote_participants)
     close_reason = "maximum_call_duration"
-    rate_correction_active = False
-    flow_correction_active = False
+    correction_active = False
 
     @ctx.room.on("participant_connected")
     def _participant_connected(participant):
@@ -4335,10 +4392,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
 
                 async def correct_unverified_output() -> None:
-                    nonlocal rate_correction_active
-                    if rate_correction_active:
+                    nonlocal correction_active
+                    if correction_active:
                         return
-                    rate_correction_active = True
+                    correction_active = True
                     try:
                         await session.interrupt()
                         await emit_runtime_event(
@@ -4397,14 +4454,14 @@ async def entrypoint(ctx: JobContext) -> None:
                             )
                         )
                     finally:
-                        rate_correction_active = False
+                        correction_active = False
 
-                if not rate_correction_active:
+                if not correction_active:
                     task = asyncio.create_task(correct_unverified_output())
                     task.add_done_callback(VoiceSessionRuntime._log_task_exception)
             if (
                 flow_violation
-                and not flow_correction_active
+                and not correction_active
                 and not (unverified_amounts or unverified_pincodes or unverified_zones)
             ):
                 logger.error(
@@ -4414,10 +4471,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
 
                 async def correct_flow_output() -> None:
-                    nonlocal flow_correction_active
-                    if flow_correction_active:
+                    nonlocal correction_active
+                    if correction_active:
                         return
-                    flow_correction_active = True
+                    correction_active = True
                     try:
                         await session.interrupt()
                         await emit_runtime_event(
@@ -4495,6 +4552,13 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "the team, solution, or better-plan promise. Give only one brief "
                                 "polite farewell and end."
                             )
+                        elif flow_violation == "contradicted_verified_route":
+                            correction_direction = (
+                                "The route and zone are already worker-verified. Do not say they "
+                                "are unverified, call a pricing tool, or ask for a city or pincode "
+                                "again. Follow only this current authoritative action: "
+                                + conversation_state.guidance()
+                            )
                         else:
                             correction_direction = conversation_state.guidance()
                         reply = session.generate_reply(
@@ -4508,7 +4572,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         else:
                             await reply
                     finally:
-                        flow_correction_active = False
+                        correction_active = False
 
                 task = asyncio.create_task(correct_flow_output())
                 task.add_done_callback(VoiceSessionRuntime._log_task_exception)
