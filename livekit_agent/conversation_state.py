@@ -346,6 +346,10 @@ _PROVIDER_OPTIONS_QUERY_PATTERN = re.compile(
     r"(?:\u0907\u0928\s+|\u0909\u0928\s+)?\u0938\u092c\s*\u0915\u0947\s+\u0930\u0947\u091f(?:\u094d\u0938)?|"
     r"\u0938\u092d\u0940\s+\u0915\u0947\s+\u0930\u0947\u091f(?:\u094d\u0938)?|"
     r"\b(?:char|chaar|four|panch|paanch|five)\b.{0,25}\brates?\b|"
+    r"\b(?:amazon|bluedart|blue\s+dart|delhivery|e[\s-]*kart|shadowfax|"
+    r"shree\s+maruti|xpressbees)\b.{0,35}\b(?:available|hai|hain|milta|milte)\b|"
+    r"(?:\u092c\u094d\u0932\u0948\u0921\u0947\u091f|\u092c\u094d\u0932\u0942\s*\u0921\u093e\u0930\u094d\u091f)"
+    r".{0,35}(?:\u0939\u0948|\u0939\u0948\u0902).{0,20}\u0906\u092a\u0915\u0947\s+\u092a\u093e\u0938|"
     r"(?:कौन[\s-]*कौन|और\s+क्या|क्या\s+क्या).{0,55}"
     r"(?:कूरियर|प्रोवाइडर|सर्विस|ऑप्शन)|"
     r"(?:चार|पांच).{0,25}(?:रेट|रेट्स))",
@@ -1176,6 +1180,12 @@ class GatedConversationState:
                     break
 
         applied: list[dict[str, Any]] = []
+        monthly_quantity_captured_this_turn = any(
+            transition.get("turn_id") == turn_id
+            and transition.get("event") == "field_updated"
+            and transition.get("field") == "monthly_shipments"
+            for transition in self.transitions
+        )
         self.last_turn_disposition = str(result.get("turn_disposition") or "").strip().lower()
         for raw in decisions:
             if not isinstance(raw, dict):
@@ -1190,9 +1200,9 @@ class GatedConversationState:
                 # A route spoken while answering the current-provider rate is
                 # comparison basis, not a replacement ShipKia quote route.
                 continue
-            if (
+            if field == "current_shipping_rate" and (
                 pending_field_at_turn_start == "monthly_shipments"
-                and field == "current_shipping_rate"
+                or monthly_quantity_captured_this_turn
             ):
                 # Shipment volume such as 5,000 must never replace an already
                 # captured Rs 35 current courier rate.
@@ -2557,6 +2567,24 @@ class GatedConversationState:
             and previous.status == status
             and previous.value == normalized
         ):
+            return None
+        if (
+            field == "current_provider_name"
+            and disposition == "answered"
+            and previous
+            and previous.status == "confirmed"
+            and previous.value != normalized
+            and pending_before != "current_provider_name"
+            and not re.search(
+                r"\b(?:actually|instead|switch(?:ed)?|change(?:d)?|"
+                r"ab\s+.+\s+use|currently\s+use|use\s+kar)\b|"
+                r"\u0905\u092c.{0,30}\u092f\u0942\u091c|\u092c\u0926\u0932",
+                normalize_text(customer_text),
+                re.IGNORECASE,
+            )
+        ):
+            # A question such as "Bluedart hai aapke paas?" is product
+            # availability, not a correction of the customer's own provider.
             return None
 
         transition = self._set_field(

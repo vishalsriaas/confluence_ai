@@ -334,6 +334,33 @@ class _RouteFakeClientSession(_FakeClientSession):
 
 
 class TestRateGuard(unittest.IsolatedAsyncioTestCase):
+    def test_v5_blocks_plan_offer_immediately_after_monthly_quantity(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "Theek hai, 5000 shipments ke liye hum aapke liye ek alag plan discuss "
+                "kar sakte hain. Kya aap kuch aur jaanna chahenge?"
+            ),
+            customer_text="around 5,000",
+            previous_agent_text="Aapki monthly shipment quantity kitni hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "unauthorized_better_plan")
+
+    def test_v5_blocks_advancing_optional_discovery_after_rate_refusal(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Koi baat nahi. Aapko shipping mein kya problem aa rahi hai?",
+            customer_text="Wo main nahin bata sakta.",
+            previous_agent_text="Shiprocket ke saath aapka kya rate chal raha hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "advanced_after_optional_refusal")
+
     def test_v5_rate_discovery_business_name_requires_natural_bridge_once(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("haan", turn_id="consent")

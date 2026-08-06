@@ -41,6 +41,73 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1688_monthly_volume_cannot_overwrite_current_rate(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("haan", turn_id="consent")
+        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
+        state.apply_decision(
+            field="current_shipping_rate",
+            disposition="refused",
+            value=None,
+            evidence="nahin bata sakta",
+            confidence=1.0,
+            customer_text="Wo main nahin bata sakta",
+            turn_id="rate-refusal",
+        )
+        state.monthly_quantity_due = True
+        turn_id = "monthly-volume"
+        state.apply_deterministic_answers(
+            "around 5,000",
+            turn_id=turn_id,
+            previous_agent_text="Aapki monthly shipment quantity kitni hai?",
+        )
+
+        state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [
+                    decision("current_shipping_rate", 5000, "around 5,000")
+                ],
+            },
+            customer_text="around 5,000",
+            turn_id=turn_id,
+            pending_field_at_turn_start="",
+        )
+
+        self.assertEqual(state.value("monthly_shipments"), 5000)
+        self.assertEqual(state.value("current_shipping_rate"), "Not Shared")
+        self.assertEqual(state.optional_ended_by, "current_shipping_rate")
+
+    def test_call_1688_bluedart_availability_does_not_replace_current_provider(self):
+        for customer_text, evidence in (
+            ("Bluedart hain aapke paas?", "Bluedart"),
+            ("\u092c\u094d\u0932\u0948\u0921\u0947\u091f \u0939\u0948\u0902 \u0906\u092a\u0915\u0947 \u092a\u093e\u0938?", "\u092c\u094d\u0932\u0948\u0921\u0947\u091f"),
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+                state.seed_context(
+                    {
+                        "current_shipping_arrangement": "Shipping Aggregator",
+                        "current_provider_name": "Shiprocket",
+                    }
+                )
+                state.apply_deterministic_answers(customer_text, turn_id="provider-query")
+                state.apply_classifier_result(
+                    {
+                        "turn_disposition": "answered",
+                        "decisions": [
+                            decision("current_provider_name", "Bluedart", evidence)
+                        ],
+                    },
+                    customer_text=customer_text,
+                    turn_id="provider-query",
+                    pending_field_at_turn_start="",
+                )
+
+                self.assertTrue(state.last_provider_options_query)
+                self.assertEqual(state.value("current_provider_name"), "Shiprocket")
+                self.assertIn("Bluedart", state.guidance())
+
     def test_call_1684_pytant_captures_five_thousand_once(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("haan", turn_id="consent")

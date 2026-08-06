@@ -585,6 +585,20 @@ _AGENT_RESOLUTION_CLOSE_RE = re.compile(
     r"(?=.*\bbetter\s+plan\b)(?=.*\bteam\b)(?=.*\b(?:discuss|solution)\b)",
     re.IGNORECASE,
 )
+_AGENT_PLAN_OFFER_RE = re.compile(
+    r"\b(?:better|alag|custom|dedicated|special)\s+plan\b.{0,55}"
+    r"\b(?:discuss|offer|provide|de|bana)\b|"
+    r"\b(?:discuss|offer|provide|de|bana)\b.{0,55}"
+    r"\b(?:better|alag|custom|dedicated|special)\s+plan\b",
+    re.IGNORECASE,
+)
+_CUSTOMER_OPTIONAL_REFUSAL_RE = re.compile(
+    r"\b(?:nahi|nahin|nhi|cannot|can't|cant|won't|wont|do not|don't)\b"
+    r".{0,35}\b(?:bata|share|disclose|provide)\b|"
+    r"\b(?:bata|share|disclose|provide)\b.{0,25}"
+    r"\b(?:nahi|nahin|nhi|cannot|can't|cant|won't|wont)\b",
+    re.IGNORECASE,
+)
 _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"(?:kya\s+aap\s+(?:kuch\s+aur|aur\s+kuch)\s+(?:jaan-?na|jaanna|janna)|"
     r"anything\s+else)",
@@ -641,7 +655,8 @@ _HANDLED_QUESTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "current_shipping_rate",
         re.compile(
             r"(?=.*\b(?:current|abhi|comparable|provider|courier|mil)\b)"
-            r"(?=.*\b(?:rate|price|charge)\b)"
+            r"(?=.*\b(?:rate|price|charge)\b)|"
+            r"\b(?:rate|price|charge)\b.{0,30}\b(?:chal|mil)\b"
         ),
     ),
     (
@@ -788,6 +803,22 @@ def _shipkia_flow_response_violation(
     if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
         return "spoken_onboarding_url"
 
+    previous_questions = _assistant_question_fields(previous_agent_text)
+    draft_questions = _assistant_question_fields(agent_text)
+    if _CUSTOMER_OPTIONAL_REFUSAL_RE.search(customer_clean):
+        refused_optional = next(
+            (field for field in previous_questions if field in OPTIONAL_QUALIFICATION_FIELDS),
+            "",
+        )
+        if refused_optional:
+            refused_index = OPTIONAL_QUALIFICATION_FIELDS.index(refused_optional)
+            if any(
+                field in OPTIONAL_QUALIFICATION_FIELDS
+                and OPTIONAL_QUALIFICATION_FIELDS.index(field) > refused_index
+                for field in draft_questions
+            ):
+                return "advanced_after_optional_refusal"
+
     if (
         conversation_state.qualification_bridge_due()
         and "business_name" in _assistant_question_fields(agent_text)
@@ -843,8 +874,11 @@ def _shipkia_flow_response_violation(
             return "provider_rates_incomplete"
 
     unauthorized_better_plan = bool(
-        "better plan" in agent_clean
-        and re.search(r"\b(?:team|discuss|solution)\b", agent_clean)
+        (
+            "better plan" in agent_clean
+            and re.search(r"\b(?:team|discuss|solution)\b", agent_clean)
+            or _AGENT_PLAN_OFFER_RE.search(agent_clean)
+        )
         and not conversation_state.better_plan_close_due
         and not conversation_state.unsatisfied_resolution_due
     )
@@ -4692,6 +4726,14 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "The customer's latest audio did not clearly authorize a better-plan "
                                 "close. Do not promise one and do not infer yes, no, satisfaction, or "
                                 "dissatisfaction. Follow only the current authoritative action: "
+                                + conversation_state.guidance()
+                            )
+                        elif flow_violation == "advanced_after_optional_refusal":
+                            correction_direction = (
+                                "The customer explicitly refused the optional question. End the "
+                                "remaining optional qualification immediately; do not ask the "
+                                "refused field or any later optional discovery question. Continue "
+                                "only with this current authoritative action: "
                                 + conversation_state.guidance()
                             )
                         elif flow_violation == "repeated_move_forward":
