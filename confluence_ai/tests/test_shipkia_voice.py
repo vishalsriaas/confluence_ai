@@ -304,6 +304,21 @@ class TestShipKiaVoice(FrappeTestCase):
                 self.assertEqual(result["amount"], expected_amount)
                 self.assertTrue(result["gst_inclusive"])
 
+        zone_d = get_shipkia_starting_rate({"zone": "D"})
+        self.assertEqual(
+            zone_d["available_courier_partners"],
+            ["Amazon", "Bluedart", "Delhivery", "E-Kart", "Shadowfax", "Shree Maruti", "Xpressbees"],
+        )
+        self.assertEqual(len(zone_d["starting_rate_options"]), 5)
+        self.assertEqual(
+            [option["courier"] for option in zone_d["starting_rate_options"]],
+            ["Shree Maruti", "Amazon", "Delhivery", "Xpressbees", "E-Kart"],
+        )
+        self.assertEqual(
+            [option["amount"] for option in zone_d["starting_rate_options"]],
+            [35.05, 38.94, 45.43, 50.62, 76.58],
+        )
+
         self.assertEqual(invalid["response_type"], "general_starting")
         self.assertEqual(invalid["amount"], 22.0)
 

@@ -308,6 +308,34 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
         eligible_rows,
         key=lambda row: (row.zone_prices[zone], row.service.casefold()),
     )
+    best_row_by_courier: dict[str, RateRow] = {}
+    for row in eligible_rows:
+        existing = best_row_by_courier.get(row.courier_partner)
+        if existing is None or (row.zone_prices[zone], row.service.casefold()) < (
+            existing.zone_prices[zone],
+            existing.service.casefold(),
+        ):
+            best_row_by_courier[row.courier_partner] = row
+
+    starting_rate_options = []
+    for row in sorted(
+        best_row_by_courier.values(),
+        key=lambda item: (item.zone_prices[zone], item.courier_partner.casefold()),
+    )[:5]:
+        option_base = row.zone_prices[zone]
+        option_gst = option_base * GST_RATE / Decimal("100")
+        starting_rate_options.append(
+            {
+                "courier": row.courier_partner,
+                "service": row.service,
+                "movement_type": "Forward",
+                "weight_slab_g": int(STARTING_RATE_WEIGHT_G),
+                "base_amount": _money(option_base),
+                "gst": _money(option_gst),
+                "amount": _money(option_base + option_gst),
+                "gst_inclusive": True,
+            }
+        )
     base_amount = selected.zone_prices[zone]
     gst = base_amount * GST_RATE / Decimal("100")
     total = base_amount + gst
@@ -329,6 +357,16 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
         },
         "requested_courier_partner": courier_filter or None,
         "requested_transport_mode": transport_mode or None,
+        "available_courier_partners": sorted(
+            best_row_by_courier,
+            key=str.casefold,
+        ),
+        "starting_rate_options": starting_rate_options,
+        "starting_rate_options_note": (
+            "These are up to five distinct courier partners' lowest verified 500 g Forward "
+            f"starting options for Zone {zone}, including GST. They are rate-card options, not a "
+            "guarantee of pincode-level serviceability or delivery time."
+        ),
         "rate_card": rate_card_metadata(),
         "message": (
             f"Zone {zone} shipping rates start from Rs {_money(total):.2f}, including GST."

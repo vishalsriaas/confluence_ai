@@ -41,6 +41,88 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1660_options_query_lists_verified_rates_before_close(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"business_name": "Harsh Enterprises", "business_type": "D2C"})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("shipping rates", turn_id="intent")
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="no-provider",
+            previous_agent_text="Kya aap abhi koi courier partner ya shipping aggregator use karte hain?",
+        )
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "D",
+                "amount": 35.05,
+                "available_courier_partners": [
+                    "Amazon",
+                    "Bluedart",
+                    "Delhivery",
+                    "E-Kart",
+                    "Shadowfax",
+                    "Shree Maruti",
+                    "Xpressbees",
+                ],
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 35.05, "weight_slab_g": 500, "movement_type": "Forward", "gst_inclusive": True},
+                    {"courier": "Amazon", "service": "Amazon Shipping Standard", "amount": 38.94, "weight_slab_g": 500, "movement_type": "Forward", "gst_inclusive": True},
+                    {"courier": "Delhivery", "service": "Delhivery Surface", "amount": 45.43, "weight_slab_g": 500, "movement_type": "Forward", "gst_inclusive": True},
+                    {"courier": "Xpressbees", "service": "Surface Xpressbees 0.5 K.G", "amount": 50.62, "weight_slab_g": 500, "movement_type": "Forward", "gst_inclusive": True},
+                    {"courier": "E-Kart", "service": "E-Kart SURFACE", "amount": 76.58, "weight_slab_g": 500, "movement_type": "Forward", "gst_inclusive": True},
+                ],
+            }
+        )
+        state.monthly_quantity_due = True
+        customer_text = (
+            "Meri monthly shipment 5000 hoti hai, but aur kya kya options available hain, "
+            "kaun kaun se providers hain?"
+        )
+
+        state.apply_deterministic_answers(customer_text, turn_id="options")
+        apply(
+            state,
+            customer_text,
+            decision("service", "35 se starting", "35 se starting"),
+            decision(
+                "current_provider_name",
+                "kaun kaun se providers hain",
+                "kaun kaun se providers hain",
+            ),
+            turn_id="options",
+        )
+
+        self.assertEqual(state.value("monthly_shipments"), 5000)
+        self.assertFalse(state.is_handled("current_provider_name"))
+        self.assertFalse(state.is_handled("service"))
+        self.assertTrue(state.last_provider_options_query)
+        self.assertEqual(
+            state.authorized_rate_amounts,
+            {35.05, 38.94, 45.43, 50.62, 76.58},
+        )
+        guidance = state.guidance()
+        self.assertIn("Shree Maruti Surface", guidance)
+        self.assertIn("Amazon Shipping Standard", guidance)
+        self.assertIn("list every", guidance.casefold())
+        self.assertIn("do not ask the move-forward", guidance.casefold())
+
+    def test_explicit_detailed_shipkia_query_requests_all_verified_facts(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+
+        state.apply_deterministic_answers(
+            "ShipKia ki poori detail batao, kya kya facilities available hain?",
+            turn_id="details",
+        )
+
+        self.assertTrue(state.last_usp_query)
+        self.assertTrue(state.last_detailed_usp_query)
+        guidance = state.guidance()
+        self.assertIn("all four verified facts", guidance)
+        self.assertIn("dedicated account manager", guidance)
+        self.assertIn("WhatsApp plus IVR", guidance)
+
     def test_greeting_does_not_fill_current_problem(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context(

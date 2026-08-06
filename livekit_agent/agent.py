@@ -1628,6 +1628,11 @@ def _voice_safe_pincode_serviceability_result(
             "currency": starting_rate.get("currency", "INR"),
             "gst_inclusive": bool(starting_rate.get("gst_inclusive")),
             "basis": starting_rate.get("basis"),
+            "available_courier_partners": list(
+                starting_rate.get("available_courier_partners") or []
+            ),
+            "starting_rate_options": list(starting_rate.get("starting_rate_options") or []),
+            "starting_rate_options_note": starting_rate.get("starting_rate_options_note"),
             "rate_card": starting_rate.get("rate_card"),
             "rate_scope": "starting_only",
             "resolution_basis": result.get("resolution_basis"),
@@ -3887,10 +3892,17 @@ class ShipKiaAssistant(Agent):
                 "team-discussion close once and end; do not ask another question or send onboarding."
             )
         if self._conversation_state.move_forward_question_due:
-            policy_parts.append(
-                "Move-forward decision is pending. Ask the exact ShipKia move-forward question and "
-                "wait for a clear yes or no; never convert thanks or satisfaction into yes."
-            )
+            if self._conversation_state.last_provider_options_query:
+                policy_parts.append(
+                    "The customer has asked a genuine courier/options follow-up. Answer it fully "
+                    "from the worker-verified option list before any sales close. Do not ask the "
+                    "move-forward question in the same response."
+                )
+            else:
+                policy_parts.append(
+                    "Move-forward decision is pending. Ask the exact ShipKia move-forward question and "
+                    "wait for a clear yes or no; never convert thanks or satisfaction into yes."
+                )
         if memory:
             policy_parts.append(
                 "Same-call memory (confirmed details remain handled; later explicit corrections "

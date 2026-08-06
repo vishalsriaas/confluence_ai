@@ -662,6 +662,49 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["amount"], 22.07)
         self.assertIn("starting rate", result["spoken_response_instruction"])
 
+    def test_route_result_preserves_verified_provider_starting_options(self):
+        result = _voice_safe_pincode_serviceability_result(
+            {
+                "status": "success",
+                "zone": "D",
+                "zone_verified": True,
+                "serviceable": True,
+                "starting_rate": {
+                    "status": "success",
+                    "response_type": "zone_starting",
+                    "zone": "D",
+                    "amount": 35.05,
+                    "currency": "INR",
+                    "gst_inclusive": True,
+                    "available_courier_partners": ["Shree Maruti", "Amazon"],
+                    "starting_rate_options": [
+                        {
+                            "courier": "Shree Maruti",
+                            "service": "Shree Maruti Surface",
+                            "amount": 35.05,
+                            "weight_slab_g": 500,
+                            "movement_type": "Forward",
+                            "gst_inclusive": True,
+                        },
+                        {
+                            "courier": "Amazon",
+                            "service": "Amazon Shipping Standard",
+                            "amount": 38.94,
+                            "weight_slab_g": 500,
+                            "movement_type": "Forward",
+                            "gst_inclusive": True,
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(result["available_courier_partners"], ["Shree Maruti", "Amazon"])
+        self.assertEqual(
+            [option["amount"] for option in result["starting_rate_options"]],
+            [35.05, 38.94],
+        )
+
     async def test_multi_route_forwarder_uses_each_queued_route_once(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context(

@@ -321,6 +321,22 @@ _ZONE_APPLICABILITY_QUERY_PATTERN = re.compile(
     r"(?:कौन|कौनसा|कौन\s+से).{0,35}(?:ज़ोन|जोन))",
     re.IGNORECASE,
 )
+_PROVIDER_OPTIONS_QUERY_PATTERN = re.compile(
+    r"(?:\b(?:which|what|other|available|kaun|kon|aur\s+kya|kya\s+kya)\b.{0,55}"
+    r"\b(?:courier|provider|service|option)s?\b|"
+    r"\b(?:courier|provider|service|option)s?\b.{0,55}"
+    r"\b(?:available|option|rate|rates|kaun|kon|bata)\b|"
+    r"\b(?:char|chaar|four|panch|paanch|five)\b.{0,25}\brates?\b|"
+    r"(?:कौन[\s-]*कौन|और\s+क्या|क्या\s+क्या).{0,55}"
+    r"(?:कूरियर|प्रोवाइडर|सर्विस|ऑप्शन)|"
+    r"(?:चार|पांच).{0,25}(?:रेट|रेट्स))",
+    re.IGNORECASE,
+)
+_DETAILED_USP_QUERY_PATTERN = re.compile(
+    r"\b(?:detail|detailed|poori|puri|pura|complete|all|sabhi|saare|sare|kya\s+kya)\b|"
+    r"(?:डिटेल|पूरी|पूरा|सभी|क्या\s+क्या)",
+    re.IGNORECASE,
+)
 _DISSATISFIED_PATTERN = re.compile(
     r"(?:\b(?:not satisfied|satisfied (?:nahi|nahin|nhi)|khush (?:nahi|nahin|nhi)|"
     r"not good|does not work|doesn't work|too high|mehenga|"
@@ -765,6 +781,8 @@ class GatedConversationState:
         self._presented_starting_rates: set[str] = set()
         self.authorized_rate_amounts: set[float] = set()
         self.primary_rate_amount: float | None = None
+        self.verified_starting_options: list[dict[str, Any]] = []
+        self.available_courier_partners: list[str] = []
         self.requested_rate_type = ""
         self.pending_catalogs: set[str] = set()
         self.catalog_choice_turn_ids: set[str] = set()
@@ -794,6 +812,8 @@ class GatedConversationState:
         self.unsatisfied_resolution_presented = False
         self.unsatisfied_concern = ""
         self.last_usp_query = False
+        self.last_detailed_usp_query = False
+        self.last_provider_options_query = False
         self.last_problem_captured = False
         self.shadowfax_surface_rate_due = False
         self.shadowfax_surface_rate_presented = False
@@ -960,6 +980,8 @@ class GatedConversationState:
             return False
         self.requested_routes.append(normalized)
         self.authorized_rate_amounts.clear()
+        self.verified_starting_options = []
+        self.available_courier_partners = []
         self.pan_india_requested = False
         self.route_zone_lookup_status = ""
         self._append_transition(
@@ -1106,6 +1128,12 @@ class GatedConversationState:
                 _USP_QUERY_PATTERN.search(clean)
                 or _BROAD_USP_QUERY_PATTERN.search(clean)
             )
+        )
+        self.last_detailed_usp_query = bool(
+            self.last_usp_query and _DETAILED_USP_QUERY_PATTERN.search(clean)
+        )
+        self.last_provider_options_query = bool(
+            self.v5_company_pair_flow and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
         )
         self.last_problem_captured = False
         awaiting_unsatisfied_problem = self.unsatisfied_problem_due
@@ -1548,6 +1576,8 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
+        elif volunteered_quantity:
+            quantity_text = volunteered_quantity.group(1) or volunteered_quantity.group(2)
         elif self.monthly_quantity_due and re.search(
             r"\b(?:monthly|month|shipments?|orders?)\b|मंथली|महीने|शिपमेंट|ऑर्डर",
             clean,
@@ -1556,8 +1586,6 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
-        elif volunteered_quantity:
-            quantity_text = volunteered_quantity.group(1) or volunteered_quantity.group(2)
         if quantity_text:
             quantity_value = int(quantity_text.replace(",", ""))
             if quantity_value > 0:
@@ -2112,6 +2140,12 @@ class GatedConversationState:
                 for transition in self.transitions
             ):
                 return None
+        if field in {"current_provider_name", "service"} and _PROVIDER_OPTIONS_QUERY_PATTERN.search(
+            normalize_text(customer_text)
+        ):
+            # "Which providers/options are available?" is a product question,
+            # never the customer's current provider name or selected service.
+            return None
             existing_problem = self.fields.get("current_problem")
             explicit_problem_language = bool(
                 re.search(
@@ -2408,6 +2442,8 @@ class GatedConversationState:
             self.route_zone_lookup_status = ""
             self.authorized_rate_amounts.clear()
             self.primary_rate_amount = None
+            self.verified_starting_options = []
+            self.available_courier_partners = []
             self._presented_starting_rates.discard("general")
             for approved_zone in APPROVED_ZONES:
                 self._presented_starting_rates.discard(f"zone:{approved_zone}")
@@ -2584,6 +2620,8 @@ class GatedConversationState:
         # Flat-Zonal result.
         self.authorized_rate_amounts.clear()
         self.primary_rate_amount = None
+        self.verified_starting_options = []
+        self.available_courier_partners = []
         if isinstance(payload, dict) and str(payload.get("response_type") or "") in {
             "zone_starting",
             "general_starting",
@@ -2593,6 +2631,31 @@ class GatedConversationState:
                 normalized_amount = round(float(amount), 2)
                 self.authorized_rate_amounts.add(normalized_amount)
                 self.primary_rate_amount = normalized_amount
+            raw_options = payload.get("starting_rate_options")
+            if isinstance(raw_options, list):
+                for raw_option in raw_options[:5]:
+                    if not isinstance(raw_option, dict):
+                        continue
+                    option_amount = _number(raw_option.get("amount"))
+                    courier = str(raw_option.get("courier") or "").strip()
+                    service = str(raw_option.get("service") or "").strip()
+                    if option_amount is None or option_amount <= 0 or not courier or not service:
+                        continue
+                    option = {
+                        "courier": courier,
+                        "service": service,
+                        "amount": round(float(option_amount), 2),
+                        "weight_slab_g": raw_option.get("weight_slab_g"),
+                        "movement_type": raw_option.get("movement_type"),
+                        "gst_inclusive": bool(raw_option.get("gst_inclusive")),
+                    }
+                    self.verified_starting_options.append(option)
+                    self.authorized_rate_amounts.add(option["amount"])
+            raw_partners = payload.get("available_courier_partners")
+            if isinstance(raw_partners, list):
+                self.available_courier_partners = [
+                    str(partner).strip() for partner in raw_partners if str(partner).strip()
+                ]
             return
         monetary_keys = {
             "amount",
@@ -2926,6 +2989,30 @@ class GatedConversationState:
                     "Shiprocket use kar rahe hain, ya filhaal koi shipping provider use nahi kar "
                     "rahe?' Do not assume either answer and do not continue to current rate yet."
                 )
+            if self.last_provider_options_query:
+                if self.verified_starting_options:
+                    options = json.dumps(
+                        self.verified_starting_options,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    partners = ", ".join(self.available_courier_partners)
+                    return (
+                        "The customer explicitly asked which courier/service options and rates are "
+                        "available. Answer that question before any move-forward close. List every "
+                        f"worker-verified starting option in this exact data: {options}. Explain that "
+                        "each amount is a GST-inclusive 500 g Forward starting option for the already "
+                        "verified zone, not an exact shipment quote or delivery/serviceability "
+                        f"guarantee. Configured courier partners in this result are: {partners}. "
+                        "Do not invent another courier, service, rate, SLA, saving, or discount. Do "
+                        "not ask the move-forward question in this response."
+                    )
+                return (
+                    "The customer asked for courier/provider options, but no detailed option list is "
+                    "authorized in current worker state. Explain that the exact options and rates "
+                    "must be checked against the active rate card; do not invent names or amounts, "
+                    "and do not jump to the move-forward close."
+                )
             if self.last_usp_query:
                 resume = {
                     "assistance_intent": "Then ask only whether they want rates or onboarding help.",
@@ -2939,9 +3026,16 @@ class GatedConversationState:
                     pending,
                     "Then ask: 'Kya aap ShipKia ke saath aage badhna chahte hain?'",
                 )
+                detail_scope = (
+                    "The customer explicitly requested detail, so explain all four verified facts "
+                    "with a short practical description for each. "
+                    if self.last_detailed_usp_query
+                    else "Choose two or three facts that are most relevant to what the customer asked. "
+                )
                 return (
-                    "Answer the ShipKia information or benefits question naturally and concisely. "
-                    "Choose two or three facts that are most relevant to what the customer asked: "
+                    "Answer the ShipKia information or benefits question naturally and directly. "
+                    + detail_scope
+                    + "The verified facts are: "
                     "ShipKia helps manage shipments across multiple courier partners; it provides a "
                     "dedicated account manager for ticketing and support; it supports WhatsApp order "
                     "confirmation followed by call confirmation when WhatsApp gets no response; and "
@@ -3238,6 +3332,10 @@ class GatedConversationState:
             "verified_pricing_tool": self.verified_pricing_tool,
             "verified_payment_basis": self.verified_payment_basis,
             "authorized_rate_amounts": sorted(self.authorized_rate_amounts),
+            "verified_starting_options": list(self.verified_starting_options),
+            "available_courier_partners": list(self.available_courier_partners),
+            "last_provider_options_query": self.last_provider_options_query,
+            "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
             "state_revision": self.revision,
             "optional_ended_by": self.optional_ended_by,
