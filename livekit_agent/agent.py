@@ -606,6 +606,11 @@ _AGENT_ANYTHING_ELSE_RE = re.compile(
     r"anything\s+else)",
     re.IGNORECASE,
 )
+_AGENT_FLAT_ZONAL_CLAIM_RE = re.compile(
+    r"\bflat[\s-]*zonal\b.{0,120}\b(?:rates?\s+available|rs\s*\d|zones?\s+[a-f])\b|"
+    r"\be[\s-]*kart\s+express\b.{0,80}\bzones?\s+[a-f]",
+    re.IGNORECASE,
+)
 _QUALIFICATION_BRIDGE_RE = re.compile(
     r"\brates?\s+batane\s+se\s+pehle\b.{0,90}"
     r"\b(?:details?|cheezein|cheezen|baatein)\b.{0,70}\b(?:jaan|pooch)",
@@ -805,6 +810,16 @@ def _shipkia_flow_response_violation(
 
     if _SPOKEN_ONBOARDING_URL_RE.search(agent_clean):
         return "spoken_onboarding_url"
+    if (
+        _AGENT_FLAT_ZONAL_CLAIM_RE.search(agent_clean)
+        and not conversation_state.flat_zonal_catalog_presented
+    ):
+        return "unverified_flat_zonal_claim"
+    if (
+        conversation_state.anything_else_checkpoint_consumed
+        and _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
+    ):
+        return "repeated_anything_else_checkpoint"
 
     previous_questions = _assistant_question_fields(previous_agent_text)
     draft_questions = _assistant_question_fields(agent_text)
@@ -2264,7 +2279,11 @@ def _voice_flat_catalog_result(
             (
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
-                else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                else (
+                    " Then stop without asking another question."
+                    if conversation_state.anything_else_checkpoint_consumed
+                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                )
             )
             if conversation_state is not None
             and conversation_state.v5_company_pair_flow
@@ -2389,7 +2408,11 @@ def _voice_flat_zonal_catalog_result(
             (
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
-                else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                else (
+                    " Then stop without asking another question."
+                    if conversation_state.anything_else_checkpoint_consumed
+                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                )
             )
             if conversation_state is not None
             and conversation_state.v5_company_pair_flow
@@ -3505,8 +3528,13 @@ def make_mcp_forwarder(
                                     "After stating the verified requested rate, ask only for the "
                                     "customer's approximate monthly shipment quantity."
                                     if not conversation_state.is_handled("monthly_shipments")
-                                    else "After stating the verified requested rate, ask exactly: "
-                                    "'Kya aap kuch aur jaanna chahenge?'"
+                                    else (
+                                        "After stating the verified requested rate, stop without "
+                                        "asking another question."
+                                        if conversation_state.anything_else_checkpoint_consumed
+                                        else "After stating the verified requested rate, ask "
+                                        "exactly: 'Kya aap kuch aur jaanna chahenge?'"
+                                    )
                                 )
                                 if conversation_state.v5_company_pair_flow
                                 else "After stating the verified requested rate, ask once whether "
@@ -3996,9 +4024,10 @@ class ShipKiaAssistant(Agent):
 ## V5 quantity and close override
 - This section overrides the general V4 post-rate follow-up above. After a verified V5 rate, ask
   the monthly shipment quantity once when it is missing. Capture a numeric or ranged answer before
-  moving on. Then ask exactly "Kya aap kuch aur jaanna chahenge?" Answer any requested
-  information and return to that question. Only after a clear no/nothing-else answer, ask the exact
-  ShipKia move-forward question once.
+  moving on. Then ask exactly "Kya aap kuch aur jaanna chahenge?" Ask this checkpoint only once.
+  Answer any requested follow-up fully without automatically appending the checkpoint again. After
+  an acknowledgement, forgotten question, or no-current-question response, ask the exact ShipKia
+  move-forward question once.
 - If the customer asks for explanation, comparison, or quantity-specific pricing, answer that
   objection first using only the verified starting amount and an honest dedicated-plan/team
   explanation. Never repeat the bare move-forward question without answering the objection.
@@ -4760,6 +4789,21 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "complete kar lijiye.' Otherwise follow only the current "
                                 "authoritative action."
                             )
+                        elif flow_violation == "unverified_flat_zonal_claim":
+                            correction_direction = (
+                                "Do not describe or price Flat-Zonal unless the authoritative state "
+                                "shows its matching catalog was successfully presented. Do not reuse "
+                                "Flat amounts as Flat-Zonal amounts. Follow only this current action: "
+                                + conversation_state.guidance()
+                            )
+                        elif flow_violation == "repeated_anything_else_checkpoint":
+                            correction_direction = (
+                                "The one post-rate anything-else checkpoint was already consumed. "
+                                "Do not repeat or rephrase it. Answer only the customer's current "
+                                "request, or follow the current authoritative action without adding "
+                                "another information checkpoint: "
+                                + conversation_state.guidance()
+                            )
                         elif flow_violation == "qualification_bridge_omitted":
                             correction_direction = (
                                 "Say exactly: 'Rates batane se pehle main aapse kuch zaroori "
@@ -4874,6 +4918,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 and _QUALIFICATION_BRIDGE_RE.search(normalized_agent_text)
             ):
                 conversation_state.mark_qualification_bridge_presented()
+            if (
+                not flow_violation
+                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and _AGENT_ANYTHING_ELSE_RE.search(normalized_agent_text)
+            ):
+                conversation_state.mark_anything_else_question_presented()
             if (
                 "auth dot shipkia dot com slash signup" in normalized_agent_text
                 or "auth.shipkia.com/signup" in normalized_agent_text

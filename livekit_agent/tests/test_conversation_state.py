@@ -41,6 +41,96 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_call_1708_followup_rate_does_not_rearm_anything_else_checkpoint(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates batao", turn_id="intent")
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+        self.assertTrue(state.anything_else_question_due)
+        state.mark_anything_else_question_presented()
+
+        state.apply_deterministic_answers(
+            "Flat rate available hai?",
+            turn_id="flat-followup",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        self.assertTrue(state.anything_else_checkpoint_consumed)
+        self.assertFalse(state.anything_else_question_due)
+        self.assertTrue(state.flat_catalog_due())
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+        self.assertFalse(state.anything_else_question_due)
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", state.guidance())
+
+    def test_call_1708_flat_structure_and_asr_followups_do_not_loop(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat rate batao", turn_id="flat")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+        state.mark_anything_else_question_presented()
+
+        state.apply_deterministic_answers(
+            "so zone of flat rate",
+            turn_id="structure",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+        guidance = state.guidance()
+        self.assertTrue(state.last_flat_structure_query)
+        self.assertTrue(state.anything_else_checkpoint_consumed)
+        self.assertIn("Flat is the route-independent all-zone", guidance)
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", guidance)
+
+        state.apply_deterministic_answers(
+            "\u0938\u094d\u0915\u094d\u0935\u093e\u092f\u0930 \u091a\u0948\u0928\u0932 \u0930\u0947\u091f \u0939\u0948 \u0906\u092a\u0915\u0947 \u092a\u093e\u0938?",
+            turn_id="flat-zonal-asr",
+        )
+        self.assertEqual(state.requested_rate_type, "Flat Zonal")
+        self.assertTrue(state.flat_zonal_catalog_due())
+        self.assertFalse(state.anything_else_question_due)
+        self.assertIn("get_shipkia_flat_zonal_rates", state.guidance())
+
+    def test_call_1708_forgotten_question_or_acknowledgement_moves_forward_once(self):
+        for customer_text in (
+            "Mujhe aur kuch jaanna tha, but main bhool gaya kya jaanna tha?",
+            "\u092e\u0941\u091d\u0947 \u0914\u0930 \u0924\u094b \u0915\u0941\u091b \u091c\u093e\u0928\u0928\u093e \u0925\u093e, \u092c\u091f \u092e\u0948\u0902 \u092d\u0942\u0932 \u0917\u092f\u093e \u0915\u094d\u092f\u093e \u091c\u093e\u0928\u0928\u093e \u0925\u093e?",
+            "\u0920\u0940\u0915 \u0939\u0948\u0964",
+        ):
+            with self.subTest(customer_text=customer_text):
+                state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+                state.seed_context({"monthly_shipments": 1000})
+                state.verified_pricing_tool = "get_shipkia_flat_rates"
+                state.anything_else_checkpoint_consumed = True
+
+                transitions = state.apply_deterministic_answers(
+                    customer_text,
+                    turn_id="post-info-done",
+                    previous_agent_text="Flat aur Flat-Zonal alag pricing structures hain.",
+                )
+
+                self.assertTrue(state.move_forward_question_due)
+                self.assertFalse(state.anything_else_question_due)
+                self.assertEqual(
+                    len([item for item in transitions if item["event"] == "post_information_completed"]),
+                    1,
+                )
+                self.assertIn("ShipKia ke saath aage badhna", state.guidance())
+
+    def test_call_1708_unclear_checkpoint_reply_is_not_forcibly_repeated(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.anything_else_question_due = True
+        state.mark_anything_else_question_presented()
+        state.last_turn_disposition = "unrelated"
+
+        guidance = state.guidance()
+
+        self.assertIn("Ji, main sun raha hoon", guidance)
+        self.assertIn("Do not repeat or rephrase", guidance)
+        self.assertNotIn("Ask exactly once: 'Kya aap kuch aur", guidance)
+
     def test_call_1707_about_shipkia_before_consent_resumes_only_consent(self):
         for customer_text in (
             "Aap mujhe pehle bataiye, ShipKia kya hai?",
@@ -393,11 +483,13 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertFalse(state.last_customer_dissatisfied)
         self.assertFalse(state.unsatisfied_resolution_due)
         self.assertFalse(state.better_plan_close_due)
-        self.assertTrue(state.anything_else_question_due)
+        self.assertTrue(state.anything_else_checkpoint_consumed)
+        self.assertFalse(state.anything_else_question_due)
         guidance = state.guidance()
         self.assertIn("list every", guidance.casefold())
         self.assertIn("Amazon Standard", guidance)
-        self.assertIn("Kya aap kuch aur jaanna chahenge", guidance)
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", guidance)
+        self.assertIn("End after answering", guidance)
 
     def test_anything_else_yes_asks_for_detail_before_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

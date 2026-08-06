@@ -51,6 +51,64 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_call_1708_blocks_flat_zonal_claim_without_matching_catalog(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.flat_catalog_presented = True
+        state.authorized_rate_amounts.update({76.58, 88.26})
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "E-Kart Express ke Flat-Zonal rates available hain. Zones A aur B ke liye "
+                "Rs 76.58 aur Zones C se F ke liye Rs 88.26 hain."
+            ),
+            customer_text="square channel rate hai?",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "unverified_flat_zonal_claim")
+
+        clarification = _shipkia_flow_response_violation(
+            agent_text=(
+                "E-Kart Surface ke Flat rates chahiye ya E-Kart Express ke Flat-Zonal rates?"
+            ),
+            customer_text="E-Kart ke rates batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+        self.assertEqual(clarification, "")
+
+    def test_call_1708_followup_catalog_stops_without_rearming_checkpoint(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.anything_else_checkpoint_consumed = True
+
+        result = _voice_flat_catalog_result(
+            {
+                "status": "success",
+                "response_type": "flat_all",
+                "payment_type": "Prepaid",
+                "flat_rate_options": [
+                    {"min_weight_g": 0, "max_weight_g": 500, "total": 76.58}
+                ],
+            },
+            conversation_state=state,
+        )
+
+        instruction = result["spoken_response_instruction"]
+        self.assertIn("stop without asking another question", instruction)
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", instruction)
+
+        repeated = _shipkia_flow_response_violation(
+            agent_text=(
+                "Flat slabs bata diye hain. Kya aap kuch aur jaanna chahenge?"
+            ),
+            customer_text="Flat rates batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+        self.assertEqual(repeated, "repeated_anything_else_checkpoint")
+
     def test_initial_authoritative_instruction_seeds_consent_before_realtime_draft(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 

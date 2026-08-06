@@ -196,6 +196,11 @@ class TestShipKiaVoice(FrappeTestCase):
             'remember it, then ask exactly: "Kya aap kuch aur jaanna chahenge?"',
             prompt,
         )
+        self.assertIn(
+            "without automatically asking the same anything-else question again",
+            prompt,
+        )
+        self.assertNotIn("and ask the same anything-else question again", prompt)
 
     def test_shipkia_production_metadata_defaults_to_current_v5_prompt(self):
         class FakeTask:

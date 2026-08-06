@@ -278,11 +278,19 @@ _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"\bflat[\s,.-]*(?:2|two|to)?\s*(?:night|nite|nait|tonight)\s*"
     r"(?:rate|rates|pricing|available)\b|"
     r"\bflat\s+(?:channel|chainal|journal)\b|"
+    r"\b(?:square|squire)\s+(?:channel|chainal|zonal)\s*(?:rate|rates|pricing)?\b|"
+    r"\u0938\u094d\u0915\u094d\u0935\u093e\u092f\u0930\s+\u091a\u0948\u0928\u0932\s*\u0930\u0947\u091f|"
     r"\b(?:zonal|donal|jonal)[\s-]*(?:flat|plate|flait)\s*"
     r"(?:rate|rates|pricing|charge|charges)?\b|"
     r"\bzone[\s-]*wise\s+flat\s*(?:rate|rates|pricing|charge|charges)?\b|"
     r"(?:फ्लैट\s*(?:ज़ोनल|जोनल|डोनल)|"
     r"(?:ज़ोनल|जोनल|डोनल|नल)\s*(?:फ्लैट|प्लेट))\s*रेट(?:्स)?)",
+    re.IGNORECASE,
+)
+_FLAT_STRUCTURE_QUERY_PATTERN = re.compile(
+    r"\b(?:so\s+)?zone\s+of\s+(?:the\s+)?flat\s+rate\b|"
+    r"\bflat\s+rate\b.{0,30}\b(?:zone|zonal|all[\s-]*zone|route)\b|"
+    r"\b(?:zone|zonal|all[\s-]*zone|route)\b.{0,30}\bflat\s+rate\b",
     re.IGNORECASE,
 )
 _ZONAL_RATE_REQUEST_PATTERN = re.compile(
@@ -402,6 +410,14 @@ _ANYTHING_ELSE_NO_PATTERN = re.compile(
     r"kuch\s+aur\s+nahi|nothing\s+else|no\s+more|"
     r"\u0928\u0939\u0940\u0902(?:[\s,.!?\u0964]+(?:\u0925\u0948\u0902\u0915\s*\u092f\u0942|\u0927\u0928\u094d\u092f\u0935\u093e\u0926))?|"
     r"\u092c\u0938|\u0914\u0930\s+\u0915\u0941\u091b\s+\u0928\u0939\u0940\u0902)[.!?\u0964]*$",
+    re.IGNORECASE,
+)
+_POST_INFORMATION_DONE_PATTERN = re.compile(
+    r"^(?:(?:ok|okay)(?:\s+(?:ok|okay))*|(?:theek|thik)\s+hai|"
+    r"koi\s+baat\s+nahi|yaad\s+nahi|bhool\s+gaya|bhul\s+gaya|"
+    r"mujhe.{0,30}(?:yaad\s+nahi|bhool\s+gaya|bhul\s+gaya).{0,35}|"
+    r"\u0920\u0940\u0915\s+\u0939\u0948|\u092f\u093e\u0926\s+\u0928\u0939\u0940\u0902|"
+    r".{0,35}\u092d\u0942\u0932\s+\u0917\u092f\u093e.{0,45})[.!?\u0964]*$",
     re.IGNORECASE,
 )
 _KNOWN_COURIER_PARTNERS = (
@@ -898,6 +914,7 @@ class GatedConversationState:
         self.flat_zonal_catalog_presented = False
         self.flat_zonal_group_totals: dict[str, float] = {}
         self.last_flat_zonal_route_query = False
+        self.last_flat_structure_query = False
         self.verified_pricing_path = ""
         self.verified_pricing_tool = ""
         self.verified_payment_basis = ""
@@ -905,6 +922,8 @@ class GatedConversationState:
         self.anything_else_question_due = False
         self.anything_else_detail_due = False
         self.anything_else_decision = ""
+        self.anything_else_checkpoint_consumed = False
+        self.anything_else_question_presented = False
         self.move_forward_question_due = False
         self.move_forward_decision = ""
         self.onboarding_link_due = False
@@ -1282,6 +1301,11 @@ class GatedConversationState:
             and self.flat_zonal_catalog_presented
             and _ZONE_APPLICABILITY_QUERY_PATTERN.search(clean)
         )
+        self.last_flat_structure_query = bool(
+            self.v5_company_pair_flow
+            and _FLAT_STRUCTURE_QUERY_PATTERN.search(clean)
+            and not _FLAT_ZONAL_RATE_REQUEST_PATTERN.search(clean)
+        )
         generic_services_query = bool(
             self.v5_company_pair_flow
             and _GENERIC_SERVICES_QUERY_PATTERN.search(clean)
@@ -1334,6 +1358,7 @@ class GatedConversationState:
         informational_followup = bool(
             self.last_provider_options_query
             or self.last_usp_query
+            or self.last_flat_structure_query
             or re.search(
                 r"\b(?:sabke|saare|sare|all|which|kaun\s+kaun|kitne|total)\b.{0,30}"
                 r"\b(?:rates?|prices?|couriers?|providers?|services?|options?)\b",
@@ -1341,13 +1366,30 @@ class GatedConversationState:
                 re.IGNORECASE,
             )
         )
-        if self.anything_else_detail_due and (
-            informational_followup or len(clean.split()) > 2
+        post_information_done = bool(_POST_INFORMATION_DONE_PATTERN.fullmatch(clean))
+        substantive_post_rate_request = bool(
+            informational_followup
+            or _requested_rate_type(clean)
+            or (
+                len(clean.split()) > 2
+                and _EXPLICIT_RATE_INTENT_PATTERN.search(clean)
+            )
+        )
+        if (
+            self.v5_company_pair_flow
+            and (self.anything_else_question_due or self.anything_else_detail_due)
+            and substantive_post_rate_request
+            and not post_information_done
         ):
-            # A substantive follow-up has arrived. Answer it, then return to
-            # the anything-else checkpoint.
+            # The one post-rate checkpoint has been answered with a real
+            # information request. Answer that request without automatically
+            # appending the same checkpoint again after every follow-up.
             self.anything_else_detail_due = False
-            self.anything_else_question_due = True
+            self.anything_else_question_due = False
+            self.anything_else_decision = "Yes"
+            self.anything_else_checkpoint_consumed = True
+            self.anything_else_question_presented = False
+            self.move_forward_question_due = False
         self.last_problem_captured = False
         awaiting_unsatisfied_problem = self.unsatisfied_problem_due
         self.last_customer_dissatisfied = bool(
@@ -1709,12 +1751,20 @@ class GatedConversationState:
         anything_else_context = bool(
             self.v5_company_pair_flow
             and self.anything_else_question_due
-            and _ANYTHING_ELSE_QUESTION_PATTERN.search(previous_clean)
+            and (
+                self.anything_else_question_presented
+                or _ANYTHING_ELSE_QUESTION_PATTERN.search(previous_clean)
+            )
         )
-        if anything_else_context and is_anything_else_no_answer(move_forward_answer):
+        if anything_else_context and (
+            is_anything_else_no_answer(move_forward_answer)
+            or _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
+        ):
             self.anything_else_question_due = False
             self.anything_else_detail_due = False
             self.anything_else_decision = "No"
+            self.anything_else_checkpoint_consumed = True
+            self.anything_else_question_presented = False
             self.move_forward_question_due = True
             transition = {
                 "event": "anything_else_decided",
@@ -1730,10 +1780,35 @@ class GatedConversationState:
             self.anything_else_question_due = False
             self.anything_else_detail_due = True
             self.anything_else_decision = "Yes"
+            self.anything_else_checkpoint_consumed = True
+            self.anything_else_question_presented = False
             self.move_forward_question_due = False
             transition = {
                 "event": "anything_else_decided",
                 "decision": "Yes",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+        elif (
+            self.v5_company_pair_flow
+            and self.verified_rate_presented()
+            and self.anything_else_checkpoint_consumed
+            and not self.anything_else_question_due
+            and not self.anything_else_detail_due
+            and not self.move_forward_question_due
+            and _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
+        ):
+            # After answering one or more requested follow-ups, a simple
+            # acknowledgement or "I forgot" should advance to the one
+            # move-forward question instead of resurrecting anything-else.
+            self.anything_else_decision = "No"
+            self.move_forward_question_due = True
+            transition = {
+                "event": "post_information_completed",
                 "evidence": str(customer_text or "").strip(),
                 "turn_id": turn_id,
                 "source": "deterministic",
@@ -1891,9 +1966,14 @@ class GatedConversationState:
                     transition["source"] = "deterministic"
                     self.last_monthly_quantity_captured = True
                     self.monthly_quantity_due = False
-                    self.anything_else_question_due = True
+                    self.anything_else_question_due = not self.anything_else_checkpoint_consumed
                     self.anything_else_detail_due = False
-                    self.anything_else_decision = ""
+                    self.anything_else_decision = (
+                        self.anything_else_decision
+                        if self.anything_else_checkpoint_consumed
+                        else ""
+                    )
+                    self.anything_else_question_presented = False
                     self.move_forward_question_due = False
                     applied.append(transition)
 
@@ -3219,7 +3299,9 @@ class GatedConversationState:
             self.customer_satisfied = False
             self.anything_else_question_due = False
             self.anything_else_detail_due = False
-            self.anything_else_decision = ""
+            if not self.anything_else_checkpoint_consumed:
+                self.anything_else_decision = ""
+            self.anything_else_question_presented = False
             self.move_forward_decision = ""
             self.onboarding_link_due = False
             self.better_plan_close_due = False
@@ -3232,8 +3314,13 @@ class GatedConversationState:
                 self.move_forward_question_due = False
             else:
                 self.monthly_quantity_due = False
-                self.anything_else_question_due = True
+                self.anything_else_question_due = not self.anything_else_checkpoint_consumed
                 self.move_forward_question_due = False
+
+    def mark_anything_else_question_presented(self) -> None:
+        if not self.anything_else_question_due:
+            return
+        self.anything_else_question_presented = True
 
     def mark_route_zone_lookup_unavailable(self, *, fallback_presented: bool = True) -> None:
         """End exact-route pricing when the trusted resolver cannot verify a zone."""
@@ -3366,6 +3453,13 @@ class GatedConversationState:
                         separators=(",", ":"),
                     )
                     partners = ", ".join(self.available_courier_partners)
+                    provider_rates_close = (
+                        "End after answering. Do not ask anything else or the move-forward question "
+                        "in this response."
+                        if self.anything_else_checkpoint_consumed
+                        else "Finish by asking exactly: 'Kya aap kuch aur jaanna chahenge?' Do not "
+                        "ask the move-forward question in this response."
+                    )
                     return (
                         "The customer explicitly asked which courier/service options and rates are "
                         "available. Answer that question before any move-forward close. List every "
@@ -3374,12 +3468,16 @@ class GatedConversationState:
                         "verified zone, not an exact shipment quote or delivery/serviceability "
                         f"guarantee. Configured courier partners in this result are: {partners}. "
                         "Do not invent another courier, service, rate, SLA, saving, or discount. "
-                        "Finish by asking exactly: 'Kya aap kuch aur jaanna chahenge?' Do not ask "
-                        "the move-forward question in this response."
+                        + provider_rates_close
                     )
                 partner_names = self.available_courier_partners or list(_KNOWN_COURIER_PARTNERS)
                 known_partners = ", ".join(partner_names)
-                if self.verified_rate_presented():
+                if self.anything_else_checkpoint_consumed:
+                    provider_resume = (
+                        "End after answering. Do not ask anything else or the move-forward question "
+                        "in this response."
+                    )
+                elif self.verified_rate_presented():
                     provider_resume = "Then ask exactly: 'Kya aap kuch aur jaanna chahenge?'"
                 else:
                     provider_resume = {
@@ -3411,20 +3509,25 @@ class GatedConversationState:
                     "to the move-forward close."
                 )
             if self.last_usp_query:
-                resume = {
-                    "conversation_consent": (
-                        "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
-                    ),
-                    "assistance_intent": early_side_query_resume,
-                    "business_name": "Then resume by asking only for their business or brand name.",
-                    "business_type": "Then resume by asking only whether their business is B2C or D2C.",
-                    "current_shipping_arrangement": "Then resume by asking only which courier or shipping provider they use.",
-                    "current_provider_name": "Then resume by asking only which courier or aggregator they use.",
-                    "current_shipping_rate": "Then resume by asking only their current comparable shipping rate.",
-                    "current_problem": "Then resume by asking only their main problem with that provider.",
-                }.get(
-                    pending,
-                    "Then ask: 'Kya aap kuch aur jaanna chahenge?'",
+                resume = (
+                    "End after answering. Do not ask anything else or the move-forward question "
+                    "in this response."
+                    if self.anything_else_checkpoint_consumed
+                    else {
+                        "conversation_consent": (
+                            "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
+                        ),
+                        "assistance_intent": early_side_query_resume,
+                        "business_name": "Then resume by asking only for their business or brand name.",
+                        "business_type": "Then resume by asking only whether their business is B2C or D2C.",
+                        "current_shipping_arrangement": "Then resume by asking only which courier or shipping provider they use.",
+                        "current_provider_name": "Then resume by asking only which courier or aggregator they use.",
+                        "current_shipping_rate": "Then resume by asking only their current comparable shipping rate.",
+                        "current_problem": "Then resume by asking only their main problem with that provider.",
+                    }.get(
+                        pending,
+                        "Then ask: 'Kya aap kuch aur jaanna chahenge?'",
+                    )
                 )
                 detail_scope = (
                     "The customer explicitly requested detail, so explain all four verified facts "
@@ -3451,6 +3554,15 @@ class GatedConversationState:
                     "structure. Ask only: 'E-Kart Surface ke Flat rates chahiye ya E-Kart Express "
                     "ke Flat-Zonal rates?' Do not ask for a zone or route, do not quote a price, "
                     "and do not choose a structure for them."
+                )
+            if self.last_flat_structure_query:
+                return (
+                    "Answer the customer's pricing-structure question directly: Flat is the "
+                    "route-independent all-zone E-Kart Surface catalog, while Flat-Zonal is the "
+                    "separate E-Kart Express structure with Zone A-B and Zone C-F groups. Do not "
+                    "quote or reuse any amount for this explanation, do not call a pricing tool, "
+                    "and end after answering without asking anything else or the move-forward "
+                    "question in this response."
                 )
             if self.shadowfax_surface_rate_due and self.is_confirmed("zone"):
                 return (
@@ -3483,7 +3595,11 @@ class GatedConversationState:
                 continuation = (
                     " Then ask only for their approximate monthly shipment quantity."
                     if self.monthly_quantity_due
-                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                    else (
+                        " Then stop without asking another question."
+                        if self.anything_else_checkpoint_consumed
+                        else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                    )
                 )
                 return (
                     f"The customer asked how much. Lead with the verified starting rate: Rs "
@@ -3502,6 +3618,16 @@ class GatedConversationState:
                     "jaanna chahenge?' Do not ask the ShipKia move-forward question yet."
                 )
             if self.anything_else_question_due:
+                if (
+                    self.anything_else_question_presented
+                    and self.last_turn_disposition in {"unrelated", "mixed", "guard_failed"}
+                ):
+                    return (
+                        "The one anything-else checkpoint was already asked. The latest audio did "
+                        "not contain a clear answer or information request. Briefly say: 'Ji, main "
+                        "sun raha hoon.' Do not repeat or rephrase the anything-else question, do "
+                        "not ask the move-forward question, and do not infer a decision."
+                    )
                 return (
                     "Ask exactly once: 'Kya aap kuch aur jaanna chahenge?' If the customer wants "
                     "more information, answer that request fully. Only a clear no/nothing-else "
@@ -3732,6 +3858,8 @@ class GatedConversationState:
             "anything_else_question_due": self.anything_else_question_due,
             "anything_else_detail_due": self.anything_else_detail_due,
             "anything_else_decision": self.anything_else_decision,
+            "anything_else_checkpoint_consumed": self.anything_else_checkpoint_consumed,
+            "anything_else_question_presented": self.anything_else_question_presented,
             "move_forward_decision": self.move_forward_decision,
             "onboarding_link_due": self.onboarding_link_due,
             "better_plan_close_due": self.better_plan_close_due,
@@ -3759,6 +3887,7 @@ class GatedConversationState:
             "available_courier_partners": list(self.available_courier_partners),
             "last_provider_options_query": self.last_provider_options_query,
             "last_provider_rates_query": self.last_provider_rates_query,
+            "last_flat_structure_query": self.last_flat_structure_query,
             "provider_rates_answer_due": self.provider_rates_answer_due,
             "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
