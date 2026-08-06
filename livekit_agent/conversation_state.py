@@ -367,6 +367,12 @@ _MOVE_FORWARD_NO_PATTERN = re.compile(
     r"\u0928\u0939\u0940\u0902|\u0905\u092d\u0940\s+\u0928\u0939\u0940\u0902|\u0928\u0939\u0940\u0902\s+\u0925\u0948\u0902\u0915\s*\u092f\u0942)[.!?\u0964]*$",
     re.IGNORECASE,
 )
+
+_NON_ANSWER_CHATTER_PATTERN = re.compile(
+    r"^(?:hello|hallo|helo|hi|hey|haan|han|yes|okay|ok|theek\s+hai|thik\s+hai|"
+    r"sun\s+rahe\s+ho|sunai\s+de\s+raha\s+hai|can\s+you\s+hear\s+me)$",
+    re.IGNORECASE,
+)
 _RATE_REPEAT_REQUEST_PATTERN = re.compile(
     r"^(?:how\s+much|kitna|kitne|rate\s+(?:batao|bataye|kya\s+hai)|"
     r"pehle\s+(?:rate\s+)?batao|\u0915\u093f\u0924\u0928\u093e|\u0924\u094b\s+\u092c\u0924\u093e\u0913\s+\u092a\u0939\u0932\u0947)[.!?\u0964]*$",
@@ -1705,6 +1711,7 @@ class GatedConversationState:
                 problem_evidence
                 and len(problem_evidence) <= 160
                 and not _contains_phrase(problem_clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
+                and not _NON_ANSWER_CHATTER_PATTERN.fullmatch(problem_clean)
             ):
                 transition = self.apply_decision(
                     field="current_problem",

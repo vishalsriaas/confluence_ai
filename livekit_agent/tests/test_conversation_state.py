@@ -41,6 +41,51 @@ def arrangement_pending_state():
 
 
 class TestGatedConversationState(unittest.TestCase):
+    def test_greeting_does_not_fill_current_problem(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_shipping_rate": 35,
+            }
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates check karni hain", turn_id="intent")
+
+        transitions = state.apply_deterministic_answers(
+            "Hello.",
+            turn_id="greeting",
+            previous_agent_text="Shiprocket ke saath aapko kya problem aa rahi hai?",
+        )
+
+        self.assertFalse(state.is_handled("current_problem"))
+        self.assertFalse(any(item.get("field") == "current_problem" for item in transitions))
+
+    def test_real_problem_still_fills_current_problem(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_shipping_rate": 35,
+            }
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates check karni hain", turn_id="intent")
+
+        state.apply_deterministic_answers(
+            "RTO follow-up mein dikkat hai.",
+            turn_id="problem",
+            previous_agent_text="Shiprocket ke saath aapko kya problem aa rahi hai?",
+        )
+
+        self.assertEqual(state.value("current_problem"), "RTO follow-up mein dikkat hai")
+
     def test_v5_unsatisfied_without_known_problem_asks_problem_then_team_solution(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"monthly_shipments": 500})

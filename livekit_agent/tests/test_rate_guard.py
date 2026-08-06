@@ -11,6 +11,7 @@ from livekit_agent.agent import (
     _authoritative_rate_request_arguments,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
+    _rate_gate_response,
     _response_language_for_turn,
     _assistant_pincode_claims,
     _assistant_single_zone_claims,
@@ -43,6 +44,19 @@ class _Runtime:
 
     def record_tool_outcome(self, tool_name, *, status, summary=""):
         self.tool_outcomes.append((tool_name, status, summary))
+
+
+class TestRateGateResponse(unittest.TestCase):
+    def test_empty_pending_field_returns_safe_gate_instead_of_crashing(self):
+        result = _rate_gate_response(
+            "starting_rate_required",
+            "",
+            "Pricing is not ready yet.",
+        )
+
+        self.assertEqual(result["next_missing_field"], "")
+        self.assertEqual(result["next_question"], "")
+        self.assertEqual(result["status"], "starting_rate_required")
 
 
 class _AnswerGuard:

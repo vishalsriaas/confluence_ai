@@ -987,10 +987,14 @@ def _is_refusal_value(value: object) -> bool:
 
 
 def _rate_gate_response(status: str, field: str, message: str) -> dict[str, object]:
+    field_label = _RATE_FIELD_LABELS.get(
+        field,
+        field.replace("_", " ") if field else "",
+    )
     return {
         "status": status,
         "next_missing_field": field,
-        "next_question": _RATE_FIELD_LABELS[field],
+        "next_question": field_label,
         "message": message,
         "missing_field_recovery": (
             "First inspect the same-call transcript and confirmed call context. If the customer "
@@ -3972,9 +3976,9 @@ class ShipKiaAssistant(Agent):
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.35")),
-        min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_DURATION", "0.5")),
-        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.65")),
+        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.20")),
+        min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_DURATION", "0.40")),
+        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.50")),
     )
 
 
@@ -4098,10 +4102,10 @@ async def entrypoint(ctx: JobContext) -> None:
             # Gemini Live does not support commit_audio, so its server-side AAD
             # must remain enabled for microphone turns to be transcribed.
             disabled=False,
-            start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_LOW,
-            end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+            start_of_speech_sensitivity=genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
+            end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_HIGH,
             prefix_padding_ms=int(os.getenv("GEMINI_VAD_PREFIX_PADDING_MS", "300")),
-            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "700")),
+            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "500")),
         )
     )
     model = google.realtime.RealtimeModel(
@@ -4130,13 +4134,16 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption={
                 "enabled": True,
                 "min_duration": float(
-                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "1.0")
+                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.50")
                 ),
                 "resume_false_interruption": True,
                 "false_interruption_timeout": float(
                     os.getenv("LIVEKIT_FALSE_INTERRUPTION_TIMEOUT_SECONDS", "1.0")
                 ),
-                "discard_audio_if_uninterruptible": True,
+                # Keep speech received during the brief AEC warm-up. The agent
+                # may not stop playout immediately, but the customer's first
+                # utterance must still become the next input turn.
+                "discard_audio_if_uninterruptible": False,
             },
         ),
     )
