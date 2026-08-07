@@ -1619,6 +1619,11 @@ class TestGatedConversationState(unittest.TestCase):
             "Par flood zone rate available?",
             "Mai puch raha hoon, flat, 2 night rate available hai.",
             "Rflat Zonal",
+            # call-1835: Gemini ASR rendered "Flat-Zonal rate" as
+            # "flat zone ... let" and then "flat donal ... date".
+            "\u0905\u091a\u094d\u091b\u093e, \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u0915\u0941\u091b \u092b\u094d\u0932\u0948\u091f \u091c\u094b\u0928 \u0939\u0948, \u0932\u0947\u091f \u0926\u0947 \u0915\u094d\u092f\u093e?",
+            "\u092e\u0948\u0902 \u092a\u0942\u091b \u0930\u0939\u093e \u0939\u0942\u0902, \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u0915\u0941\u091b \u092b\u094d\u0932\u0948\u091f, \u0921\u094b\u0928\u0932, \u0921\u0947\u091f \u092d\u0940 \u0939\u0948 \u0915\u094d\u092f\u093e?",
+            "flat donal date bhi hai kya?",
             "orthonal flat rate",
             "à flat Donner trade",
             "\u092b\u094d\u0932\u0948\u091f \u091c\u0930\u094d\u0928\u0932 \u0930\u0947\u091f",
@@ -1652,6 +1657,40 @@ class TestGatedConversationState(unittest.TestCase):
                 guidance = state.guidance()
                 self.assertIn("Call get_shipkia_flat_zonal_rates exactly once", guidance)
                 self.assertNotIn("location", guidance.casefold())
+
+    def test_call_1835_new_flat_zonal_request_overrides_stale_move_forward_state(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.seed_context({"monthly_shipments": 1000})
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat rate batao", turn_id="flat")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates", payment_basis="Prepaid")
+        state.anything_else_checkpoint_consumed = True
+        state.move_forward_question_due = True
+
+        state.apply_deterministic_answers(
+            "\u0905\u091a\u094d\u091b\u093e, \u0906\u092a\u0915\u0947 \u092a\u093e\u0938 \u0915\u0941\u091b \u092b\u094d\u0932\u0948\u091f \u091c\u094b\u0928 \u0939\u0948, \u0932\u0947\u091f \u0926\u0947 \u0915\u094d\u092f\u093e?",
+            turn_id="call-1835-flat-zonal",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.requested_rate_type, "Flat Zonal")
+        self.assertTrue(state.flat_zonal_catalog_due())
+        self.assertFalse(state.move_forward_question_due)
+        self.assertFalse(state.anything_else_question_due)
+        self.assertIn("get_shipkia_flat_zonal_rates exactly once", state.guidance())
+        self.assertNotIn("aage badhna", state.guidance())
+
+    def test_pending_catalog_guidance_defensively_precedes_stale_move_forward_flag(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.requested_rate_type = "Flat Zonal"
+        state.pending_catalogs = {"Flat Zonal"}
+        state.move_forward_question_due = True
+
+        guidance = state.guidance()
+
+        self.assertIn("get_shipkia_flat_zonal_rates exactly once", guidance)
+        self.assertNotIn("aage badhna", guidance)
 
     def test_v5_call_1609_letter_to_asr_selects_flat_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)

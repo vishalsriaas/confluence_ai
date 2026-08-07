@@ -298,11 +298,12 @@ _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"(?:rate|rates|pricing|charge|charges)?\b|"
     r"\b(?:orthonal|ortho[\s-]*nal|ordinal)[\s-]*flat\s*"
     r"(?:rate|rates|pricing|charge|charges)?\b|"
-    r"\bflat[\s-]*(?:donner|donnal|jonal|journal)[\s-]*"
-    r"(?:rate|rates|trade|pricing|charge|charges)?\b|"
+    r"\bflat[\s,.-]*(?:donner|donn?al|jonal|journal)[\s,.-]*"
+    r"(?:rate|rates|trade|date|dates|late|let|pricing|charge|charges)?\b|"
     r"\bzone[\s-]*wise\s+flat\s*(?:rate|rates|pricing|charge|charges)?\b|"
-    r"\u092b\u094d\u0932\u0948\u091f\s*(?:\u091c\u0930\u094d\u0928\u0932|\u091c\u094b\u0928\u0932|\u0921\u094b\u0928\u0932)\s*"
-    r"\u0930\u0947\u091f(?:\u094d\u0938)?|"
+    r"\u092b\u094d\u0932\u0948\u091f[\s,.-]*(?:\u091c\u0930\u094d\u0928\u0932|\u091c\u094b\u0928(?:\u0932)?|\u0921\u094b\u0928\u0932)"
+    r"(?:[\s,.-]*(?:\u0930\u0947\u091f(?:\u094d\u0938)?|\u0932\u0947\u091f|\u0921\u0947\u091f))?"
+    r"(?=\s|[,.?!\u0964]|$)|"
     r"(?:फ्लैट\s*(?:ज़ोनल|जोनल|डोनल)|"
     r"(?:ज़ोनल|जोनल|डोनल|नल)\s*(?:फ्लैट|प्लेट))\s*रेट(?:्स)?)",
     re.IGNORECASE,
@@ -3742,6 +3743,21 @@ class GatedConversationState:
                     "more information, answer that request fully. Only a clear no/nothing-else "
                     "answer may advance to the ShipKia move-forward question."
                 )
+            # A newly requested catalog supersedes a stale sales-close
+            # checkpoint. The turn parser normally clears the close flags, but
+            # this ordering also protects realtime classifier/tool timing races.
+            if self.flat_catalog_due():
+                return (
+                    "Call get_shipkia_flat_rates exactly once now for the complete verified Flat "
+                    "catalog. Do not ask for business details, route, weight, payment mode, or "
+                    "permission first. Speak all returned slabs and amounts directly."
+                )
+            if self.flat_zonal_catalog_due():
+                return (
+                    "Call get_shipkia_flat_zonal_rates exactly once now for the complete verified "
+                    "Flat-Zonal catalog. Do not ask for business details, route, weight, payment "
+                    "mode, or permission first. Speak each returned zone group and amount."
+                )
             if self.move_forward_question_due:
                 return (
                     "Ask exactly once: 'Kya aap ShipKia ke saath aage badhna chahte hain?' Wait "
@@ -3835,18 +3851,6 @@ class GatedConversationState:
                     "state. Speak its returned zone starting rate as a starting rate, then ask the "
                     "customer's monthly shipment quantity. Never ask permission to check the rate, "
                     "and never ask weight or payment mode first."
-                )
-            if self.flat_catalog_due():
-                return (
-                    "Call get_shipkia_flat_rates exactly once now for the complete verified Flat "
-                    "catalog. Do not ask for business details, route, weight, payment mode, or "
-                    "permission first. Speak all returned slabs and amounts directly."
-                )
-            if self.flat_zonal_catalog_due():
-                return (
-                    "Call get_shipkia_flat_zonal_rates exactly once now for the complete verified "
-                    "Flat-Zonal catalog. Do not ask for business details, route, weight, payment "
-                    "mode, or permission first. Speak each returned zone group and amount."
                 )
             if self.starting_rate_due():
                 return (

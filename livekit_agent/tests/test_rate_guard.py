@@ -15,6 +15,7 @@ from livekit_agent.agent import (
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
     _high_volume_manager_reply_instruction,
+    _asr_noise_reason,
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
@@ -55,6 +56,42 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_call_1838_rejects_multilingual_noise_hallucinations(self):
+        noisy_transcripts = (
+            ("nai. Ladki, kaun? Nai nai.", None, "repeated_negative_fragment"),
+            ("Mmm, no.", None, "filler_negative_fragment"),
+            ("\u0646\u06c1\u06cc\u06ba.", None, "unsupported_script"),
+            ("\ub0b4\uc774 \ub0b4\uc774", None, "unsupported_script"),
+            ("\u306d \u3044\u3044 \u306d \u3044\u3044 \u3002", None, "unsupported_script"),
+            ("estas? \u00bfY si quieres, vamos?", None, "unexpected_language_punctuation"),
+            ("No", "es-ES", "unsupported_language:es-es"),
+        )
+        for transcript, language, expected in noisy_transcripts:
+            with self.subTest(transcript=transcript):
+                self.assertEqual(
+                    _asr_noise_reason(transcript, language=language),
+                    expected,
+                )
+
+    def test_noise_filter_keeps_supported_real_customer_answers(self):
+        for transcript in (
+            "no",
+            "nahi",
+            "\u0928\u0939\u0940\u0902",
+            "haan ji",
+            "shipping rates",
+            "Gurgaon se pan India",
+            "8000",
+            "mujhe onboarding nahi chahiye",
+        ):
+            with self.subTest(transcript=transcript):
+                self.assertEqual(_asr_noise_reason(transcript), "")
+
+        self.assertEqual(
+            _asr_noise_reason("shipping rates", confidence=0.2),
+            "low_transcript_confidence",
+        )
+
     def test_controlled_detailed_services_reply_is_complete_and_single(self):
         instruction = _detailed_services_reply_instruction("Hinglish")
 

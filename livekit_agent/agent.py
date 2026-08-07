@@ -651,6 +651,61 @@ _AGENT_OPENING_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UNSUPPORTED_ASR_SCRIPT_RE = re.compile(
+    # ShipKia currently supports English/Hinglish (Latin) and Hindi
+    # (Devanagari). These blocks appeared in call-1838 when background noise
+    # was hallucinated as Urdu, Korean and Japanese speech.
+    r"[\u0600-\u06ff\u0750-\u077f\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\uac00-\ud7af]"
+)
+_ASR_NOISE_NEGATIVE_RE = re.compile(
+    r"\b(?:no|nope|nah+i|nai|nhi|nahin)\b|\u0928\u0939\u0940\u0902",
+    re.IGNORECASE,
+)
+_ASR_ACTIONABLE_RE = re.compile(
+    r"\b(?:rate|rates|pricing|onboarding|courier|shipment|shipping|service|services|"
+    r"business|company|brand|pickup|delivery|pincode|weight|cod|prepaid|flat|zone|"
+    r"problem|issue|manager|support|yes|haan|han|ji|bata|batao|chahiye|want)\b|"
+    r"\u0930\u0947\u091f|\u0915\u0942\u0930\u093f\u092f\u0930|\u0936\u093f\u092a\u092e\u0947\u0902\u091f|\u0939\u093e\u0901|\u0939\u093e\u0902|\u091a\u093e\u0939\u093f\u090f",
+    re.IGNORECASE,
+)
+
+
+def _asr_noise_reason(
+    customer_text: object,
+    *,
+    language: object = None,
+    confidence: object = None,
+) -> str:
+    """Return why a final realtime transcript is unsafe to treat as speech."""
+    clean = _normalized_text(customer_text).strip()
+    if not clean:
+        return "empty_transcript"
+
+    language_code = str(language or "").strip().casefold().replace("_", "-")
+    if language_code and not language_code.startswith(("en", "hi")):
+        return f"unsupported_language:{language_code[:16]}"
+    if _UNSUPPORTED_ASR_SCRIPT_RE.search(clean):
+        return "unsupported_script"
+    if "\u00bf" in clean or "\u00a1" in clean:
+        return "unexpected_language_punctuation"
+    if confidence is not None:
+        try:
+            if float(confidence) < 0.45:
+                return "low_transcript_confidence"
+        except (TypeError, ValueError):
+            pass
+
+    negatives = _ASR_NOISE_NEGATIVE_RE.findall(clean)
+    if len(negatives) >= 2 and not _ASR_ACTIONABLE_RE.search(clean):
+        return "repeated_negative_fragment"
+    if re.fullmatch(
+        r"(?:m+|h+m+|uh+|um+|huh+)[\s,.-]+(?:no|nahi|nai|nhi|nahin)[.!?]*",
+        clean,
+        re.IGNORECASE,
+    ):
+        return "filler_negative_fragment"
+    return ""
+
 
 def _is_opening_noise_turn(
     customer_text: object,
@@ -4537,9 +4592,9 @@ class ShipKiaAssistant(Agent):
 
 def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.35")),
-        min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_DURATION", "0.40")),
-        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.60")),
+        min_speech_duration=float(os.getenv("VAD_MIN_SPEECH_DURATION", "0.50")),
+        min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_DURATION", "0.50")),
+        activation_threshold=float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.70")),
     )
 
 
@@ -4665,8 +4720,8 @@ async def entrypoint(ctx: JobContext) -> None:
             disabled=False,
             start_of_speech_sensitivity=_gemini_start_sensitivity(),
             end_of_speech_sensitivity=_gemini_end_sensitivity(),
-            prefix_padding_ms=int(os.getenv("GEMINI_VAD_PREFIX_PADDING_MS", "300")),
-            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "700")),
+            prefix_padding_ms=int(os.getenv("GEMINI_VAD_PREFIX_PADDING_MS", "200")),
+            silence_duration_ms=int(os.getenv("GEMINI_VAD_SILENCE_DURATION_MS", "850")),
         )
     )
     model = google.realtime.RealtimeModel(
@@ -4695,9 +4750,9 @@ async def entrypoint(ctx: JobContext) -> None:
             interruption={
                 "enabled": True,
                 "min_duration": float(
-                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "0.90")
+                    os.getenv("LIVEKIT_INTERRUPTION_MIN_DURATION_SECONDS", "1.20")
                 ),
-                "min_words": int(os.getenv("LIVEKIT_INTERRUPTION_MIN_WORDS", "2")),
+                "min_words": int(os.getenv("LIVEKIT_INTERRUPTION_MIN_WORDS", "3")),
                 "resume_false_interruption": True,
                 "false_interruption_timeout": float(
                     os.getenv("LIVEKIT_FALSE_INTERRUPTION_TIMEOUT_SECONDS", "1.0")
@@ -4723,9 +4778,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     call_done = asyncio.Event()
     participant_seen = bool(ctx.room.remote_participants)
+    participant_audio_active = participant_seen
     close_reason = "maximum_call_duration"
     correction_active = False
     ignored_opening_noise: dict[str, float] = {}
+    ignored_asr_noise: dict[str, float] = {}
+    asr_noise_strikes: list[float] = []
+    asr_noise_quarantine_until = 0.0
     information_reply_scheduled_epochs: set[int] = set()
     controlled_information_reply_epochs: set[int] = set()
     flow_correction_epochs: set[int] = set()
@@ -4817,13 +4876,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @ctx.room.on("participant_connected")
     def _participant_connected(participant):
-        nonlocal participant_seen
+        nonlocal participant_seen, participant_audio_active
         participant_seen = True
+        participant_audio_active = True
         runtime.participant_connected()
         logger.info("Customer joined room: %s", participant.identity)
 
     @ctx.room.on("participant_disconnected")
     def _participant_disconnected(participant):
+        nonlocal participant_audio_active
+        participant_audio_active = False
         logger.info("Customer left room: %s", participant.identity)
         if participant_seen and not ctx.room.remote_participants:
             async def end_after_grace() -> None:
@@ -4846,8 +4908,64 @@ async def entrypoint(ctx: JobContext) -> None:
         if getattr(event, "is_final", False):
             turn_id = f"user:{getattr(event, 'created_at', time.time())}"
             transcript = getattr(event, "transcript", "")
+            normalized_transcript = _normalized_text(transcript)
+            now_monotonic = time.monotonic()
+            nonlocal asr_noise_quarantine_until
+            terminal_close_presented = bool(
+                conversation_state.onboarding_link_presented
+                or conversation_state.better_plan_close_presented
+                or conversation_state.unsatisfied_resolution_presented
+            )
+            noise_reason = _asr_noise_reason(
+                transcript,
+                language=getattr(event, "language", None),
+            )
+            if not participant_audio_active:
+                noise_reason = "participant_disconnected"
+            elif terminal_close_presented:
+                noise_reason = "terminal_close_presented"
+            elif (
+                now_monotonic < asr_noise_quarantine_until
+                and len(normalized_transcript.split()) <= 10
+            ):
+                noise_reason = "noise_quarantine"
+            if noise_reason:
+                ignored_asr_noise[normalized_transcript] = now_monotonic
+                if noise_reason not in {
+                    "participant_disconnected",
+                    "terminal_close_presented",
+                    "noise_quarantine",
+                }:
+                    asr_noise_strikes[:] = [
+                        seen_at
+                        for seen_at in asr_noise_strikes
+                        if now_monotonic - seen_at <= 12.0
+                    ]
+                    asr_noise_strikes.append(now_monotonic)
+                    if len(asr_noise_strikes) >= 2:
+                        asr_noise_quarantine_until = now_monotonic + 10.0
+
+                async def suppress_asr_noise() -> None:
+                    if noise_reason not in {
+                        "participant_disconnected",
+                        "terminal_close_presented",
+                    }:
+                        try:
+                            await session.interrupt()
+                        except RuntimeError:
+                            pass
+                    await emit_runtime_event(
+                        "asr_noise_ignored",
+                        status="ignored",
+                        noise_reason=noise_reason,
+                        customer_text=str(transcript or "")[:120],
+                    )
+
+                task = asyncio.create_task(suppress_asr_noise())
+                task.add_done_callback(VoiceSessionRuntime._log_task_exception)
+                return
             if _is_opening_noise_turn(transcript, conversation_state):
-                ignored_opening_noise[_normalized_text(transcript)] = time.monotonic()
+                ignored_opening_noise[normalized_transcript] = now_monotonic
                 async def suppress_opening_noise() -> None:
                     try:
                         await session.interrupt()
@@ -4882,6 +5000,24 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_id = getattr(item, "id", None)
             customer_text = item.text_content or ""
             noise_key = _normalized_text(customer_text)
+            ignored_noise_at = ignored_asr_noise.get(noise_key)
+            if ignored_noise_at is not None and time.monotonic() - ignored_noise_at <= 5.0:
+                ignored_asr_noise.pop(noise_key, None)
+                return
+            if (
+                not participant_audio_active
+                or conversation_state.onboarding_link_presented
+                or conversation_state.better_plan_close_presented
+                or conversation_state.unsatisfied_resolution_presented
+            ):
+                return
+            item_noise_reason = _asr_noise_reason(
+                customer_text,
+                confidence=getattr(item, "transcript_confidence", None),
+            )
+            if item_noise_reason:
+                ignored_asr_noise[noise_key] = time.monotonic()
+                return
             ignored_at = ignored_opening_noise.get(noise_key)
             recently_ignored = bool(
                 ignored_at is not None and time.monotonic() - ignored_at <= 5.0
@@ -5294,24 +5430,32 @@ async def entrypoint(ctx: JobContext) -> None:
             ):
                 conversation_state.mark_anything_else_question_presented()
             if (
-                "auth dot shipkia dot com slash signup" in normalized_agent_text
-                or "auth.shipkia.com/signup" in normalized_agent_text
-                or (
-                    "whatsapp" in normalized_agent_text
-                    and "onboarding" in normalized_agent_text
-                    and "link" in normalized_agent_text
+                not flow_violation
+                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and (
+                    "auth dot shipkia dot com slash signup" in normalized_agent_text
+                    or "auth.shipkia.com/signup" in normalized_agent_text
+                    or (
+                        "whatsapp" in normalized_agent_text
+                        and "onboarding" in normalized_agent_text
+                        and "link" in normalized_agent_text
+                    )
                 )
             ):
                 conversation_state.mark_onboarding_link_presented()
             if (
-                "better plan" in normalized_agent_text
+                not flow_violation
+                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and "better plan" in normalized_agent_text
                 and "team" in normalized_agent_text
                 and "discuss" in normalized_agent_text
                 and "thank you for calling shipkia" in normalized_agent_text
             ):
                 conversation_state.mark_better_plan_close_presented()
             if (
-                conversation_state.unsatisfied_resolution_due
+                not flow_violation
+                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and conversation_state.unsatisfied_resolution_due
                 and "team" in normalized_agent_text
                 and "discuss" in normalized_agent_text
                 and ("solution" in normalized_agent_text or "better plan" in normalized_agent_text)
@@ -5339,6 +5483,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 getattr(completed_handle, "id", speech_id),
                 interrupted,
             )
+            if (
+                conversation_state.onboarding_link_presented
+                or conversation_state.better_plan_close_presented
+                or conversation_state.unsatisfied_resolution_presented
+            ):
+                # The approved terminal response is the last turn. End even if
+                # late microphone noise interrupted its tail; otherwise native
+                # realtime can start a new hallucinated turn during disconnect.
+                call_done.set()
 
         handle.add_done_callback(speech_done)
 
