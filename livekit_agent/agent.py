@@ -5527,14 +5527,6 @@ async def entrypoint(ctx: JobContext) -> None:
         state_task: asyncio.Task[None] | None,
         turn_epoch: int,
     ) -> None:
-        if conversation_state.model_led_flow:
-            # Gemini Live already owns the realtime audio response for V6.
-            # Generating a second response after state extraction required a
-            # model-role inline instruction; in the latest real call Gemini
-            # spoke that private instruction verbatim and the injected word
-            # "rates" then corrupted the next turn. Keep state extraction and
-            # backend pricing guards, but let the native model answer once.
-            return
         if (
             state_task is None
             or turn_epoch in information_reply_scheduled_epochs
@@ -5616,8 +5608,9 @@ async def entrypoint(ctx: JobContext) -> None:
             reply_kwargs: dict[str, object] = {"instructions": reply_instruction}
             if controlled_at_schedule:
                 # Stable session schemas remain registered, but each settled
-                # V5 turn can invoke only its single authoritative pricing
-                # path. Information and qualification turns get no tools.
+                # V5/V6 turn can invoke only its single authoritative pricing
+                # path. This prevents native Gemini from inventing an amount
+                # before the KB-backed tool has run.
                 reply_kwargs["tools"] = _authorized_controlled_reply_tools(
                     conversation_state
                 )
@@ -5999,16 +5992,15 @@ async def entrypoint(ctx: JobContext) -> None:
                         else:
                             route_correction = ""
                         amount_correction = (
-                            (
-                                "Say the previous approximate or mismatched amounts should be "
-                                "ignored. Replace them only with the exact worker-verified provider "
-                                "options supplied in the next instruction. "
-                                if provider_rate_recovery
-                                else "Say the previous amount was not verified and should be ignored. Do "
-                                "not repeat it or speak another numeric ShipKia amount. "
+                            "Present only the exact worker-verified provider options supplied "
+                            "in the next instruction. "
+                            if unverified_amounts and provider_rate_recovery
+                            else (
+                                "Do not repeat or refer to the blocked amount and do not speak "
+                                "another numeric ShipKia amount. "
+                                if unverified_amounts
+                                else ""
                             )
-                            if unverified_amounts
-                            else ""
                         )
                         zone_correction = (
                             "Correct the previous zone and say only the worker-verified "
@@ -6348,7 +6340,6 @@ async def entrypoint(ctx: JobContext) -> None:
         if _suppress_unsolicited_realtime_speech(
             controlled_flow=(
                 conversation_state.v5_company_pair_flow
-                and not conversation_state.model_led_flow
             ),
             user_initiated=user_initiated,
             expected_tool_reply=expected_tool_reply,

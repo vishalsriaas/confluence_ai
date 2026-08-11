@@ -4936,6 +4936,84 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("Have a good day", state.guidance())
         self.assertFalse(state.is_handled("current_shipping_arrangement"))
 
+    def test_v6_last_call_replay_requires_verified_delhi_bengaluru_rate_before_volume(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers(
+            "Delhi se Bangalore ke rates bataiye",
+            turn_id="intent-route",
+        )
+        state.apply_deterministic_answers(
+            "Harsh Enterprises",
+            turn_id="business-name",
+            previous_agent_text="Aapke business ya brand ka naam kya hai?",
+        )
+        state.apply_deterministic_answers(
+            "Mera hai direct to customer",
+            turn_id="business-type",
+            previous_agent_text="Aapka business B2B, B2C ya D2C hai?",
+        )
+        state.apply_deterministic_answers(
+            "Meri website hai",
+            turn_id="platform",
+            previous_agent_text="Aap orders kis platform se lete hain?",
+        )
+        state.apply_deterministic_answers(
+            "Main Shriprakat use kar raha hun",
+            turn_id="provider",
+            previous_agent_text="Abhi kaunsa courier ya aggregator use karte hain?",
+        )
+
+        self.assertEqual(state.value("business_type"), "D2C")
+        self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
+        self.assertEqual(state.value("current_provider_name"), "Shiprocket")
+        self.assertEqual(state.value("pickup_location"), "Delhi")
+        self.assertEqual(state.value("delivery_location"), "Bengaluru")
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+
+        state.apply_deterministic_answers(
+            "Nahi, main current rate nahi bata sakta",
+            turn_id="rate-refusal",
+        )
+        self.assertEqual(state.pending_field(), "current_problem")
+        self.assertFalse(state.verified_rate_presented())
+
+        # Reproduce the bad model turn: an early volume question must no
+        # longer advance state before the KB-backed route rate is presented.
+        state.apply_deterministic_answers(
+            "1000",
+            turn_id="premature-volume",
+            previous_agent_text="Aapki monthly shipments kitni hain?",
+        )
+        self.assertFalse(state.is_handled("monthly_shipments"))
+        self.assertEqual(state.pending_field(), "current_problem")
+
+        state.apply_deterministic_answers(
+            "Shiprocket mein support ki problem hai",
+            turn_id="problem",
+            previous_agent_text="Current shipping arrangement mein main problem kya aa rahi hai?",
+        )
+        self.assertEqual(state.pricing_mode(), "route_starting_pending")
+        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertFalse(state.verified_rate_presented())
+
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+        self.assertTrue(state.verified_rate_presented())
+        self.assertEqual(state.pending_field(), "monthly_shipments")
+
+        state.apply_deterministic_answers(
+            "1000",
+            turn_id="valid-volume",
+            previous_agent_text="Aapki monthly shipments kitni hain?",
+        )
+        self.assertEqual(state.value("monthly_shipments"), 1000)
+
 
 class _FakeModels:
     def __init__(self, response=None, *, delay=0):

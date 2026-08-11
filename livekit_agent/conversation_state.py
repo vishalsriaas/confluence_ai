@@ -716,6 +716,26 @@ def is_anything_else_no_answer(value: object) -> bool:
 def _spoken_business_type(text: object) -> tuple[str, str] | None:
     """Recognize short business-type acronyms despite common realtime ASR spacing."""
     clean = normalize_text(text).rstrip(".!?")
+    natural_type_patterns = (
+        (
+            "D2C",
+            r"(?:(?:mera|mere|my)\s+(?:business\s+)?(?:hai|is)\s+)?"
+            r"(?:direct\s*(?:to|2)\s*(?:customer|consumer)|direct[- ]to[- ]consumer)",
+        ),
+        (
+            "B2C",
+            r"(?:(?:mera|mere|my)\s+(?:business\s+)?(?:hai|is)\s+)?"
+            r"business\s*(?:to|2)\s*(?:customer|consumer)",
+        ),
+        (
+            "B2B",
+            r"(?:(?:mera|mere|my)\s+(?:business\s+)?(?:hai|is)\s+)?"
+            r"business\s*(?:to|2)\s*business",
+        ),
+    )
+    for business_type, pattern in natural_type_patterns:
+        if re.fullmatch(pattern, clean, re.IGNORECASE):
+            return business_type, clean
     # Gemini has repeatedly transcribed a clearly spoken "D2C" as
     # "due to x". Keep this narrowly scoped to a full short answer so the
     # observed phonetic variant cannot leave business_type pending.
@@ -739,6 +759,20 @@ def _spoken_business_type(text: object) -> tuple[str, str] | None:
 def _mentioned_business_type(text: object) -> tuple[str, str] | None:
     """Extract an explicit acronym volunteered inside a longer multi-fact reply."""
     clean = normalize_text(text).rstrip(".!?")
+    natural_match = re.search(
+        r"\b(direct\s*(?:to|2)\s*(?:customer|consumer)|"
+        r"business\s*(?:to|2)\s*(?:customer|consumer)|"
+        r"business\s*(?:to|2)\s*business)\b",
+        clean,
+        re.IGNORECASE,
+    )
+    if natural_match:
+        phrase = natural_match.group(0)
+        if phrase.startswith("direct"):
+            return "D2C", phrase
+        if phrase.endswith("business"):
+            return "B2B", phrase
+        return "B2C", phrase
     match = re.search(r"\b(b|bee|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])\b", clean)
     if not match:
         return None
@@ -1696,6 +1730,14 @@ class GatedConversationState:
             ):
                 # An incidental number is not monthly volume unless the
                 # customer labels it and the dedicated volume step is active.
+                continue
+            if (
+                self.model_led_flow
+                and field == "monthly_shipments"
+                and not self.verified_rate_presented()
+            ):
+                # V6 promises the verified rate before asking for volume. A
+                # premature model question must not advance state or closing.
                 continue
             if field in deterministically_updated_this_turn:
                 # Do not apply the semantic model's second interpretation of
@@ -2807,6 +2849,10 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
+        if self.model_led_flow and not self.verified_rate_presented():
+            # Enforce the sales order in state, even if a draft asks early:
+            # verified KB rate first, monthly shipments second.
+            quantity_text = ""
         if quantity_text:
             quantity_value = quantity_alias_value or int(quantity_text.replace(",", ""))
             if quantity_value > 0:
@@ -2843,8 +2889,9 @@ class GatedConversationState:
 
         business_name_question_context = bool(
             re.search(
-                r"\b(?:business|brand|company)\s+(?:ka\s+|ki\s+|kya\s+)?name\b"
-                r"|\bname\s+of\s+(?:your\s+)?(?:business|brand|company)\b",
+                r"\b(?:business|brand|company)(?:\s+ya\s+(?:business|brand|company))?"
+                r"\s+(?:ka\s+|ki\s+|kya\s+)?(?:name|naam)\b"
+                r"|\b(?:name|naam)\s+of\s+(?:your\s+)?(?:business|brand|company)\b",
                 previous_clean,
             )
         )
@@ -2864,6 +2911,7 @@ class GatedConversationState:
                 and not _contains_phrase(candidate_clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
                 and not re.search(r"\b(?:rate|rates|onboarding|pincode|zone)\b", candidate_clean)
                 and not re.search(r"\b\d{6}\b", candidate_clean)
+                and _mentioned_business_type(customer_text) is None
             ):
                 transition = self.apply_decision(
                     field="business_name",
@@ -2964,7 +3012,8 @@ class GatedConversationState:
                     applied.append(transition)
 
         provider_match = re.search(
-            r"\b(?:ship\s*rocket|shipping\s*rocket|show\s+a\s+rocket|shirocket|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b|"
+            r"\b(?:ship\s*rocket|shipping\s*rocket|show\s+a\s+rocket|shirocket|"
+            r"shiprakat|shriprakat|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b|"
             r"\u0ab8\u0ac0\u0aaa\u0acd\u0ab0\u0acb\u0a95\u0ac7\u0a9f|"
             r"\u0ab6\u0abf\u0aaa\u0ab0\u0acb\u0a95\u0ac7\u0a9f",
             clean,
