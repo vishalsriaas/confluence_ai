@@ -4367,6 +4367,69 @@ class TestGatedConversationState(unittest.TestCase):
         )
         self.assertFalse(state.is_handled("business_platform"))
 
+    def test_v6_latest_call_usb_then_rest_asr_pivots_information_to_rates(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers(
+            "\u0938\u093f\u0902\u092a\u0932\u0940 \u0915\u0947 \u092f\u0942\u090f\u0938\u092c\u0940 \u0915\u093e \u0915\u094d\u092f\u093e \u0939\u0948?",
+            turn_id="usb-usp-asr",
+            previous_agent_text=(
+                "Aap rates check karna chahenge, onboarding mein help chahiye, "
+                "ya ShipKia ke baare mein kuch aur jaanna hai?"
+            ),
+        )
+
+        self.assertTrue(state.last_usp_query)
+        self.assertEqual(state.value("assistance_intent"), "Information")
+
+        state.apply_deterministic_answers(
+            "\u0920\u0940\u0915 \u0939\u0948, \u0930\u0947\u0938\u094d\u091f \u0915\u0947 \u092c\u093e\u0930\u0947 \u092e\u0947\u0902 \u092c\u0924\u093e\u0907\u090f\u0964",
+            turn_id="rest-rate-asr",
+            previous_agent_text="Kya aap rates ke baare mein jaanna chahenge?",
+        )
+
+        self.assertEqual(state.value("assistance_intent"), "Rates")
+        self.assertEqual(state.requested_rate_type, "Normal")
+        self.assertEqual(state.pending_field(), "business_name")
+
+    def test_v6_latest_call_complaint_is_not_saved_as_business_platform(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates bataiye", turn_id="intent")
+        state.seed_context(
+            {
+                "business_name": "Acme",
+                "business_type": "D2C",
+            }
+        )
+        self.assertEqual(state.pending_field(), "business_platform")
+
+        state.apply_deterministic_answers(
+            "\u090a\u092a\u0930 \u0915\u0947 question \u0915\u093e \u0924\u0941\u092e\u0928\u0947 \u0917\u0932\u0924 answer \u0926\u093f\u092f\u093e",
+            turn_id="complaint",
+            previous_agent_text="Aapke orders kahan se aate hain?",
+        )
+
+        self.assertFalse(state.is_handled("business_platform"))
+        self.assertEqual(state.pending_field(), "business_platform")
+
+        state.apply_deterministic_answers(
+            "Meri khud ki website hai",
+            turn_id="real-platform",
+            previous_agent_text="Aap Shopify, marketplace ya website use karte hain?",
+        )
+        self.assertEqual(state.value("business_platform"), "Meri khud ki website hai")
+
     def test_v5_information_question_keeps_legacy_choice_gate_open(self):
         state = GatedConversationState(
             v4_strict_flow=True,

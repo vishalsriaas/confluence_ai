@@ -261,7 +261,7 @@ _ASR_DATES_RATE_INTENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _USP_QUERY_PATTERN = re.compile(
-    r"(?:\b(?:feature|features|benefit|benefits|advantage|advantages|usp|usps|"
+    r"(?:\b(?:feature|features|benefit|benefits|advantage|advantages|usp|usps|usb|"
     r"facility|facilities|fayda|fayde|faayda|faayde)\b|\b(?:what|tell me|batao|bata do|bataye)\b.{0,35}"
     r"\b(?:ship\s*(?:kia|kya|yard)|shiv\s+priya)\b|\b(?:what\s+is|about)\s+ship\s*kia\b|"
     r"\bship\s*kia\b.{0,25}\b(?:kya\s+hai|what\s+is|about)\b|"
@@ -270,7 +270,7 @@ _USP_QUERY_PATTERN = re.compile(
     # Gemini/telephony ASR has rendered "ShipKia" as "message kiya" in
     # production. Keep this alias narrow by requiring a nearby information verb.
     r"\bmessage\s+kiya\b.{0,55}\b(?:janna|jaanna|know|about|bare|bata|kya)\b|"
-    r"\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e|"
+    r"\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e|\u092f\u0942\u090f\u0938\u092c\u0940|"
     r"(?:\u0936\u093f\u092a\s*\u0915\u093f\u092f\u093e|\u0936\u093f\u092a\u0915\u093f\u092f\u093e).{0,25}"
     r"\u0915\u094d\u092f\u093e\s+\u0939\u0948|"
     r"(?:\u0936\u093f\u092a\s*\u0915\u094d\u092f\u093e|\u0936\u093f\u0935\s+\u092a\u094d\u0930\u093f\u092f\u093e).{0,45}"
@@ -949,6 +949,19 @@ def _assistance_intent(text: object, previous_agent_text: object = "") -> str:
     # "dates". This helper is invoked only while the rates/onboarding intent
     # gate is pending, and the action wording keeps the alias narrow.
     if _ASR_DATES_RATE_INTENT_PATTERN.search(clean):
+        return "Rates"
+    if (
+        re.search(
+            r"\b(?:rest|race)\b.{0,30}\b(?:bata|bataye|bataiye|know|check)\b|"
+            r"\b(?:bata|bataye|bataiye|know|check)\b.{0,30}\b(?:rest|race)\b|"
+            r"\u0930\u0947\u0938\u094d\u091f.{0,30}(?:\u092c\u0924\u093e|\u091c\u093e\u0928)",
+            clean,
+            re.IGNORECASE,
+        )
+        and any(marker in previous for marker in ("rate", "rates", "onboarding"))
+    ):
+        # The latest production call rendered spoken "rates" as "rest".
+        # Keep this alias confined to the explicit rates/onboarding choice.
         return "Rates"
     if re.search(r"\b(?:rash|rush)\s+(?:check|dekh|bata)\b", clean):
         return "Rates"
@@ -2879,9 +2892,20 @@ class GatedConversationState:
         )
         if platform_question_context and not self.is_handled("business_platform"):
             platform_answer = str(customer_text or "").strip(" \t\r\n.,!?;")
+            recognized_platform_answer = bool(
+                re.search(
+                    r"\b(?:shopify|woo\s*commerce|woocommerce|marketplace|website|web\s*site|"
+                    r"instagram|facebook|amazon|flipkart|meesho|offline|own\s+site|custom\s+site|"
+                    r"apni\s+website|khud\s+ki\s+website)\b|"
+                    r"\u0935\u0947\u092c\u0938\u093e\u0907\u091f|\u092e\u093e\u0930\u094d\u0915\u0947\u091f\u092a\u094d\u0932\u0947\u0938|\u0911\u092b\u0932\u093e\u0907\u0928",
+                    clean,
+                    re.IGNORECASE,
+                )
+            )
             if (
                 platform_answer
                 and len(platform_answer) <= 100
+                and recognized_platform_answer
                 and not _contains_phrase(clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
                 and not _NON_ANSWER_CHATTER_PATTERN.fullmatch(clean)
                 and _spoken_business_type(customer_text) is None
