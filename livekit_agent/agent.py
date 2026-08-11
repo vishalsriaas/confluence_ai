@@ -1568,6 +1568,28 @@ def _authorized_controlled_reply_tools(
     return []
 
 
+def _worker_owns_realtime_turn(conversation_state: GatedConversationState) -> bool:
+    """Keep V6 native except at the two rate-safety boundaries.
+
+    V5 remains fully worker-controlled. In V6, native Gemini owns ordinary
+    discovery and post-rate conversation; the worker takes over only while a
+    current-rate/problem answer can otherwise leak an invented quote, or when
+    authoritative state has enabled one exact pricing tool.
+    """
+    if not conversation_state.v5_company_pair_flow:
+        return False
+    if not conversation_state.model_led_flow:
+        return True
+    if _authorized_controlled_reply_tools(conversation_state):
+        return True
+    return bool(
+        conversation_state.value("assistance_intent") == "Rates"
+        and not conversation_state.verified_rate_presented()
+        and conversation_state.pending_field()
+        in {"current_shipping_rate", "current_problem"}
+    )
+
+
 def _normal_rates_declined(text: object, previous_agent_text: object = "") -> bool:
     clean = _normalized_text(text)
     if not clean:
@@ -5533,7 +5555,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ):
             return
         information_reply_scheduled_epochs.add(turn_epoch)
-        controlled_at_schedule = conversation_state.v5_company_pair_flow
+        controlled_at_schedule = _worker_owns_realtime_turn(conversation_state)
         if controlled_at_schedule:
             # Mark it before yielding so an incomplete native draft cannot
             # start a second, post-generation USP correction for this turn.
@@ -5552,6 +5574,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 return
             except Exception:
                 return
+            controlled_after_state = _worker_owns_realtime_turn(conversation_state)
+            controlled_turn = bool(controlled_at_schedule or controlled_after_state)
             detailed_services = conversation_state.last_detailed_usp_query
             provider_options = bool(
                 conversation_state.last_provider_options_query
@@ -5572,11 +5596,18 @@ async def entrypoint(ctx: JobContext) -> None:
             if (
                 runtime.user_turn_count != turn_epoch
                 or not participant_audio_active
-                or not (controlled_at_schedule or detailed_services or provider_options or high_volume)
+                or not (controlled_turn or detailed_services or provider_options or high_volume)
             ):
                 return
             controlled_information_reply_epochs.add(turn_epoch)
-            if not controlled_at_schedule:
+            if not controlled_at_schedule and controlled_turn:
+                # State can enter the pricing boundary only after the guarded
+                # classifier settles. Cancel a native draft before taking over.
+                try:
+                    await session.interrupt()
+                except RuntimeError:
+                    pass
+            elif not controlled_turn:
                 # A preceding serialized state update delayed classification.
                 # Interrupt as soon as the detailed intent becomes authoritative.
                 try:
@@ -5606,7 +5637,7 @@ async def entrypoint(ctx: JobContext) -> None:
             else:
                 reply_instruction = conversation_state.guidance()
             reply_kwargs: dict[str, object] = {"instructions": reply_instruction}
-            if controlled_at_schedule:
+            if controlled_turn:
                 # Stable session schemas remain registered, but each settled
                 # V5/V6 turn can invoke only its single authoritative pricing
                 # path. This prevents native Gemini from inventing an amount
@@ -6338,9 +6369,7 @@ async def entrypoint(ctx: JobContext) -> None:
             and runtime.consume_expected_realtime_tool_reply()
         )
         if _suppress_unsolicited_realtime_speech(
-            controlled_flow=(
-                conversation_state.v5_company_pair_flow
-            ),
+            controlled_flow=_worker_owns_realtime_turn(conversation_state),
             user_initiated=user_initiated,
             expected_tool_reply=expected_tool_reply,
         ):

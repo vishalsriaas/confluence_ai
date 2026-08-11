@@ -37,6 +37,7 @@ from livekit_agent.agent import (
     _voice_selected_flat_service_result,
     _voice_safe_pincode_serviceability_result,
     _voice_safe_unknown_zone_result,
+    _worker_owns_realtime_turn,
     make_mcp_forwarder,
 )
 from livekit_agent.conversation_state import GatedConversationState, STATE_MANAGED_RATE_FIELDS
@@ -62,6 +63,48 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_v6_worker_owns_only_rate_safety_boundary(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
+        state.seed_context({"business_name": "Harsh Enterprises"})
+        self.assertEqual(state.pending_field(), "business_type")
+        self.assertFalse(_worker_owns_realtime_turn(state))
+
+        state.seed_context(
+            {
+                "business_type": "D2C",
+                "business_platform": "Website",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+            }
+        )
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+        self.assertTrue(_worker_owns_realtime_turn(state))
+
+        state.seed_context({"current_shipping_rate": 35})
+        self.assertEqual(state.pending_field(), "current_problem")
+        self.assertTrue(_worker_owns_realtime_turn(state))
+
+        state.seed_context({"current_problem": "Support issue"})
+        self.assertFalse(_worker_owns_realtime_turn(state))
+
+        state.seed_context(
+            {"pickup_location": "Delhi", "delivery_location": "Bengaluru"}
+        )
+        self.assertEqual(state.pricing_mode(), "route_starting_pending")
+        self.assertTrue(_worker_owns_realtime_turn(state))
+
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.mark_pricing_verified("lookup_pincode_serviceability")
+        self.assertEqual(state.pending_field(), "monthly_shipments")
+        self.assertFalse(_worker_owns_realtime_turn(state))
+
     def test_v5_controlled_turn_exposes_no_pricing_tool_before_rate_path(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
