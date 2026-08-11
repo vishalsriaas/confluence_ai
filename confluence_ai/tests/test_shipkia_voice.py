@@ -211,6 +211,17 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertEqual(prompt, SHIPKIA_VOICE_V6_PROMPT)
         self.assertLess(len(prompt), len(SHIPKIA_VOICE_V5_PROMPT) // 2)
         self.assertIn("Understand meaning, not exact phrases", prompt)
+        self.assertIn("Start the call in natural conversational Hinglish", prompt)
+        self.assertIn(
+            "Do not switch to English unless the customer uses a complete English sentence",
+            compact,
+        )
+        self.assertIn("Namaste, main Harsh bol raha hoon ShipKia se", prompt)
+        self.assertIn("Never imply a prior shipping enquiry", compact)
+        self.assertIn("aap rates check karna chahenge, onboarding mein help chahiye", prompt)
+        self.assertIn("ya ShipKia ke baare mein kuch aur jaanna hai?", prompt)
+        self.assertIn("Never repeat this choice after a clear answer", compact)
+        self.assertIn("never apologize or claim you did not catch", compact)
         self.assertIn("Never restart the greeting", prompt)
         self.assertIn(
             "consent or acknowledgement answers only the opening permission question",
@@ -221,47 +232,51 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("Shopify, WooCommerce", compact)
         self.assertIn("business/brand name", compact)
         self.assertIn("B2C, B2B, D2C", compact)
+        self.assertIn("Never infer it from numeric or garbled ASR", compact)
+        self.assertIn("32 6", prompt)
+        self.assertIn("not a question about the products they ship", compact)
         self.assertIn("current courier, aggregator, or own shipping setup", compact)
         self.assertIn("comparable current shipping rate", compact)
         self.assertIn("main shipping problem", compact)
         self.assertIn(
-            "before asking for a route, calling a normal pricing tool, asking shipment volume",
+            "give the verified route starting rate as soon as the pricing tool returns it",
             compact,
         )
+        self.assertIn("Do not hold it behind monthly volume", compact)
+        self.assertIn("ask once for approximate monthly volume", compact)
         self.assertIn(
             "consent, acknowledgements, unrelated replies, and unclear audio do not handle it",
             compact,
         )
         self.assertIn("matching verified ShipKia solution", compact)
         self.assertIn("silently save the newly confirmed business name", compact)
-        self.assertIn("more than 500 shipments per month", compact)
+        self.assertIn("Above 500 shipments", compact)
         self.assertIn("dedicated account-manager support", compact)
         self.assertIn("Present the four verified USP areas", compact)
         self.assertIn("dashboard visibility", compact)
-        self.assertIn("order-triggered WhatsApp confirmation", compact)
-        self.assertIn("automated-call follow-up", compact)
-        self.assertIn("WhatsApp and IVR follow-up for RTO/NDR", compact)
-        self.assertIn("support and ticketing", compact)
+        self.assertIn("order confirmation can run through WhatsApp first", compact)
+        self.assertIn("automated confirmation call can follow", compact)
+        self.assertIn("RTO/NDR follow-up can use both WhatsApp and IVR", compact)
+        self.assertIn("shipment coordination, support, and ticketing", compact)
         self.assertIn("why ShipKia is better than their current provider", compact)
         self.assertIn("Never claim ShipKia is universally better", compact)
-        self.assertIn(
-            "return to any still-missing business discovery topics",
-            compact,
-        )
-        self.assertIn(
-            "only after discovery and the requested answer are complete",
-            compact,
-        )
+        self.assertIn("resume the most useful missing discovery topic", compact)
+        self.assertIn("anything-else checkpoint before asking whether", compact)
         self.assertIn("lookup_pincode_serviceability", prompt)
         self.assertIn("get_shipkia_starting_rate", prompt)
+        self.assertIn(
+            "state its returned GST-inclusive starting amount before monthly volume",
+            compact,
+        )
         self.assertIn("get_shipkia_flat_rates", prompt)
         self.assertIn("get_shipkia_flat_zonal_rates", prompt)
         self.assertIn("calculate_shipkia_rate", prompt)
-        self.assertIn("lookup_shipkia_crm_lead", prompt)
-        self.assertIn("record_shipkia_call_progress", prompt)
-        self.assertIn("create_or_update_shipkia_lead", prompt)
-        self.assertIn("create_shipkia_followup", prompt)
-        self.assertIn("finalize_shipkia_call_outcome", prompt)
+        self.assertNotIn("lookup_shipkia_crm_lead", prompt)
+        self.assertNotIn("record_shipkia_call_progress", prompt)
+        self.assertNotIn("create_or_update_shipkia_lead", prompt)
+        self.assertNotIn("create_shipkia_followup", prompt)
+        self.assertNotIn("finalize_shipkia_call_outcome", prompt)
+        self.assertIn("only when they are actually present", compact)
         self.assertNotIn("worker-updated private current action", prompt)
         self.assertNotIn("Pending field", prompt)
 
