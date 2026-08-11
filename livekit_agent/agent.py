@@ -4818,6 +4818,41 @@ def _authoritative_call_state_instruction(
     )
 
 
+def _v6_runtime_state_context(
+    conversation_state: GatedConversationState,
+    response_language: str,
+) -> str:
+    """Append replaceable call facts to the single V6 prompt.
+
+    This is deliberately data, not a response-specific mini-prompt.  The V6
+    prompt owns wording and flow; the worker only refreshes facts that Gemini
+    cannot safely infer from an audio transcript (handled fields, pending gate,
+    pricing authorization, and close state).
+    """
+    full_snapshot = conversation_state.snapshot()
+    always_present = {
+        "pending_field",
+        "pricing_ready",
+        "pricing_mode",
+        "requested_rate_type",
+        "authorized_rate_amounts",
+        "fields",
+    }
+    snapshot = {
+        key: value
+        for key, value in full_snapshot.items()
+        if key in always_present or value not in (None, "", False, 0, [], {})
+    }
+    language = "English" if response_language == "English" else "Hinglish (Latin script)"
+    return (
+        "\n\n## Live call state (worker-owned data; replaces the previous snapshot)\n"
+        f"- Response language: {language}\n"
+        f"- State: {compact_json(snapshot, max_chars=8000)}\n"
+        "This snapshot contains facts only. Apply the NATURAL SALES FLOW and PRICING rules "
+        "from this V6 prompt to it."
+    )
+
+
 class ShipKiaAssistant(Agent):
     def __init__(
         self,
@@ -5069,7 +5104,12 @@ class ShipKiaAssistant(Agent):
         self._starting_tool_enabled = conversation_state.starting_rate_due()
         initial_tools = self._active_tools()
         initial_instructions = instructions
-        if conversation_state.v4_strict_flow and not conversation_state.model_led_flow:
+        if conversation_state.model_led_flow:
+            initial_instructions += _v6_runtime_state_context(
+                conversation_state,
+                self._response_language,
+            )
+        elif conversation_state.v4_strict_flow:
             # Native Gemini realtime can begin drafting before its first
             # user-turn callback completes. Seed the initial consent gate so
             # an ambiguous first utterance cannot jump to rates/onboarding and
@@ -5078,6 +5118,7 @@ class ShipKiaAssistant(Agent):
                 conversation_state,
                 self._response_language,
             )
+        self._last_synced_instructions = initial_instructions
         super().__init__(instructions=initial_instructions, tools=initial_tools)
 
     def _active_tools(self) -> list:
@@ -5114,15 +5155,21 @@ class ShipKiaAssistant(Agent):
         return enabled
 
     async def sync_pricing_tools(self) -> None:
-        if self._conversation_state.model_led_flow:
-            return
-        await self.update_instructions(
-            self._base_instructions
-            + _authoritative_call_state_instruction(
+        state_context = (
+            _v6_runtime_state_context(
+                self._conversation_state,
+                self._response_language,
+            )
+            if self._conversation_state.model_led_flow
+            else _authoritative_call_state_instruction(
                 self._conversation_state,
                 self._response_language,
             )
         )
+        refreshed_instructions = self._base_instructions + state_context
+        if refreshed_instructions != self._last_synced_instructions:
+            await self.update_instructions(refreshed_instructions)
+            self._last_synced_instructions = refreshed_instructions
         should_enable = self._conversation_state.pricing_ready() and (
             not self._conversation_state.v4_strict_flow
             or self._conversation_state.requested_rate_type != "Flat"
@@ -5536,8 +5583,7 @@ async def entrypoint(ctx: JobContext) -> None:
         conversation_state=conversation_state,
         turn_processor=turn_processor,
     )
-    if not conversation_state.model_led_flow:
-        turn_processor.set_state_changed_callback(assistant.sync_pricing_tools)
+    turn_processor.set_state_changed_callback(assistant.sync_pricing_tools)
 
     call_done = asyncio.Event()
     participant_seen = bool(ctx.room.remote_participants)
@@ -5623,7 +5669,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 except RuntimeError:
                     pass
             await assistant.sync_pricing_tools()
-            if detailed_services:
+            if conversation_state.model_led_flow:
+                # V6 has one prompt owner. The settled worker state and the
+                # authorized tool list are refreshed above; do not append a
+                # response-specific prompt that can conflict with prior turns.
+                reply_instruction = ""
+            elif detailed_services:
                 reply_instruction = _detailed_services_reply_instruction(
                     assistant._response_language,
                     conversation_state,
@@ -5644,7 +5695,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             else:
                 reply_instruction = conversation_state.guidance()
-            reply_kwargs: dict[str, object] = {"instructions": reply_instruction}
+            reply_kwargs: dict[str, object] = {}
+            if reply_instruction:
+                reply_kwargs["instructions"] = reply_instruction
             if controlled_turn:
                 # Stable session schemas remain registered, but each settled
                 # V5/V6 turn can invoke only its single authoritative pricing
@@ -6495,6 +6548,20 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def recover_from_silence(customer_text: str, reason: str) -> None:
         recovery_turn_epoch = runtime.user_turn_count
+        if conversation_state.model_led_flow:
+            # Re-render the same central V6 prompt with current state. No
+            # apology/resume micro-prompt is added to the conversation.
+            await assistant.sync_pricing_tools()
+            if runtime.user_turn_count != recovery_turn_epoch:
+                return
+            reply = session.generate_reply(
+                tools=_authorized_controlled_reply_tools(conversation_state)
+            )
+            if hasattr(reply, "wait_for_playout"):
+                await reply.wait_for_playout()
+            else:
+                await reply
+            return
         memory = runtime.same_call_context(
             current_user_text=customer_text,
             max_turns=_SAME_CALL_MEMORY_MAX_TURNS,
@@ -6551,13 +6618,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 # single explicit generate_reply below remains the owner.
                 pass
             if conversation_state.model_led_flow:
+                await assistant.sync_pricing_tools()
                 sess.generate_reply(
                     user_input=new_message,
                     chat_ctx=turn_context,
-                    instructions=(
-                        "Answer the customer's current request and continue the V6 sales flow "
-                        "naturally. Do not restart or repeat a handled question."
-                    ),
+                    tools=_authorized_controlled_reply_tools(conversation_state),
                     input_modality="text",
                 )
                 return
@@ -6657,11 +6722,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     if not call_done.is_set():
         try:
-            if prompt_version in EXACT_OPENING_PROMPT_VERSIONS:
+            if prompt_version == "shipkia-voice-v6":
+                # Initial V6 state already says consent is pending and its
+                # central prompt owns the exact opening behavior.
+                reply = session.generate_reply()
+            elif prompt_version in EXACT_OPENING_PROMPT_VERSIONS:
                 opening_instruction = (
                     "Begin the call now in natural conversational Hinglish using only step 1 of "
                     "the central sales prompt. Do not open only in English."
                 )
+                reply = session.generate_reply(instructions=opening_instruction)
             else:
                 opening_instruction = (
                     "The ShipKia call has connected. Say exactly once: \"Namaste! Main ShipKia ka "
@@ -6670,9 +6740,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     "introduction, question, or translation. Then wait for the customer's answer. "
                     "Use known customer context and do not mention tools or internal systems."
                 )
-            reply = session.generate_reply(
-                instructions=opening_instruction
-            )
+                reply = session.generate_reply(instructions=opening_instruction)
             if hasattr(reply, "wait_for_playout"):
                 await reply.wait_for_playout()
             else:

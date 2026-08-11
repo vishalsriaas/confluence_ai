@@ -498,7 +498,7 @@ class TestRateGateResponse(unittest.TestCase):
         )
         self.assertIn("explain all four verified capabilities", instructions)
 
-    def test_v6_assistant_uses_compact_model_led_runtime_without_state_injection(self):
+    def test_v6_assistant_uses_single_prompt_with_replaceable_state_data(self):
         state = GatedConversationState(model_led_flow=True)
         pricing_tool = object()
 
@@ -522,6 +522,8 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertNotIn("create_or_update_shipkia_lead", instructions)
         self.assertIn("get_shipkia_starting_rate", instructions)
         self.assertNotIn("Current authoritative call state", instructions)
+        self.assertIn("## Live call state (worker-owned data", instructions)
+        self.assertIn('"pending_field":', instructions)
         self.assertNotIn("## Voice runtime rules", instructions)
         self.assertEqual(agent_init.call_args.kwargs["tools"], [pricing_tool])
         self.assertEqual(assistant._active_tools(), [pricing_tool])
@@ -1353,6 +1355,38 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("finish the missing consultative discovery", assistant._base_instructions)
         initial_instructions = agent_init.call_args.kwargs["instructions"]
         self.assertNotIn("Current authoritative call state", initial_instructions)
+        self.assertIn("## Live call state (worker-owned data", initial_instructions)
+
+    async def test_v6_state_refresh_replaces_snapshot_without_prompt_accumulation(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        with patch("livekit_agent.agent.Agent.__init__", return_value=None):
+            assistant = ShipKiaAssistant(
+                system_prompt="V6 central prompt",
+                personality="",
+                context={},
+                tools=[],
+                available_tool_names=(),
+                runtime=_Runtime(),
+                conversation_state=state,
+                turn_processor=object(),
+            )
+        assistant.update_instructions = AsyncMock()
+
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        await assistant.sync_pricing_tools()
+
+        refreshed = assistant.update_instructions.await_args.args[0]
+        self.assertEqual(refreshed.count("## Live call state (worker-owned data"), 1)
+        self.assertIn('"pending_field": "assistance_intent"', refreshed)
+        self.assertNotIn("PRIVATE TURN DIRECTION", refreshed)
+
+        await assistant.sync_pricing_tools()
+        assistant.update_instructions.assert_awaited_once()
 
     async def test_v6_flat_request_waits_for_discovery_and_keeps_verified_rates(self):
         state = GatedConversationState(

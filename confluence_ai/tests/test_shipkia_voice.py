@@ -221,8 +221,7 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("aap rates check karna chahenge, onboarding mein help chahiye", prompt)
         self.assertIn("ya ShipKia ke baare mein kuch aur jaanna hai?", prompt)
         self.assertIn("Never repeat this choice after a clear answer", compact)
-        self.assertIn("never apologize or claim you did not catch", compact)
-        self.assertIn("Never restart the greeting", prompt)
+        self.assertIn("without apologizing, restarting, or repeating a handled question", compact)
         self.assertIn(
             "consent or acknowledgement answers only the opening permission question",
             compact,
