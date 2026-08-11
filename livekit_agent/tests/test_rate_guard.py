@@ -3025,6 +3025,36 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("anything else", result["spoken_response_instruction"])
         self.assertFalse(result["excluded_additional_weight_components"])
 
+    async def test_v6_later_flat_catalog_never_appends_premature_move_forward(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.seed_context({"monthly_shipments": 2000})
+        state.post_rate_followup_active = True
+        result = _voice_flat_catalog_result(
+            {
+                "status": "success",
+                "response_type": "flat_starting",
+                "response_scope": "Starting",
+                "currency": "INR",
+                "payment_type": "Prepaid",
+                "courier_partner": "E-Kart",
+                "service": "E-Kart SURFACE",
+                "starting_flat_rate": {"total": 76.58},
+                "flat_rate_options": [],
+                "verified_flat_rate_count": 3,
+            },
+            conversation_state=state,
+        )
+
+        instruction = result["spoken_response_instruction"]
+        self.assertIn("stop without asking another question", instruction)
+        self.assertNotIn("aage badhna", instruction)
+        self.assertNotIn("kuch aur", instruction)
+
     async def test_v4_flat_both_uses_prepaid_boundary_and_explains_cod_dependency(self):
         state = GatedConversationState(v4_strict_flow=True)
         state.seed_context(

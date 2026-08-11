@@ -4225,6 +4225,67 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pricing_mode(), "flat_catalog")
         self.assertIn("get_shipkia_flat_rates", state.guidance())
 
+    def test_v6_latest_call_flat_jo_after_flat_catalog_selects_flat_zonal(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.seed_context(
+            {
+                "conversation_consent": "Accepted",
+                "assistance_intent": "Rates",
+                "monthly_shipments": 2000,
+            }
+        )
+        state.optional_ended_by = "business_name"
+        state.apply_deterministic_answers("flat rates batao", turn_id="flat")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+
+        state.apply_deterministic_answers(
+            "Flat jo rate kya hai?", turn_id="flat-zonal-asr"
+        )
+
+        self.assertEqual(state.requested_rate_type, "Flat Zonal")
+        self.assertTrue(state.flat_zonal_catalog_due())
+        self.assertEqual(state.pricing_mode(), "flat_zonal_catalog")
+        self.assertIn("get_shipkia_flat_zonal_rates", state.guidance())
+        self.assertFalse(state.move_forward_question_due)
+
+    def test_v6_latest_call_explicit_route_question_beats_stale_rate_pending(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates bata dijiye", turn_id="intent")
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "business_platform": "Custom website",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_problem": "Support issue",
+            }
+        )
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+
+        state.apply_deterministic_answers(
+            "Meri shipment hoti hai Delhi to Bangalore.",
+            turn_id="route",
+            previous_agent_text="Kahan se kahan tak aapki shipments hoti hain?",
+        )
+
+        self.assertEqual(state.value("pickup_location"), "Delhi")
+        self.assertEqual(state.value("delivery_location"), "Bengaluru")
+        self.assertFalse(state.is_handled("current_rate_basis"))
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+
     def test_prepaid_and_cod_in_same_answer_is_both(self):
         state = GatedConversationState()
         state.apply_deterministic_answers(
@@ -4412,6 +4473,31 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(applied, [])
         self.assertFalse(state.is_handled("business_name"))
         self.assertEqual(state.pending_field(), "business_name")
+
+    def test_v6_latest_call_payment_and_weight_cannot_restamp_service(self):
+        state = GatedConversationState()
+        state.seed_context({"service": "E-Kart SURFACE"})
+
+        for index, customer_text in enumerate(("aap mujhe prepaid bata dijiye", "500 gram")):
+            applied = state.apply_classifier_result(
+                {
+                    "turn_disposition": "answered",
+                    "decisions": [
+                        decision("service", "E-Kart SURFACE", customer_text)
+                    ],
+                },
+                customer_text=customer_text,
+                turn_id=f"unrelated-service-{index}",
+            )
+            self.assertEqual(applied, [])
+
+        service_updates = [
+            item
+            for item in state.transitions
+            if item.get("field") == "service" and item.get("source") == "classifier"
+        ]
+        self.assertEqual(service_updates, [])
+        self.assertEqual(state.value("service"), "E-Kart SURFACE")
 
     def test_v6_explicit_zone_rate_request_reopens_pricing_after_close(self):
         state = GatedConversationState(

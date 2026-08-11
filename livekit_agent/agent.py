@@ -2749,6 +2749,43 @@ def _voice_selected_flat_service_result(
     return safe_result
 
 
+def _catalog_continuation_instruction(
+    conversation_state: GatedConversationState | None,
+    *,
+    next_catalog: str = "",
+) -> str:
+    """Continue from durable state instead of a generic direct-onboarding shortcut."""
+    if conversation_state is None or not conversation_state.v5_company_pair_flow:
+        return " Then ask once whether the customer would like to know anything else."
+    if next_catalog == "flat_zonal" and conversation_state.flat_zonal_catalog_due():
+        return (
+            " Then call get_shipkia_flat_zonal_rates immediately and speak its verified "
+            "Flat-Zonal zone groups too. Do not ask another question between the two catalogs."
+        )
+    if next_catalog == "flat" and conversation_state.flat_catalog_due():
+        return (
+            " Then call get_shipkia_flat_rates immediately and speak its complete verified Flat "
+            "catalog. Do not ask another question between the two catalogs."
+        )
+    if conversation_state.post_rate_followup_active:
+        return " Then stop without asking another question."
+    if not conversation_state.is_handled("monthly_shipments"):
+        return " Then ask only for the customer's approximate monthly shipment quantity."
+    if not conversation_state.model_led_flow:
+        if conversation_state.direct_onboarding_flow:
+            return (
+                " Then ask exactly: 'Kya aap ShipKia ke saath aage badhna chahte hain?' "
+                "Do not call another tool and do not ask 'kuch aur'."
+            )
+        return (
+            " Then stop without asking another question. Do not ask whether they want "
+            "the rates and do not ask 'kuch aur' in this response."
+        )
+    if not conversation_state.anything_else_checkpoint_consumed:
+        return " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+    return " Then stop without asking another question."
+
+
 def _voice_flat_catalog_result(
     result: dict[str, Any],
     *,
@@ -2799,28 +2836,9 @@ def _voice_flat_catalog_result(
         conversation_state is not None
         and _normalized_text(conversation_state.value("payment_type")) == "both"
     )
-    continuation = (
-        " Then call get_shipkia_flat_zonal_rates immediately and speak its verified Flat-Zonal "
-        "zone groups too. Do not ask another question between the two catalogs."
-        if conversation_state is not None and conversation_state.flat_zonal_catalog_due()
-        else (
-            (
-                " Then ask only for the customer's approximate monthly shipment quantity."
-                if not conversation_state.is_handled("monthly_shipments")
-                else (
-                    " Then ask exactly: 'Kya aap ShipKia ke saath aage badhna chahte hain?' "
-                    "Do not call another tool and do not ask 'kuch aur'."
-                    if conversation_state.direct_onboarding_flow
-                    else
-                    " Then stop without asking another question."
-                    if conversation_state.anything_else_checkpoint_consumed
-                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
-                )
-            )
-            if conversation_state is not None
-            and conversation_state.v5_company_pair_flow
-            else " Then ask once whether the customer would like to know anything else."
-        )
+    continuation = _catalog_continuation_instruction(
+        conversation_state,
+        next_catalog="flat_zonal",
     )
 
     if response_type == "flat_all":
@@ -2945,27 +2963,9 @@ def _voice_flat_zonal_catalog_result(
             ),
         }
 
-    continuation = (
-        " Then call get_shipkia_flat_rates immediately and speak its complete verified Flat catalog. "
-        "Do not ask another question between the two catalogs."
-        if conversation_state is not None and conversation_state.flat_catalog_due()
-        else (
-            (
-                " Then ask only for the customer's approximate monthly shipment quantity."
-                if not conversation_state.is_handled("monthly_shipments")
-                else (
-                    " Then ask exactly: 'Kya aap ShipKia ke saath aage badhna chahte hain?' "
-                    "Do not call another tool and do not ask 'kuch aur'."
-                    if conversation_state.direct_onboarding_flow
-                    else
-                    " Then stop without asking another question. Do not ask whether they want "
-                    "the rates and do not ask 'kuch aur' in this response."
-                )
-            )
-            if conversation_state is not None
-            and conversation_state.v5_company_pair_flow
-            else " Then ask once whether the customer would like to know anything else."
-        )
+    continuation = _catalog_continuation_instruction(
+        conversation_state,
+        next_catalog="flat",
     )
     spoken_instruction = (
         "Explain that Flat-Zonal means the base price is fixed within each returned zone group, "

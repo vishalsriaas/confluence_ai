@@ -717,6 +717,37 @@ def _mentioned_business_type(text: object) -> tuple[str, str] | None:
     return f"{_BUSINESS_TYPE_LETTERS[match.group(1)]}2{match.group(2).upper()}", match.group(0)
 
 
+def _service_evidence_matches(value: object, evidence: object) -> bool:
+    """Require the classified courier/service to be present in customer evidence."""
+    proposed = normalize_text(value)
+    clean = normalize_text(evidence)
+    if not proposed or not clean:
+        return False
+    if proposed in clean:
+        return True
+    ekart_mentioned = bool(re.search(r"\b(?:e[\s-]*kart|a\s+cart)\b", clean))
+    if proposed == "e-kart surface":
+        return bool(ekart_mentioned and re.search(r"\b(?:surface|flat)\b", clean))
+    if proposed == "e-kart express":
+        return bool(
+            ekart_mentioned
+            and re.search(r"\b(?:express|flat[\s-]*zonal|zonal)\b", clean)
+        )
+    for courier in (
+        "amazon",
+        "bluedart",
+        "blue dart",
+        "delhivery",
+        "shadowfax",
+        "shiprocket",
+        "shipkia",
+        "xpressbees",
+    ):
+        if courier in proposed and courier in clean:
+            return True
+    return False
+
+
 def _conversation_consent(text: object) -> str:
     clean = re.sub(r"[.,!?।]+", " ", normalize_text(text))
     clean = " ".join(clean.split())
@@ -1570,6 +1601,17 @@ class GatedConversationState:
                     # is actually present in the customer's evidence.
                     continue
             if (
+                field == "service"
+                and disposition == "answered"
+                and not _service_evidence_matches(
+                    raw.get("value"), raw.get("evidence")
+                )
+            ):
+                # The semantic classifier repeatedly copied E-Kart SURFACE
+                # onto unrelated payment and weight answers in the same call.
+                # Service changes require direct customer evidence.
+                continue
+            if (
                 self.v5_company_pair_flow
                 and field == "business_type"
                 and pending_field_at_turn_start == "business_name"
@@ -2063,10 +2105,28 @@ class GatedConversationState:
                 or re.search(r"\b(?:aur\s+kuch|anything\s+else|kuch\s+aur)\b", previous_clean)
             )
         )
+        contextual_flat_jo_zonal_asr = bool(
+            self.v5_company_pair_flow
+            and self.flat_catalog_presented
+            and re.fullmatch(
+                r"flat\s+jo\s+(?:rate|rates|pricing)(?:\s+kya\s+hai)?[.!?]*",
+                clean,
+            )
+        )
+        explicit_route_question_context = bool(
+            re.search(
+                r"\b(?:kahan|kahaan|where)\b.{0,30}\b(?:se|from)\b.{0,30}"
+                r"\b(?:kahan|kahaan|where|tak|to)\b|"
+                r"\b(?:from\s+where\s+to\s+where|where\s+do\s+your\s+shipments\s+go)\b",
+                previous_clean,
+                re.IGNORECASE,
+            )
+        )
         current_rate_question_context = bool(
-            pending == "current_shipping_rate"
-            or (
-                re.search(
+            not explicit_route_question_context
+            and (
+                pending == "current_shipping_rate"
+                or re.search(
                     r"\b(?:aapka|aapko|current|abhi|mil|chal)\b.{0,80}"
                     r"\b(?:rate|rates|price|pricing|charge|charges)\b|"
                     r"\b(?:rate|rates|price|pricing|charge|charges)\b.{0,80}"
@@ -2217,6 +2277,7 @@ class GatedConversationState:
         if self.v4_strict_flow and self.value("conversation_consent") == "Accepted":
             explicit_rate_type = (
                 _requested_rate_type(clean)
+                or ("Flat Zonal" if contextual_flat_jo_zonal_asr else "")
                 or ("Flat" if contextual_call_1627_flat_asr else "")
             )
             same_presented_catalog = bool(
