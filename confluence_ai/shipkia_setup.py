@@ -40,6 +40,7 @@ TOOL_SPECS = {
             ("organization", "string", False, "Business or organisation name when clearly provided."),
             ("email", "string", False, "Customer email when clearly provided."),
             ("shipkia_business_type", "string", False, "D2C, Marketplace Seller, Retailer, Manufacturer, Distributor or Other."),
+            ("shipkia_business_platform", "string", False, "Confirmed order platform such as Shopify, WooCommerce, marketplace, own website or offline."),
             ("shipkia_monthly_shipments", "number", False, "Approximate monthly shipment count."),
             ("shipkia_pickup_pincode", "string", False, "Primary pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Customer delivery regions or zones."),
@@ -49,6 +50,7 @@ TOOL_SPECS = {
             ("shipkia_current_shipping_rate", "number", False, "Current shipping rate explicitly stated by customer."),
             ("shipkia_current_rate_basis", "string", False, "Confirmed comparable weight, payment type, inclusions and route or zone."),
             ("shipkia_main_pain_point", "string", False, "High Rates, Pickup Issue, RTO Issue, Tracking Issue, COD Remittance, Support Issue, Integration Issue or Other."),
+            ("shipkia_proposed_solution", "string", False, "Verified ShipKia solution actually explained for the customer's confirmed problem."),
             ("shipkia_interested_services", "string", False, "Confirmed services the customer is interested in."),
             ("shipkia_chatbot_status", "string", False, "Not Started, In Progress, Qualified, Not Qualified, Converted or Human Required."),
             ("shipkia_chat_summary", "string", False, "Concise confirmed conversation summary."),
@@ -65,7 +67,9 @@ TOOL_SPECS = {
         "parameters": [
             ("phone", "string", True, "Customer phone number used for normalized duplicate matching."),
             ("customer_name", "string", False, "Customer name when clearly provided."),
+            ("organization", "string", False, "Confirmed business or organisation name."),
             ("shipkia_business_type", "string", False, "Confirmed business type."),
+            ("shipkia_business_platform", "string", False, "Confirmed order platform or sales channel."),
             ("shipkia_monthly_shipments", "number", False, "Confirmed approximate monthly shipment count."),
             ("shipkia_pickup_pincode", "string", False, "Confirmed pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Confirmed delivery regions."),
@@ -75,6 +79,7 @@ TOOL_SPECS = {
             ("shipkia_current_shipping_rate", "number", False, "Confirmed current rate."),
             ("shipkia_current_rate_basis", "string", False, "Confirmed comparable rate basis."),
             ("shipkia_main_pain_point", "string", False, "Confirmed main shipping problem."),
+            ("shipkia_proposed_solution", "string", False, "Verified ShipKia solution actually explained for that problem."),
             ("shipkia_interested_services", "string", False, "Confirmed services of interest."),
             ("shipkia_chat_summary", "string", False, "Short progress summary."),
             ("shipkia_objections", "string", False, "Customer objections stated during the call."),
@@ -145,8 +150,9 @@ TOOL_SPECS = {
     },
     "get_shipkia_flat_rates": {
         "description": (
-            "Return only the three verified GST-inclusive E-Kart Surface forward flat-rate "
-            "slabs from the active Rate Card 10. Additional-weight components are excluded."
+            "Return the three verified GST-inclusive E-Kart Surface complete flat-rate slabs and "
+            "the separately labelled Shadowfax Surface 5 KG flat additional-weight condition "
+            "from active Rate Card 10. The Shadowfax condition is not a complete shipment rate."
         ),
         "condition": (
             "Call immediately for a ShipKia Voice V5 explicit flat-rate request and return all "
@@ -381,8 +387,9 @@ def _active_rate_rules() -> str:
 {RATE_PROMPT_MARKER}
 
 - Rate Card 10 - June is active in calculate_shipkia_rate.
-- Keep the normal qualification flow. For V5, call lookup_pincode_serviceability once after two
-  customer-confirmed pincode/city endpoints, or for a Pan-India/All-India request. It returns the
+- Keep the normal qualification flow. For V5, ask where shipments go from and to, never ask for a
+  pincode, and call lookup_pincode_serviceability once after two customer-confirmed city/locality
+  endpoints, or for a Pan-India/All-India request. It returns the
   resolved zone and that zone's verified starting rate. Pan-India uses Zone A only as a starting
   basis. Do not delay that starting rate for weight or payment mode.
 - Without an approved zone, the starting-rate response is "ShipKia rates start from Rs 22; the
@@ -396,9 +403,9 @@ def _active_rate_rules() -> str:
   an exact Prepaid/COD rate and never guess that Flat pricing is unavailable after such a failure.
 - If route resolution cannot produce a verified zone/rate, speak only its returned general Rs 22
   fallback. Never invent a zone or call the exact calculator for that unresolved route.
-- Ask each pincode once. If the customer explicitly says a pincode, weight, payment mode, or
-  required COD value is unknown or refuses it, mark that field handled and use the general starting
-  rate. Silence, noise, or an unrelated reply never authorizes this fallback.
+- For V5, never request pincodes; city/locality endpoints are sufficient for zone resolution. If the
+  customer cannot provide an endpoint, weight, payment mode, or required COD value, mark it handled
+  and use the general starting rate. Silence, noise, or an unrelated reply never authorizes this fallback.
 - If an approved zone is known, use get_shipkia_starting_rate with that zone; do not calculate a
   customer-specific rate in that response.
 - If COD order value is missing, speak the returned shipping charge and COD formula, then ask

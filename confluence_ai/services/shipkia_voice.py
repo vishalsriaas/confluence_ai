@@ -14,6 +14,7 @@ SHIPKIA_COMPANY = "shipkia"
 
 SHIPKIA_CRM_FIELDS = {
     "shipkia_business_type",
+    "shipkia_business_platform",
     "shipkia_monthly_shipments",
     "shipkia_pickup_pincode",
     "shipkia_delivery_zones",
@@ -23,6 +24,7 @@ SHIPKIA_CRM_FIELDS = {
     "shipkia_current_shipping_rate",
     "shipkia_current_rate_basis",
     "shipkia_main_pain_point",
+    "shipkia_proposed_solution",
     "shipkia_interested_services",
     "shipkia_chatbot_status",
     "shipkia_chat_summary",

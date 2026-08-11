@@ -47,6 +47,16 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.metrics()["turn_count"], 1)
         self.assertEqual(self.runtime.user_turn_count, 1)
 
+    async def test_tool_reply_authorization_is_one_shot_and_clearable(self) -> None:
+        self.assertFalse(self.runtime.consume_expected_realtime_tool_reply())
+        self.runtime.expect_realtime_tool_reply()
+        self.assertTrue(self.runtime.consume_expected_realtime_tool_reply())
+        self.assertFalse(self.runtime.consume_expected_realtime_tool_reply())
+
+        self.runtime.expect_realtime_tool_reply()
+        self.runtime.clear_expected_realtime_tool_replies()
+        self.assertFalse(self.runtime.consume_expected_realtime_tool_reply())
+
     async def test_recovers_once_after_response_timeout(self) -> None:
         async def recover(_customer_text: str, _reason: str) -> None:
             self.runtime.track_agent_speech("speech-recovery")

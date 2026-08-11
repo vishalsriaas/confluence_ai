@@ -36,4 +36,4 @@ if ! flock -n 9; then
 fi
 
 cd "${AGENT_DIR}"
-exec "${VENV_DIR}/bin/python" agent.py dev
+exec "${VENV_DIR}/bin/python" agent.py start

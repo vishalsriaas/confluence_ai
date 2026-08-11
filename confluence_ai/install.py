@@ -25,6 +25,14 @@ def after_migrate() -> None:
 
 SHIPKIA_CRM_CUSTOM_FIELDS = (
     {
+        "fieldname": "shipkia_business_platform",
+        "label": "ShipKia Business Platform",
+        "fieldtype": "Data",
+        "options": "",
+        "insert_after": "shipkia_business_type",
+        "description": "Customer-confirmed order platform or primary sales channel.",
+    },
+    {
         "fieldname": "shipkia_current_provider_type",
         "label": "ShipKia Current Provider Type",
         "fieldtype": "Select",
@@ -47,6 +55,14 @@ SHIPKIA_CRM_CUSTOM_FIELDS = (
         "options": "",
         "insert_after": "shipkia_current_shipping_rate",
         "description": "Confirmed comparable weight, payment type, charge inclusions, and route or zone.",
+    },
+    {
+        "fieldname": "shipkia_proposed_solution",
+        "label": "ShipKia Proposed Solution",
+        "fieldtype": "Small Text",
+        "options": "",
+        "insert_after": "shipkia_main_pain_point",
+        "description": "Verified ShipKia solution explained for the customer's confirmed shipping problem.",
     },
 )
 

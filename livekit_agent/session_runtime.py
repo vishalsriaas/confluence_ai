@@ -78,6 +78,7 @@ class VoiceSessionRuntime:
         self._recovery_callback: RecoveryCallback | None = None
         self._active_speech_id = ""
         self._speech_turns: dict[str, int] = {}
+        self._expected_realtime_tool_replies = 0
         self._finished = False
 
     def set_recovery_callback(self, callback: RecoveryCallback) -> None:
@@ -156,6 +157,20 @@ class VoiceSessionRuntime:
     def user_turn_count(self) -> int:
         """Monotonic customer-turn epoch used to reject stale async replies."""
         return self._last_user_turn
+
+    def expect_realtime_tool_reply(self) -> None:
+        """Authorize one server generation produced by a completed tool call."""
+        self._expected_realtime_tool_replies += 1
+
+    def consume_expected_realtime_tool_reply(self) -> bool:
+        if self._expected_realtime_tool_replies <= 0:
+            return False
+        self._expected_realtime_tool_replies -= 1
+        return True
+
+    def clear_expected_realtime_tool_replies(self) -> None:
+        """A new microphone turn invalidates any unconsumed prior tool reply."""
+        self._expected_realtime_tool_replies = 0
 
     def mark_agent_speaking(self) -> None:
         self._record_response_latency()

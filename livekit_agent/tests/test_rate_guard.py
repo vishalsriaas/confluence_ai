@@ -4,17 +4,19 @@ import asyncio
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from livekit_agent.agent import (
     GuardedTurnProcessor,
     ShipKiaAssistant,
     _authoritative_call_state_instruction,
+    _authorized_controlled_reply_tools,
     _authoritative_rate_request_arguments,
     _detailed_services_reply_instruction,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
     _high_volume_manager_reply_instruction,
+    _high_volume_manager_delivery_complete,
     _asr_noise_reason,
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
@@ -26,8 +28,11 @@ from livekit_agent.agent import (
     _assistant_single_zone_claims,
     _shipkia_rate_claim_amounts,
     _shipkia_flow_response_violation,
+    _suppress_unsolicited_realtime_speech,
     _voice_flat_catalog_result,
     _voice_flat_zonal_catalog_result,
+    _flat_catalog_response_complete,
+    _flat_zonal_catalog_response_complete,
     _voice_selected_flat_service_result,
     _voice_safe_pincode_serviceability_result,
     _voice_safe_unknown_zone_result,
@@ -56,6 +61,56 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+    def test_v5_controlled_turn_exposes_no_pricing_tool_before_rate_path(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+
+        self.assertEqual(_authorized_controlled_reply_tools(state), [])
+
+        state.apply_deterministic_answers("flat rates", turn_id="flat")
+        self.assertEqual(
+            _authorized_controlled_reply_tools(state),
+            ["get_shipkia_flat_rates"],
+        )
+
+    def test_interrupted_high_volume_sentence_is_not_marked_delivered(self):
+        self.assertFalse(
+            _high_volume_manager_delivery_complete(
+                "Theek hai, aapki monthly shipments 2,000 hain. Is"
+            )
+        )
+        self.assertTrue(
+            _high_volume_manager_delivery_complete(
+                "Aapko dedicated account manager milega jo support aur ticketing mein help karega."
+            )
+        )
+
+    def test_v5_suppresses_only_unowned_realtime_generation(self):
+        self.assertTrue(
+            _suppress_unsolicited_realtime_speech(
+                controlled_flow=True,
+                user_initiated=False,
+                expected_tool_reply=False,
+            )
+        )
+        for controlled_flow, user_initiated, expected_tool_reply in (
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+        ):
+            with self.subTest(
+                controlled_flow=controlled_flow,
+                user_initiated=user_initiated,
+                expected_tool_reply=expected_tool_reply,
+            ):
+                self.assertFalse(
+                    _suppress_unsolicited_realtime_speech(
+                        controlled_flow=controlled_flow,
+                        user_initiated=user_initiated,
+                        expected_tool_reply=expected_tool_reply,
+                    )
+                )
+
     def test_call_1838_rejects_multilingual_noise_hallucinations(self):
         noisy_transcripts = (
             ("nai. Ladki, kaun? Nai nai.", None, "repeated_negative_fragment"),
@@ -131,13 +186,17 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertNotIn("Aap kuch aur jaanna chahenge", instruction)
         self.assertIn("repeat any information", instruction)
 
-    def test_high_volume_reply_adds_manager_support_before_single_checkpoint(self):
+    def test_high_volume_reply_adds_manager_support_before_onboarding_decision(self):
         instruction = _high_volume_manager_reply_instruction("Hinglish", 1000)
 
         self.assertIn("monthly shipments 1,000", instruction)
         self.assertIn("dedicated account manager", instruction)
         self.assertIn("support aur ticketing", instruction)
-        self.assertEqual(instruction.count("Kya aap kuch aur jaanna chahenge"), 1)
+        self.assertEqual(
+            instruction.count("Kya aap ShipKia ke saath aage badhna chahte hain"),
+            1,
+        )
+        self.assertNotIn("Kya aap kuch aur jaanna chahenge", instruction)
         self.assertIn("Never ask for monthly shipments again", instruction)
 
     def test_opening_ignores_short_non_actionable_asr_noise(self):
@@ -147,6 +206,8 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertTrue(_is_opening_noise_turn("random sound", state))
         for meaningful in (
             "haan",
+            "yeah",
+            "hello",
             "ji bataiye",
             "okay",
             "nahi",
@@ -356,6 +417,35 @@ class TestRateGateResponse(unittest.TestCase):
         )
         self.assertIn("explain all four verified capabilities", instructions)
 
+    def test_v6_assistant_uses_compact_model_led_runtime_without_state_injection(self):
+        state = GatedConversationState(model_led_flow=True)
+        pricing_tool = object()
+
+        with patch("livekit_agent.agent.Agent.__init__", return_value=None) as agent_init:
+            assistant = ShipKiaAssistant(
+                system_prompt=(
+                    "V6 sales prompt. Save using create_or_update_shipkia_lead, then call "
+                    "get_shipkia_starting_rate for a verified starting rate."
+                ),
+                personality="",
+                context={},
+                tools=[pricing_tool],
+                available_tool_names=("get_shipkia_starting_rate",),
+                runtime=_Runtime(),
+                conversation_state=state,
+                turn_processor=object(),
+            )
+
+        instructions = agent_init.call_args.kwargs["instructions"]
+        self.assertIn("## V6 runtime boundary", instructions)
+        self.assertNotIn("create_or_update_shipkia_lead", instructions)
+        self.assertIn("get_shipkia_starting_rate", instructions)
+        self.assertIn("Treat every call as isolated", instructions)
+        self.assertNotIn("Current authoritative call state", instructions)
+        self.assertNotIn("## Voice runtime rules", instructions)
+        self.assertEqual(agent_init.call_args.kwargs["tools"], [pricing_tool])
+        self.assertEqual(assistant._active_tools(), [pricing_tool])
+
     def test_empty_pending_field_returns_safe_gate_instead_of_crashing(self):
         result = _rate_gate_response(
             "starting_rate_required",
@@ -441,8 +531,8 @@ class _FlatFakeResponse:
                 "message": {
                     "result": {
                         "status": "success",
-                        "response_type": "flat_starting",
-                        "response_scope": "Starting",
+                        "response_type": "flat_all",
+                        "response_scope": "All",
                         "currency": "INR",
                         "payment_type": "Prepaid",
                         "courier_partner": "E-Kart",
@@ -455,7 +545,20 @@ class _FlatFakeResponse:
                             "gst": 11.68,
                             "total": 76.58,
                         },
-                        "flat_rate_options": [],
+                        "flat_rate_options": [
+                            {"min_weight_g": 0, "max_weight_g": 500, "total": 76.58},
+                            {"min_weight_g": 501, "max_weight_g": 1000, "total": 88.26},
+                            {"min_weight_g": 1001, "max_weight_g": 2000, "total": 103.84},
+                        ],
+                        "flat_additional_rate_options": [
+                            {
+                                "courier_partner": "Shadowfax",
+                                "service": "Shadowfax Surface 5 KG",
+                                "applies_after_weight_g": 10000,
+                                "additional_weight_unit_g": 1000,
+                                "flat_additional_rate_breakdown": {"total": 11.68},
+                            }
+                        ],
                         "verified_flat_rate_count": 3,
                     }
                 }
@@ -1077,6 +1180,261 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.rate_claim_amounts_authorized([result["amount"]]))
         self.assertFalse(state.rate_claim_amounts_authorized([45.0]))
 
+    async def test_v6_natural_consent_does_not_wait_for_phrase_gated_state(self):
+        state = GatedConversationState(model_led_flow=True)
+        processor = type("Processor", (), {"schedule": Mock()})()
+        with patch("livekit_agent.agent.Agent.__init__", return_value=None):
+            assistant = ShipKiaAssistant(
+                system_prompt="V6 sales prompt",
+                personality="",
+                context={},
+                tools=[],
+                available_tool_names=(),
+                runtime=_Runtime(),
+                conversation_state=state,
+                turn_processor=processor,
+            )
+
+        class TurnContext:
+            def __init__(self):
+                self.messages = []
+
+            def add_message(self, **message):
+                self.messages.append(message)
+
+        turn_context = TurnContext()
+        message = type(
+            "Message",
+            (),
+            {"text_content": "Haan ji, bilkul kar sakte hain, aage batao.", "id": "v6-consent"},
+        )()
+
+        await assistant.on_user_turn_completed(turn_context, message)
+
+        processor.schedule.assert_called_once_with(
+            "Haan ji, bilkul kar sakte hain, aage batao.",
+            turn_id="v6-consent",
+        )
+        self.assertEqual(len(turn_context.messages), 1)
+        self.assertIn("Understand the customer's meaning", turn_context.messages[0]["content"])
+        self.assertIn("Retain every confirmed discovery fact", turn_context.messages[0]["content"])
+        self.assertIn("Normal route pricing is available only after discovery", turn_context.messages[0]["content"])
+        self.assertNotIn("pending field", turn_context.messages[0]["content"].lower())
+
+    async def test_v6_model_led_flat_request_bypasses_qualification_gate_but_keeps_verified_rates(self):
+        state = GatedConversationState(model_led_flow=True)
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_flat_rates",
+            "v6-model-led-flat",
+            conversation_state=state,
+            backend_argument_names=frozenset({"response_scope", "payment_type"}),
+        )
+        _FlatFakeClientSession.captured_payload = None
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
+            result = json.loads(await forwarder({}))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            _FlatFakeClientSession.captured_payload["params"]["arguments"],
+            {"response_scope": "All", "payment_type": "Prepaid"},
+        )
+        self.assertTrue(state.rate_claim_amounts_authorized([76.58, 88.26, 103.84, 11.68]))
+
+    async def test_v6_normal_route_rate_is_blocked_until_discovery_is_complete(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+        processor = type("Processor", (), {"wait_latest": AsyncMock()})()
+        forwarder = make_mcp_forwarder(
+            "lookup_pincode_serviceability",
+            "v6-discovery-boundary",
+            conversation_state=state,
+            turn_processor=processor,
+        )
+        _RouteFakeClientSession.captured_payloads = []
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
+            result = json.loads(
+                await forwarder(
+                    {
+                        "pickup_location": "Noida",
+                        "delivery_location": "Bangalore",
+                    }
+                )
+            )
+
+        processor.wait_latest.assert_awaited_once()
+        self.assertEqual(result["status"], "qualification_required")
+        self.assertEqual(result["required_next_question"], "business or brand name")
+        self.assertFalse(result["pricing_backend_called"])
+        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
+
+    async def test_v6_affirmative_only_name_reply_stays_unhandled_without_flow_correction(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+        state.apply_deterministic_answers(
+            "Delhi to Bangalore ke rates jaanne hain",
+            turn_id="route-request",
+        )
+        transitions = state.apply_deterministic_answers(
+            "haan ji",
+            turn_id="name-reply",
+            previous_agent_text="Aapke business ya brand ka naam kya hai?",
+        )
+        semantic = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [
+                    {
+                        "field": "business_name",
+                        "disposition": "answered",
+                        "value": "haan ji",
+                        "evidence": "haan ji",
+                        "confidence": 1.0,
+                    }
+                ],
+            },
+            customer_text="haan ji",
+            turn_id="name-reply-semantic",
+            pending_field_at_turn_start="business_name",
+        )
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Aapka business B2C hai, B2B hai, ya D2C?",
+            customer_text="haan ji",
+            previous_agent_text="Aapke business ya brand ka naam kya hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "")
+        self.assertEqual(transitions, [])
+        self.assertEqual(semantic, [])
+        self.assertEqual(
+            state.next_route_for_lookup(),
+            {"pickup_location": "Delhi", "delivery_location": "Bengaluru"},
+        )
+        self.assertEqual(state.pending_field(), "business_name")
+        self.assertFalse(state.is_handled("business_name"))
+
+    async def test_route_correction_keeps_only_the_last_complete_pair(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+
+        state.apply_deterministic_answers(
+            "Delhi to Bangalore nahi jana, Delhi to Kerala jana hai",
+            turn_id="corrected-route",
+        )
+
+        self.assertEqual(
+            state.requested_routes,
+            [{"pickup_location": "Delhi", "delivery_location": "Kerala"}],
+        )
+        self.assertEqual(
+            state.next_route_for_lookup(),
+            {"pickup_location": "Delhi", "delivery_location": "Kerala"},
+        )
+
+    async def test_pending_provider_question_preserves_mixed_script_brand_generically(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "business_platform": "Website",
+            }
+        )
+        self.assertEqual(state.pending_field(), "current_shipping_arrangement")
+
+        state.apply_deterministic_answers(
+            "Shiv रॉकेट",
+            turn_id="provider",
+            previous_agent_text="Abhi aap shipping ke liye kya use karte hain?",
+        )
+
+        self.assertEqual(state.value("current_shipping_arrangement"), "Other")
+        self.assertEqual(state.value("current_provider_name"), "shiv रॉकेट")
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+
+    async def test_v6_generic_starting_rate_cannot_replace_retained_city_route(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+        state.seed_context(
+            {
+                "business_name": "Acme",
+                "business_type": "D2C",
+                "business_platform": "Shopify",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_shipping_rate": 40,
+                "current_problem": "Support delays",
+                "pickup_location": "Delhi",
+                "delivery_location": "Bengaluru",
+            }
+        )
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_starting_rate",
+            "v6-retained-route-starting-guard",
+            conversation_state=state,
+        )
+        _StartingFakeClientSession.captured_payload = None
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _StartingFakeClientSession):
+            result = json.loads(await forwarder({}))
+
+        self.assertEqual(result["status"], "route_lookup_required")
+        self.assertFalse(result["pricing_backend_called"])
+        self.assertEqual(result["route"]["pickup_location"], "Delhi")
+        self.assertEqual(result["route"]["delivery_location"], "Bengaluru")
+        self.assertIn("Do not ask for a pincode", result["spoken_response_instruction"])
+        self.assertIsNone(_StartingFakeClientSession.captured_payload)
+
+    async def test_v6_route_lookup_reuses_saved_cities_without_pincodes(self):
+        state = GatedConversationState(
+            model_led_flow=True,
+            direct_onboarding_flow=True,
+        )
+        state.seed_context(
+            {
+                "business_name": "Acme",
+                "business_type": "D2C",
+                "business_platform": "Shopify",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_shipping_rate": 40,
+                "current_problem": "Support delays",
+                "pickup_location": "Delhi",
+                "delivery_location": "Bengaluru",
+            }
+        )
+        forwarder = make_mcp_forwarder(
+            "lookup_pincode_serviceability",
+            "v6-retained-city-route",
+            conversation_state=state,
+        )
+        _RouteFakeClientSession.captured_payloads = []
+
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
+            result = json.loads(await forwarder({}))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["zone"], "C")
+        arguments = _RouteFakeClientSession.captured_payloads[0]["params"]["arguments"]
+        self.assertEqual(arguments["pickup_location"], "Delhi")
+        self.assertEqual(arguments["delivery_location"], "Bengaluru")
+        self.assertNotIn("pickup_pincode", arguments)
+        self.assertNotIn("delivery_pincode", arguments)
+
     async def test_v5_flat_catalog_duplicate_is_suppressed_without_backend_call(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
@@ -1574,9 +1932,9 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("shipping rates", turn_id="intent")
         state.apply_deterministic_answers(
-            "110001",
+            "Delhi",
             turn_id="pickup",
-            previous_agent_text="Pickup pincode bataiye",
+            previous_agent_text="Aap shipments kahan se kahan bhejte hain?",
         )
         forwarder = make_mcp_forwarder(
             "lookup_pincode_serviceability",
@@ -1588,12 +1946,12 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
             result = json.loads(
                 await forwarder(
-                    {"pickup_pincode": "110001", "delivery_location": "Mumbai"}
+                    {"pickup_location": "Delhi", "delivery_location": "Mumbai"}
                 )
             )
 
         self.assertEqual(result["status"], "route_details_required")
-        self.assertEqual(result["required_next_question"], "6-digit delivery pincode")
+        self.assertEqual(result["required_next_question"], "delivery city or locality")
         self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
         self.assertNotIn("unavailable", result["spoken_response_instruction"].casefold())
 
@@ -1658,7 +2016,26 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         arguments = _FlatFakeClientSession.captured_payload["params"]["arguments"]
         self.assertEqual(arguments, {"response_scope": "All", "payment_type": "Prepaid"})
         self.assertEqual(result["status"], "success")
+        self.assertIn("exactly two verified Flat-related options", result["spoken_response_instruction"])
+        self.assertIn("Shadowfax Surface 5 KG", result["spoken_response_instruction"])
+        self.assertTrue(state.flat_catalog_delivery_due)
         self.assertFalse(state.flat_catalog_due())
+
+        complete = (
+            "E-Kart Surface ke complete flat slabs Rs 76.58, Rs 88.26 aur Rs 103.84 hain. "
+            "Shadowfax Surface 5 KG ka additional 1000 gram amount Rs 11.68 hai; iska base "
+            "shipment rate zonal hai."
+        )
+        self.assertTrue(_flat_catalog_response_complete(complete, state))
+        self.assertEqual(
+            _shipkia_flow_response_violation(
+                agent_text="E-Kart Surface ke flat slabs Rs 76.58, Rs 88.26 aur Rs 103.84 hain.",
+                customer_text="flat rates batao",
+                previous_agent_text="",
+                conversation_state=state,
+            ),
+            "flat_catalog_omitted",
+        )
 
     async def test_v5_model_cannot_switch_normal_call_to_flat_without_customer_evidence(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -1683,6 +2060,44 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.requested_rate_type, "Normal")
         self.assertFalse(state.flat_catalog_presented)
 
+    async def test_post_volume_turn_blocks_multiple_pricing_tools_before_backend(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat rates batao", turn_id="flat")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+        state.apply_deterministic_answers(
+            "2000",
+            turn_id="volume",
+            previous_agent_text="Aapki approximate monthly shipment quantity kitni hai?",
+        )
+        self.assertTrue(state.pricing_close_locked())
+
+        flat = make_mcp_forwarder(
+            "get_shipkia_flat_rates",
+            "post-volume-flat",
+            conversation_state=state,
+        )
+        zonal = make_mcp_forwarder(
+            "get_shipkia_flat_zonal_rates",
+            "post-volume-flat-zonal",
+            conversation_state=state,
+        )
+        _FlatFakeClientSession.captured_payload = None
+        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
+            flat_result = json.loads(await flat({}))
+            zonal_result = json.loads(await zonal({}))
+
+        self.assertEqual(flat_result["status"], "close_stage_locked")
+        self.assertEqual(zonal_result["status"], "close_stage_locked")
+        self.assertFalse(flat_result["pricing_backend_called"])
+        self.assertFalse(zonal_result["pricing_backend_called"])
+        self.assertIsNone(_FlatFakeClientSession.captured_payload)
+
     async def test_v5_explicit_flat_zonal_uses_only_flat_zonal_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
@@ -1704,6 +2119,64 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("Zones A-B Rs 84.37", result["spoken_response_instruction"])
         self.assertTrue(state.flat_zonal_catalog_presented)
+        self.assertTrue(state.flat_zonal_catalog_delivery_due)
+        self.assertEqual(state.flat_zonal_additional_total, 38.94)
+
+    async def test_latest_call_flat_zonal_is_complete_once_without_permission_question(self):
+        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat zonal rates batao", turn_id="flat-zonal")
+        state.seed_context({"monthly_shipments": 1000})
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_flat_zonal_rates",
+            "latest-call-flat-zonal-test",
+            conversation_state=state,
+        )
+
+        with patch(
+            "livekit_agent.agent.aiohttp.ClientSession",
+            _FlatZonalFakeClientSession,
+        ):
+            result = json.loads(await forwarder({}))
+
+        instruction = result["spoken_response_instruction"]
+        self.assertIn("Zones A-B Rs 84.37", instruction)
+        self.assertIn("Zones C-F Rs 109.03", instruction)
+        self.assertIn("Rs 38.94", instruction)
+        self.assertNotIn("Kya aap kuch aur", instruction)
+        self.assertNotIn("Kya aap inmein se kisi ke rates", instruction)
+        self.assertIn("Do not ask whether they want the rates", instruction)
+        self.assertIn("stop without another question", result["post_rate_instruction"])
+
+        incomplete = (
+            "E-Kart Express ke Flat-Zonal rates Zones A-B aur C-F ke liye alag hain. "
+            "Kya aap inmein se kisi ke rates jaanna chahte hain?"
+        )
+        self.assertEqual(
+            _shipkia_flow_response_violation(
+                agent_text=incomplete,
+                customer_text="flat zonal rates batao",
+                previous_agent_text="",
+                conversation_state=state,
+            ),
+            "flat_zonal_catalog_omitted",
+        )
+        complete = (
+            "E-Kart Express Flat-Zonal mein Zones A-B ka 500 gram rate Rs 84.37, "
+            "Zones C-F ka Rs 109.03, aur additional 500 gram Rs 38.94 hai."
+        )
+        self.assertTrue(_flat_zonal_catalog_response_complete(complete, state))
+        self.assertEqual(
+            _shipkia_flow_response_violation(
+                agent_text=complete,
+                customer_text="flat zonal rates batao",
+                previous_agent_text="",
+                conversation_state=state,
+            ),
+            "",
+        )
+        state.mark_flat_zonal_catalog_delivered()
+        self.assertFalse(state.flat_zonal_catalog_delivery_due)
 
     async def test_v5_model_cannot_infer_flat_zonal_from_ambiguous_speech(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -2006,7 +2479,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "delivery_pincode", _FlatFakeClientSession.captured_payload["params"]["arguments"]
         )
-        self.assertIn("Rs 76.58 se start hota hai", result["spoken_response_instruction"])
+        self.assertIn("exactly two verified Flat-related options", result["spoken_response_instruction"])
+        self.assertIn("Shadowfax Surface 5 KG", result["spoken_response_instruction"])
         self.assertIn(
             "anything else",
             result["spoken_response_instruction"],
@@ -2040,7 +2514,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("Rs 76.58 se start hota hai", result["spoken_response_instruction"])
         self.assertIn("anything else", result["spoken_response_instruction"])
-        self.assertTrue(result["excluded_additional_weight_components"])
+        self.assertFalse(result["excluded_additional_weight_components"])
 
     async def test_v4_flat_both_uses_prepaid_boundary_and_explains_cod_dependency(self):
         state = GatedConversationState(v4_strict_flow=True)

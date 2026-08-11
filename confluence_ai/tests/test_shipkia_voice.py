@@ -11,6 +11,7 @@ from confluence_ai.prompts.shipkia_voice import (
     SHIPKIA_VOICE_V3_PROMPT,
     SHIPKIA_VOICE_V4_PROMPT,
     SHIPKIA_VOICE_V5_PROMPT,
+    SHIPKIA_VOICE_V6_PROMPT,
     get_shipkia_voice_prompt,
     list_shipkia_voice_prompt_versions,
 )
@@ -47,10 +48,10 @@ class TestShipKiaVoice(FrappeTestCase):
         prompt = get_shipkia_voice_prompt("shipkia-voice-v3")
 
         self.assertEqual(prompt, SHIPKIA_VOICE_V3_PROMPT)
-        self.assertEqual(SHIPKIA_VOICE_PROMPT_VERSION, "shipkia-voice-v5")
+        self.assertEqual(SHIPKIA_VOICE_PROMPT_VERSION, "shipkia-voice-v6")
         self.assertEqual(
             list_shipkia_voice_prompt_versions(),
-            ["shipkia-voice-v3", "shipkia-voice-v4", "shipkia-voice-v5"],
+            ["shipkia-voice-v3", "shipkia-voice-v4", "shipkia-voice-v5", "shipkia-voice-v6"],
         )
         self.assertIn("Direct Courier", prompt)
         self.assertIn("Shipping Aggregator", prompt)
@@ -136,7 +137,8 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("You are Harsh", prompt)
         self.assertIn("Kya abhi hum do minute baat kar sakte hain?", " ".join(prompt.split()))
         self.assertIn("shipping rates check karna chahenge ya onboarding", prompt)
-        self.assertIn("Company name and company type form one optional pair", prompt)
+        self.assertIn("Shopify, WooCommerce, a marketplace", prompt)
+        self.assertIn("Company name, type, and operating platform", prompt)
         self.assertIn("current comparable shipping rate", prompt)
         self.assertIn("main problem with that provider", prompt)
         self.assertIn("PROBLEM-TO-SOLUTION RESPONSE", prompt)
@@ -147,8 +149,8 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("Delivery NDR assistance", prompt)
         self.assertIn("WhatsApp and IVR calling", prompt)
         self.assertIn("benefits/about-ShipKia question", prompt)
-        self.assertIn("six-digit pickup pincode or pickup city/location", prompt)
-        self.assertIn("delivery pincode or drop city/location", prompt)
+        self.assertIn('ask once: "Aap shipments kahan se kahan bhejte hain?"', prompt)
+        self.assertIn("Never ask a V5 customer for a pincode", prompt)
         self.assertIn("Pan-India starting rate", prompt)
         self.assertIn(
             "Never ask the customer to identify ShipKia's internal zone",
@@ -202,7 +204,68 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         self.assertNotIn("and ask the same anything-else question again", prompt)
 
-    def test_shipkia_production_metadata_defaults_to_current_v5_prompt(self):
+    def test_voice_v6_is_compact_model_led_and_preserves_sales_flow(self):
+        prompt = get_shipkia_voice_prompt("shipkia-voice-v6")
+        compact = " ".join(prompt.split())
+
+        self.assertEqual(prompt, SHIPKIA_VOICE_V6_PROMPT)
+        self.assertLess(len(prompt), len(SHIPKIA_VOICE_V5_PROMPT) // 2)
+        self.assertIn("Understand meaning, not exact phrases", prompt)
+        self.assertIn("Never restart the greeting", prompt)
+        self.assertIn(
+            "consent or acknowledgement answers only the opening permission question",
+            compact,
+        )
+        self.assertIn("permission to skip discovery", compact)
+        self.assertIn("A clear answer advances the conversation", compact)
+        self.assertIn("Shopify, WooCommerce", compact)
+        self.assertIn("business/brand name", compact)
+        self.assertIn("B2C, B2B, D2C", compact)
+        self.assertIn("current courier, aggregator, or own shipping setup", compact)
+        self.assertIn("comparable current shipping rate", compact)
+        self.assertIn("main shipping problem", compact)
+        self.assertIn(
+            "before asking for a route, calling a normal pricing tool, asking shipment volume",
+            compact,
+        )
+        self.assertIn(
+            "consent, acknowledgements, unrelated replies, and unclear audio do not handle it",
+            compact,
+        )
+        self.assertIn("matching verified ShipKia solution", compact)
+        self.assertIn("silently save the newly confirmed business name", compact)
+        self.assertIn("more than 500 shipments per month", compact)
+        self.assertIn("dedicated account-manager support", compact)
+        self.assertIn("Present the four verified USP areas", compact)
+        self.assertIn("dashboard visibility", compact)
+        self.assertIn("order-triggered WhatsApp confirmation", compact)
+        self.assertIn("automated-call follow-up", compact)
+        self.assertIn("WhatsApp and IVR follow-up for RTO/NDR", compact)
+        self.assertIn("support and ticketing", compact)
+        self.assertIn("why ShipKia is better than their current provider", compact)
+        self.assertIn("Never claim ShipKia is universally better", compact)
+        self.assertIn(
+            "return to any still-missing business discovery topics",
+            compact,
+        )
+        self.assertIn(
+            "only after discovery and the requested answer are complete",
+            compact,
+        )
+        self.assertIn("lookup_pincode_serviceability", prompt)
+        self.assertIn("get_shipkia_starting_rate", prompt)
+        self.assertIn("get_shipkia_flat_rates", prompt)
+        self.assertIn("get_shipkia_flat_zonal_rates", prompt)
+        self.assertIn("calculate_shipkia_rate", prompt)
+        self.assertIn("lookup_shipkia_crm_lead", prompt)
+        self.assertIn("record_shipkia_call_progress", prompt)
+        self.assertIn("create_or_update_shipkia_lead", prompt)
+        self.assertIn("create_shipkia_followup", prompt)
+        self.assertIn("finalize_shipkia_call_outcome", prompt)
+        self.assertNotIn("worker-updated private current action", prompt)
+        self.assertNotIn("Pending field", prompt)
+
+    def test_shipkia_production_metadata_defaults_to_current_v6_prompt(self):
         class FakeTask:
             assigned_agent = "agent-445"
             target_agent = ""
@@ -230,8 +293,8 @@ class TestShipKiaVoice(FrappeTestCase):
         ):
             metadata = build_voice_metadata("task-test-v5", {})
 
-        self.assertEqual(metadata["prompt_version"], "shipkia-voice-v5")
-        self.assertEqual(metadata["system_prompt"], SHIPKIA_VOICE_V5_PROMPT)
+        self.assertEqual(metadata["prompt_version"], "shipkia-voice-v6")
+        self.assertEqual(metadata["system_prompt"], SHIPKIA_VOICE_V6_PROMPT)
 
     def test_console_rate_completion_requires_successful_pricing_tool(self):
         audit = {
@@ -364,13 +427,13 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertEqual(result["basis"]["courier"], "Shadowfax")
         self.assertEqual(result["basis"]["service"], "Shadowfax Surface 500 G")
 
-    def test_flat_rate_catalog_returns_only_three_verified_ekart_slabs(self):
+    def test_flat_rate_catalog_returns_ekart_slabs_and_shadowfax_condition(self):
         result = get_shipkia_flat_rates({"response_scope": "All"})
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["response_type"], "flat_all")
         self.assertEqual(result["verified_flat_rate_count"], 3)
-        self.assertTrue(result["excluded_additional_weight_components"])
+        self.assertFalse(result["excluded_additional_weight_components"])
         self.assertEqual(
             [
                 (
@@ -391,6 +454,15 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         self.assertNotIn("E-Kart EXPRESS", str(result["flat_rate_options"]))
         self.assertNotIn("Shadowfax", str(result["flat_rate_options"]))
+        self.assertEqual(len(result["flat_additional_rate_options"]), 1)
+        shadowfax = result["flat_additional_rate_options"][0]
+        self.assertEqual(shadowfax["service"], "Shadowfax Surface 5 KG")
+        self.assertEqual(shadowfax["applies_after_weight_g"], 10000)
+        self.assertEqual(shadowfax["additional_weight_unit_g"], 1000)
+        self.assertEqual(
+            shadowfax["flat_additional_rate_breakdown"]["total"],
+            11.68,
+        )
 
     def test_flat_zonal_catalog_returns_verified_ekart_express_zone_groups(self):
         result = get_shipkia_flat_zonal_rates({})
@@ -599,6 +671,7 @@ class TestShipKiaVoice(FrappeTestCase):
                 "customer_name": "Local Voice Test",
                 "organization": "Example Brand",
                 "shipkia_business_type": "D2C",
+                "shipkia_business_platform": "Shopify",
                 "shipkia_monthly_shipments": 125,
                 "shipkia_current_provider_type": "Shipping Aggregator",
                 "shipkia_current_courier_partner": "Example Aggregator",
@@ -606,6 +679,7 @@ class TestShipKiaVoice(FrappeTestCase):
                 "shipkia_current_rate_basis": "500 g prepaid, GST included, Delhi to Mumbai",
                 "shipkia_interested_services": "Flat rates, Onboarding",
                 "shipkia_chat_summary": "Customer wants a flat-rate comparison.",
+                "shipkia_proposed_solution": "Multi-courier verified rate comparison",
             },
             agent="agent-445",
         )
@@ -628,6 +702,7 @@ class TestShipKiaVoice(FrappeTestCase):
         lead = frappe.get_doc("CRM Lead", first["lead"])
         self.assertEqual(lead.organization, "Example Brand")
         self.assertEqual(lead.shipkia_business_type, "D2C")
+        self.assertEqual(lead.shipkia_business_platform, "Shopify")
         self.assertEqual(lead.shipkia_monthly_shipments, 125)
         self.assertEqual(lead.shipkia_current_provider_type, "Shipping Aggregator")
         self.assertEqual(lead.shipkia_current_courier_partner, "Example Aggregator")
@@ -637,6 +712,10 @@ class TestShipKiaVoice(FrappeTestCase):
             "500 g prepaid, GST included, Delhi to Mumbai",
         )
         self.assertEqual(lead.shipkia_main_pain_point, "High Rates")
+        self.assertEqual(
+            lead.shipkia_proposed_solution,
+            "Multi-courier verified rate comparison",
+        )
         self.assertIn("Flat rates", lead.shipkia_interested_services)
         self.assertEqual(lead.shipkia_chat_summary, "Customer wants a flat-rate comparison.")
 

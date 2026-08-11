@@ -20,6 +20,7 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    StopResponse,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
@@ -57,6 +58,7 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 AGENT_NAME = os.getenv("LIVEKIT_AGENT_NAME", "shipkia-voice-sales")
 STRICT_PROMPT_VERSIONS = frozenset({"shipkia-voice-v4", "shipkia-voice-v5"})
+EXACT_OPENING_PROMPT_VERSIONS = frozenset({*STRICT_PROMPT_VERSIONS, "shipkia-voice-v6"})
 MCP_GATEWAY = os.getenv("MCP_SERVER_URL", "").strip()
 CONFLUENCE_CALLBACK = os.getenv("CONFLUENCE_LIVEKIT_WEBHOOK_URL", "").strip()
 CONSOLE_MCP_SCOPE = "livekit-console-sandbox"
@@ -121,6 +123,13 @@ _RATE_QUALIFICATION_PROPERTIES = {
         ],
         "description": "Customer's stated current shipping arrangement.",
     },
+    "business_platform": {
+        "type": "string",
+        "description": (
+            "How the customer operates or receives orders, stated in their own words, such as "
+            "Shopify, WooCommerce, marketplace, custom website, offline, or another platform."
+        ),
+    },
     "current_provider_name": {
         "type": "string",
         "description": (
@@ -156,6 +165,7 @@ _RATE_QUALIFICATION_PROPERTIES = {
         "enum": [
             "business_name",
             "business_type",
+            "business_platform",
             "current_shipping_arrangement",
             "current_provider_name",
             "current_shipping_rate",
@@ -300,12 +310,15 @@ _RATE_FIELD_LABELS = {
     "assistance_intent": "choice between checking rates and onboarding help",
     "business_name": "business or brand name",
     "business_type": "business type",
+    "business_platform": "business operating platform",
     "current_shipping_arrangement": "current shipping arrangement",
     "current_provider_name": "current courier or aggregator name",
     "current_shipping_rate": "current comparable shipping rate",
     "current_problem": "main problem with the current shipping arrangement",
     "pickup_pincode": "6-digit pickup pincode",
     "delivery_pincode": "6-digit delivery pincode",
+    "pickup_location": "pickup city or locality",
+    "delivery_location": "delivery city or locality",
     "dead_weight": "shipment weight",
     "payment_type": "Prepaid or COD payment mode",
     "order_value": "COD order value",
@@ -638,7 +651,7 @@ _CUSTOMER_CORRECTION_RE = re.compile(
 )
 _NOISE_ONLY_GREETING_RE = re.compile(r"^(?:hello|hallo|halo|alo|hi|hey)[.!?]*$", re.IGNORECASE)
 _OPENING_ACTIONABLE_SHORT_RE = re.compile(
-    r"\b(?:haan|han|yes|yeah|yep|ji|ok|okay|theek|bataiye|bataye|boliye|no|nahi|nahin|"
+    r"\b(?:hello|hallo|halo|helo|hi|hey|haan|han|yes|yeah|yep|ji|ok|okay|theek|bataiye|bataye|boliye|no|nahi|nahin|"
     r"rate|rates|onboarding|service|services|shipkia|courier|wait|hold|ruko|ruk|busy|"
     r"later|baad|minute|interested|wrong|number)\b|"
     r"(?:हां|हा|जी|बताइए|बोलिए|ठीक|नहीं|रेट|सर्विस|रुकिए|बाद|मिनट)",
@@ -888,6 +901,58 @@ def _assistant_question_fields(agent_text: object) -> list[str]:
     ]
 
 
+def _flat_zonal_catalog_response_complete(
+    agent_text: object,
+    conversation_state: GatedConversationState,
+) -> bool:
+    """Require both verified zone groups and additional weight in one answer."""
+    expected = {
+        round(float(value), 2)
+        for value in (
+            conversation_state.flat_zonal_group_totals.get("A-B"),
+            conversation_state.flat_zonal_group_totals.get("C-F"),
+            conversation_state.flat_zonal_additional_total,
+        )
+        if isinstance(value, (int, float))
+    }
+    claimed = {round(float(value), 2) for value in _shipkia_rate_claim_amounts(agent_text)}
+    clean = _normalized_text(agent_text)
+    return bool(
+        len(expected) == 3
+        and expected.issubset(claimed)
+        and re.search(r"\ba\s*[-–]\s*b\b", clean)
+        and re.search(r"\bc\s*[-–]\s*f\b", clean)
+        and re.search(r"\badditional\b|\bextra\b|\badd-on\b", clean)
+    )
+
+
+def _flat_catalog_response_complete(
+    agent_text: object,
+    conversation_state: GatedConversationState,
+) -> bool:
+    """Require E-Kart slabs and the verified Shadowfax condition together."""
+    expected = {
+        round(float(item.get("total") or 0), 2)
+        for item in conversation_state.flat_catalog_options
+        if isinstance(item, dict) and float(item.get("total") or 0) > 0
+    }
+    for item in conversation_state.flat_additional_options:
+        if not isinstance(item, dict):
+            continue
+        breakdown = item.get("flat_additional_rate_breakdown")
+        if isinstance(breakdown, dict) and float(breakdown.get("total") or 0) > 0:
+            expected.add(round(float(breakdown["total"]), 2))
+    claimed = {round(float(value), 2) for value in _shipkia_rate_claim_amounts(agent_text)}
+    clean = _normalized_text(agent_text)
+    return bool(
+        len(expected) >= 4
+        and expected.issubset(claimed)
+        and re.search(r"\be[\s-]*kart\b", clean)
+        and "shadowfax" in clean
+        and re.search(r"\badditional\b|\bextra\b|\badd-on\b", clean)
+    )
+
+
 def _shipkia_flow_response_violation(
     *,
     agent_text: object,
@@ -916,6 +981,17 @@ def _shipkia_flow_response_violation(
         and not conversation_state.flat_zonal_catalog_presented
     ):
         return "unverified_flat_zonal_claim"
+    if (
+        conversation_state.flat_catalog_delivery_due
+        and not _flat_catalog_response_complete(agent_text, conversation_state)
+    ):
+        return "flat_catalog_omitted"
+    if (
+        conversation_state.flat_zonal_catalog_delivery_due
+        and _AGENT_FLAT_ZONAL_CLAIM_RE.search(agent_clean)
+        and not _flat_zonal_catalog_response_complete(agent_text, conversation_state)
+    ):
+        return "flat_zonal_catalog_omitted"
     if (
         conversation_state.anything_else_checkpoint_consumed
         and _AGENT_ANYTHING_ELSE_RE.search(agent_clean)
@@ -1191,6 +1267,10 @@ def _provider_options_reply_instruction(
                 "your business or brand name?"
             ),
             "business_type": " Is your business B2C or D2C?",
+            "business_platform": (
+                " How do you operate your business: through Shopify, WooCommerce, a marketplace, "
+                "your own website, or something else?"
+            ),
             "current_shipping_arrangement": (
                 " Which courier or shipping arrangement do you currently use?"
             ),
@@ -1213,6 +1293,10 @@ def _provider_options_reply_instruction(
                 "Aapke business ya brand ka naam kya hai?"
             ),
             "business_type": " Aapka business B2C hai ya D2C?",
+            "business_platform": (
+                " Aap apna business kaise operate karte hain—Shopify, WooCommerce, marketplace, "
+                "apni website, ya kisi aur platform se?"
+            ),
             "current_shipping_arrangement": (
                 " Aap abhi kaunsa courier ya shipping arrangement use karte hain?"
             ),
@@ -1234,18 +1318,28 @@ def _high_volume_manager_reply_instruction(response_language: str, quantity: int
         response = (
             f"Understood, your monthly shipment volume is {formatted_quantity}. For this volume, "
             "you will get a dedicated account manager who will help you with support and "
-            "ticketing. Would you like to know anything else?"
+            "ticketing. Would you like to move forward with ShipKia?"
         )
     else:
         response = (
             f"Theek hai, aapki monthly shipments {formatted_quantity} hain. Is volume ke liye "
             "aapko ek dedicated account manager milega jo support aur ticketing mein aapki help "
-            "karega. Kya aap kuch aur jaanna chahenge?"
+            "karega. Kya aap ShipKia ke saath aage badhna chahte hain?"
         )
     return (
         "This is a controlled high-volume response in an active call. Say exactly once and say "
-        f"nothing else: \"{response}\" Never ask for monthly shipments again, add another "
-        "qualification question, quote a rate, call a tool, or repeat the closing question."
+        f"nothing else: \"{response}\" Never ask for monthly shipments again or ask 'kuch aur'; "
+        "never add another qualification question, quote a rate, call a tool, or repeat the "
+        "closing question."
+    )
+
+
+def _high_volume_manager_delivery_complete(text: object) -> bool:
+    """True only after the customer-facing manager benefit was spoken."""
+    clean = _normalized_text(text)
+    return bool(
+        "dedicated account manager" in clean
+        and ("support" in clean or "ticketing" in clean)
     )
 
 
@@ -1273,6 +1367,48 @@ def _gemini_end_sensitivity() -> genai_types.EndSensitivity:
             configured,
         )
     return genai_types.EndSensitivity.END_SENSITIVITY_HIGH
+
+
+def _suppress_unsolicited_realtime_speech(
+    *,
+    controlled_flow: bool,
+    user_initiated: bool,
+    expected_tool_reply: bool,
+) -> bool:
+    """Reject Gemini's server-started draft when V5 owns the response turn.
+
+    LiveKit marks an explicit ``session.generate_reply`` speech as
+    ``user_initiated=True``. A Gemini server-side/AAD generation is marked
+    false. A server-started generation is still permitted when LiveKit is
+    explicitly waiting for Gemini's automatic reply to a completed tool call.
+    """
+    return bool(
+        controlled_flow
+        and not user_initiated
+        and not expected_tool_reply
+    )
+
+
+def _authorized_controlled_reply_tools(
+    conversation_state: GatedConversationState,
+) -> list[str]:
+    """Expose only the one tool authorized by the settled V5 state."""
+    if not conversation_state.v5_company_pair_flow:
+        return []
+    if conversation_state.flat_catalog_due():
+        return ["get_shipkia_flat_rates"]
+    if conversation_state.flat_zonal_catalog_due():
+        return ["get_shipkia_flat_zonal_rates"]
+    if conversation_state.pricing_mode() == "route_starting_pending":
+        return ["lookup_pincode_serviceability"]
+    if (
+        conversation_state.starting_rate_due()
+        or conversation_state.shadowfax_surface_rate_due
+    ):
+        return ["get_shipkia_starting_rate"]
+    if conversation_state.pricing_mode() == "exact" and conversation_state.pricing_ready():
+        return ["calculate_shipkia_rate"]
+    return []
 
 
 def _normal_rates_declined(text: object, previous_agent_text: object = "") -> bool:
@@ -2019,7 +2155,7 @@ def _voice_safe_pincode_serviceability_result(
             "exact_route_rate_available": False,
             "missing_fields": list(result.get("missing_fields") or []),
             "spoken_response_instruction": (
-                "The route is incomplete. Ask only for the missing pickup or delivery pincode/city. "
+                "The route is incomplete. Ask only for the missing pickup or delivery city/locality. "
                 "Do not say rates are unavailable, being updated, or cannot be checked, and do not "
                 "ask monthly shipment quantity yet."
             ),
@@ -2491,6 +2627,11 @@ def _voice_flat_catalog_result(
         for option in result.get("flat_rate_options", [])
         if isinstance(option, dict)
     ]
+    additional_options = [
+        option
+        for option in result.get("flat_additional_rate_options", [])
+        if isinstance(option, dict)
+    ]
     starting = result.get("starting_flat_rate")
     starting = starting if isinstance(starting, dict) else {}
     response_type = str(result.get("response_type") or "flat_starting")
@@ -2508,6 +2649,10 @@ def _voice_flat_catalog_result(
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
                 else (
+                    " Then ask exactly: 'Kya aap ShipKia ke saath aage badhna chahte hain?' "
+                    "Do not call another tool and do not ask 'kuch aur'."
+                    if conversation_state.direct_onboarding_flow
+                    else
                     " Then stop without asking another question."
                     if conversation_state.anything_else_checkpoint_consumed
                     else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
@@ -2520,9 +2665,20 @@ def _voice_flat_catalog_result(
     )
 
     if response_type == "flat_all":
+        shadowfax = additional_options[0] if additional_options else {}
+        shadowfax_breakdown = shadowfax.get("flat_additional_rate_breakdown")
+        shadowfax_breakdown = (
+            shadowfax_breakdown if isinstance(shadowfax_breakdown, dict) else {}
+        )
         spoken_instruction = (
-            "Speak only the three returned E-Kart SURFACE weight slabs and each GST-inclusive "
-            "total, in ascending weight order. Do not mention additional-weight components."
+            "Present exactly two verified Flat-related options in one response. First, speak the "
+            "three returned E-Kart SURFACE complete all-zone weight slabs and each GST-inclusive "
+            "total, in ascending weight order. Second, say that Shadowfax Surface 5 KG has a "
+            f"verified flat additional-weight condition after {int(shadowfax.get('applies_after_weight_g') or 0)} "
+            f"grams: each additional {int(shadowfax.get('additional_weight_unit_g') or 0)} grams "
+            f"is Rs {float(shadowfax_breakdown.get('total') or 0):.2f}, GST included. Explicitly "
+            "state that Shadowfax's base shipment rate is zonal, so this additional amount is not "
+            "a complete shipment rate. Do not omit either option and do not invent another one."
             + continuation
         )
     elif response_type == "flat_matching" and options:
@@ -2575,8 +2731,10 @@ def _voice_flat_catalog_result(
         "exact_match_available": bool(result.get("exact_match_available")),
         "starting_flat_rate": starting,
         "flat_rate_options": options,
+        "flat_additional_rate_options": additional_options,
+        "flat_additional_rate_available": bool(additional_options),
         "verified_flat_rate_count": result.get("verified_flat_rate_count"),
-        "excluded_additional_weight_components": True,
+        "excluded_additional_weight_components": False,
         "rate_card": result.get("rate_card"),
         "spoken_response_instruction": spoken_instruction,
     }
@@ -2637,9 +2795,12 @@ def _voice_flat_zonal_catalog_result(
                 " Then ask only for the customer's approximate monthly shipment quantity."
                 if not conversation_state.is_handled("monthly_shipments")
                 else (
-                    " Then stop without asking another question."
-                    if conversation_state.anything_else_checkpoint_consumed
-                    else " Then ask: 'Kya aap kuch aur jaanna chahenge?'"
+                    " Then ask exactly: 'Kya aap ShipKia ke saath aage badhna chahte hain?' "
+                    "Do not call another tool and do not ask 'kuch aur'."
+                    if conversation_state.direct_onboarding_flow
+                    else
+                    " Then stop without asking another question. Do not ask whether they want "
+                    "the rates and do not ask 'kuch aur' in this response."
                 )
             )
             if conversation_state is not None
@@ -2887,8 +3048,16 @@ def make_mcp_forwarder(
         nonlocal active_flat_context, last_starting_rate_response
         arguments = dict(raw_arguments or {})
         rate_metadata: dict[str, object] = {}
+        if runtime is not None and hasattr(runtime, "expect_realtime_tool_reply"):
+            # Every function result requires exactly one Gemini continuation.
+            # Speech ownership consumes this token; a new microphone turn
+            # clears it before any speculative server draft can use it.
+            runtime.expect_realtime_tool_reply()
 
-        if turn_processor is not None and tool_name in PRICING_TOOLS:
+        if (
+            turn_processor is not None
+            and tool_name in PRICING_TOOLS
+        ):
             await turn_processor.wait_latest()
         if (
             conversation_state is not None
@@ -2896,6 +3065,11 @@ def make_mcp_forwarder(
             and tool_name in PRICING_TOOLS
             and conversation_state.pricing_close_locked()
         ):
+            logger.info(
+                "Pricing tool suppressed after close-stage lock tool=%s revision=%s",
+                tool_name,
+                conversation_state.revision,
+            )
             return compact_json(
                 {
                     "status": "close_stage_locked",
@@ -2905,9 +3079,10 @@ def make_mcp_forwarder(
                 }
             )
 
-        if tool_name == "lookup_pincode_serviceability" and conversation_state is not None:
-            if turn_processor is not None:
-                await turn_processor.wait_latest()
+        if (
+            tool_name == "lookup_pincode_serviceability"
+            and conversation_state is not None
+        ):
             pending = conversation_state.pending_field()
             if (
                 conversation_state.v5_company_pair_flow
@@ -2931,7 +3106,10 @@ def make_mcp_forwarder(
                     }
                 )
             if (
-                conversation_state.v5_company_pair_flow
+                (
+                    conversation_state.v5_company_pair_flow
+                    or conversation_state.direct_onboarding_flow
+                )
                 and not conversation_state.pan_india_requested
                 and pending
                 in {
@@ -2987,26 +3165,37 @@ def make_mcp_forwarder(
                     )
                 return compact_json(result)
             trusted_route = conversation_state.next_route_for_lookup()
-            if not trusted_route:
-                return compact_json(
-                    {
-                        "status": "route_details_required",
-                        "zone": None,
-                        "zone_verified": False,
-                        "required_next_question": _RATE_FIELD_LABELS.get(pending, pending),
-                        "spoken_response_instruction": (
-                            "Do not infer or name a zone. Ask only for the missing pickup or delivery "
-                            "pincode/city shown by required_next_question."
-                        ),
-                    }
-                )
-            arguments = dict(trusted_route)
-            arguments.setdefault("pan_india", conversation_state.pan_india_requested)
+            if trusted_route:
+                # A city/locality pair captured from the customer is the
+                # authoritative route for both controlled and model-led flows.
+                # This also prevents a later model tool call from dropping the
+                # route or replacing it with guessed pincodes.
+                arguments = dict(trusted_route)
+                arguments.setdefault("pan_india", conversation_state.pan_india_requested)
+            elif not conversation_state.model_led_flow:
+                if not trusted_route:
+                    return compact_json(
+                        {
+                            "status": "route_details_required",
+                            "zone": None,
+                            "zone_verified": False,
+                            "required_next_question": _RATE_FIELD_LABELS.get(pending, pending),
+                            "spoken_response_instruction": (
+                                "Do not infer or name a zone. Ask only for the missing pickup or delivery "
+                                "city/locality shown by required_next_question; do not ask for a pincode."
+                            ),
+                        }
+                    )
 
         if tool_name == "get_shipkia_flat_rates":
-            if turn_processor is not None:
+            if turn_processor is not None and not (
+                conversation_state is not None and conversation_state.model_led_flow
+            ):
                 await turn_processor.wait_latest()
-            if conversation_state is not None:
+            if conversation_state is not None and conversation_state.model_led_flow:
+                arguments = {"response_scope": "All", "payment_type": "Prepaid"}
+                rate_metadata["direct_model_led_flat_catalog"] = True
+            elif conversation_state is not None:
                 direct_v5_catalog = bool(
                     conversation_state.v5_company_pair_flow
                     and conversation_state.flat_catalog_due()
@@ -3110,9 +3299,14 @@ def make_mcp_forwarder(
                     )
 
         if tool_name == "get_shipkia_flat_zonal_rates":
-            if turn_processor is not None:
+            if turn_processor is not None and not (
+                conversation_state is not None and conversation_state.model_led_flow
+            ):
                 await turn_processor.wait_latest()
-            if conversation_state is not None:
+            if conversation_state is not None and conversation_state.model_led_flow:
+                arguments = {"payment_type": "Prepaid"}
+                rate_metadata["direct_model_led_flat_zonal_catalog"] = True
+            elif conversation_state is not None:
                 if (
                     conversation_state.flat_zonal_catalog_presented
                     and not conversation_state.flat_zonal_catalog_due()
@@ -3153,9 +3347,11 @@ def make_mcp_forwarder(
                 rate_metadata["direct_v5_flat_zonal_catalog"] = True
 
         if tool_name == "get_shipkia_starting_rate":
-            if turn_processor is not None:
+            if turn_processor is not None and not (
+                conversation_state is not None and conversation_state.model_led_flow
+            ):
                 await turn_processor.wait_latest()
-            if conversation_state is not None:
+            if conversation_state is not None and not conversation_state.model_led_flow:
                 pricing_mode = conversation_state.pricing_mode()
                 shadowfax_surface_request = bool(
                     conversation_state.v5_company_pair_flow
@@ -3232,6 +3428,64 @@ def make_mcp_forwarder(
                             ),
                         }
                     )
+            elif conversation_state is not None:
+                explicit_zone = conversation_state.explicit_zone_requested()
+                if explicit_zone:
+                    arguments = {"zone": conversation_state.value("zone")}
+                    rate_metadata.update(
+                        {
+                            "pricing_mode": "zone_starting",
+                            "pricing_trigger_field": "zone",
+                            "trusted_zone_source": "validated_state",
+                        }
+                    )
+                else:
+                    pending = conversation_state.pending_field()
+                    if (
+                        conversation_state.direct_onboarding_flow
+                        and pending
+                        in {
+                            "conversation_consent",
+                            "assistance_intent",
+                            *OPTIONAL_QUALIFICATION_FIELDS,
+                        }
+                    ):
+                        pending_label = _RATE_FIELD_LABELS.get(pending, pending)
+                        return compact_json(
+                            {
+                                "status": "qualification_required",
+                                "worker_state_authoritative": True,
+                                "pricing_backend_called": False,
+                                "required_next_question": pending_label,
+                                "spoken_response_instruction": (
+                                    "Do not quote a rate. Keep any supplied city route in memory "
+                                    f"and ask only for the customer's {pending_label}."
+                                ),
+                            }
+                        )
+                    trusted_route = conversation_state.next_route_for_lookup()
+                    if trusted_route:
+                        return compact_json(
+                            {
+                                "status": "route_lookup_required",
+                                "worker_state_authoritative": True,
+                                "pricing_backend_called": False,
+                                "route_retained": True,
+                                "route": trusted_route,
+                                "spoken_response_instruction": (
+                                    "Do not speak the generic or Zone A starting rate. Call "
+                                    "lookup_pincode_serviceability now with the retained pickup "
+                                    "and delivery city/locality. Do not ask for a pincode."
+                                ),
+                            }
+                        )
+                    requested_zone = str(arguments.get("zone") or "").strip().upper()
+                    requested_zone = requested_zone.removeprefix("ZONE").strip()
+                    arguments = (
+                        {"zone": requested_zone}
+                        if requested_zone in {"A", "B", "C", "D", "E", "F"}
+                        else {}
+                    )
             else:
                 requested_zone = str(arguments.get("zone") or "").strip().upper()
                 requested_zone = requested_zone.removeprefix("ZONE").strip()
@@ -3242,7 +3496,9 @@ def make_mcp_forwarder(
                 )
 
         if tool_name == "calculate_shipkia_rate":
-            if turn_processor is not None:
+            if turn_processor is not None and not (
+                conversation_state is not None and conversation_state.model_led_flow
+            ):
                 await turn_processor.wait_latest()
             if (
                 conversation_state is not None
@@ -3261,7 +3517,10 @@ def make_mcp_forwarder(
                     }
                 )
             ignored_model_fields: list[str] = []
-            if conversation_state is not None:
+            if conversation_state is not None and (
+                not conversation_state.model_led_flow
+                or conversation_state.direct_onboarding_flow
+            ):
                 arguments, ignored_model_fields = _authoritative_rate_request_arguments(
                     arguments,
                     conversation_state.rate_arguments(),
@@ -3636,9 +3895,19 @@ def make_mcp_forwarder(
                         if (
                             result.get("status") == "success"
                             and conversation_state is not None
-                            and rate_metadata.get("direct_v5_flat_catalog")
+                            and (
+                                rate_metadata.get("direct_v5_flat_catalog")
+                                or rate_metadata.get("direct_model_led_flat_catalog")
+                            )
                         ):
-                            conversation_state.mark_flat_catalog_presented()
+                            conversation_state.mark_flat_catalog_presented(
+                                result.get("flat_rate_options")
+                                if isinstance(result.get("flat_rate_options"), list)
+                                else None,
+                                result.get("flat_additional_rate_options")
+                                if isinstance(result.get("flat_additional_rate_options"), list)
+                                else None,
+                            )
                     if (
                         tool_name == "get_shipkia_flat_zonal_rates"
                         and isinstance(result, dict)
@@ -3650,12 +3919,18 @@ def make_mcp_forwarder(
                         if (
                             result.get("status") == "success"
                             and conversation_state is not None
-                            and rate_metadata.get("direct_v5_flat_zonal_catalog")
+                            and (
+                                rate_metadata.get("direct_v5_flat_zonal_catalog")
+                                or rate_metadata.get("direct_model_led_flat_zonal_catalog")
+                            )
                         ):
                             conversation_state.mark_flat_zonal_catalog_presented(
                                 result.get("zone_groups")
                                 if isinstance(result.get("zone_groups"), list)
-                                else None
+                                else None,
+                                result.get("additional_weight")
+                                if isinstance(result.get("additional_weight"), dict)
+                                else None,
                             )
                     if tool_name == "calculate_shipkia_rate" and isinstance(result, dict):
                         backend_result = result
@@ -3781,14 +4056,27 @@ def make_mcp_forwarder(
                         and result.get("status") == "success"
                         and not result.get("remaining_requested_routes")
                     ):
-                        result = {
-                            **result,
-                            "post_rate_instruction": (
+                        post_rate_instruction = (
                                 (
                                     "After stating the verified requested rate, ask only for the "
                                     "customer's approximate monthly shipment quantity."
                                     if not conversation_state.is_handled("monthly_shipments")
                                     else (
+                                        (
+                                            "After stating the verified requested rate, say that "
+                                            "for this volume they will get a dedicated account "
+                                            "manager for support and ticketing, then ask exactly: "
+                                            "'Kya aap ShipKia ke saath aage badhna chahte hain?' "
+                                            "Do not ask 'kuch aur'."
+                                            if int(
+                                                conversation_state.value("monthly_shipments") or 0
+                                            ) > 500
+                                            else "After stating the verified requested rate, ask "
+                                            "exactly: 'Kya aap ShipKia ke saath aage badhna chahte "
+                                            "hain?' Do not ask 'kuch aur'."
+                                        )
+                                        if conversation_state.direct_onboarding_flow
+                                        else
                                         "After stating the verified requested rate, stop without "
                                         "asking another question."
                                         if conversation_state.anything_else_checkpoint_consumed
@@ -3800,8 +4088,30 @@ def make_mcp_forwarder(
                                 else "After stating the verified requested rate, ask once whether "
                                 "the customer would like to know anything else. If they say no, "
                                 "thank them warmly for their time and close the call."
-                            ),
-                        }
+                            )
+                        if tool_name == "get_shipkia_flat_zonal_rates":
+                            post_rate_instruction = (
+                                (
+                                    "After stating both verified 500-gram zone-group rates and the "
+                                    "additional-weight amount, say that for this volume they will "
+                                    "get a dedicated account manager for support and ticketing, "
+                                    "then ask exactly: 'Kya aap ShipKia ke saath aage badhna "
+                                    "chahte hain?' Do not ask 'kuch aur'."
+                                    if conversation_state.direct_onboarding_flow
+                                    and int(conversation_state.value("monthly_shipments") or 0) > 500
+                                    else "After stating both verified 500-gram zone-group rates and "
+                                    "the additional-weight amount, ask exactly: 'Kya aap ShipKia ke "
+                                    "saath aage badhna chahte hain?' Do not ask 'kuch aur'."
+                                    if conversation_state.direct_onboarding_flow
+                                    else "After stating both verified 500-gram zone-group rates and "
+                                    "the additional-weight amount, stop without another question. "
+                                    "Do not ask whether they want the rates and do not ask 'kuch aur'."
+                                )
+                                if conversation_state.is_handled("monthly_shipments")
+                                else "After stating the complete verified Flat-Zonal catalog, ask "
+                                "only for approximate monthly shipment quantity."
+                            )
+                        result = {**result, "post_rate_instruction": post_rate_instruction}
                         conversation_state.mark_pricing_verified(
                             tool_name,
                             payment_basis=str(
@@ -3975,20 +4285,55 @@ async def fetch_tools(
                     },
                 }
             )
+            if conversation_state is not None and (
+                conversation_state.v5_company_pair_flow
+                or conversation_state.model_led_flow
+            ):
+                # V5 resolves its starting-rate zone from customer-stated
+                # locations. Do not expose pincode inputs that Gemini can fill
+                # speculatively or turn into extra customer questions.
+                lookup_parameters["properties"].pop("pickup_pincode", None)
+                lookup_parameters["properties"].pop("delivery_pincode", None)
             lookup_parameters["required"] = []
             raw_schema["parameters"] = lookup_parameters
-            raw_schema["description"] = (
-                f"{raw_schema['description']} Call once per queued route after the worker has confirmed "
-                "both endpoints as pincodes or cities, or after a Pan-India/All-India request. The "
-                "worker replaces model arguments with validated state. Speak the returned Zone A-F "
-                "starting amount immediately. Pan-India uses the returned Zone A starting basis. If "
-                "resolution fails, speak only the returned Rs 22 general starting headline."
-            )
+            if conversation_state is not None and conversation_state.model_led_flow:
+                raw_schema["description"] = (
+                    "Resolve customer-stated pickup and delivery locations to a verified zone and "
+                    "starting rate. Use pan_india only when the customer says Pan/All India."
+                )
+            else:
+                raw_schema["description"] = (
+                    f"{raw_schema['description']} Call once per queued route after the worker has confirmed "
+                    "both city/locality endpoints, or after a Pan-India/All-India request. The "
+                    "worker replaces model arguments with validated state. Speak the returned Zone A-F "
+                    "starting amount immediately. Pan-India uses the returned Zone A starting basis. If "
+                    "resolution fails, speak only the returned Rs 22 general starting headline."
+                )
         elif tool_name == "calculate_shipkia_rate":
             raw_schema["parameters"], backend_argument_names = _augment_rate_tool_schema(
                 raw_schema["parameters"]
             )
-            raw_schema["description"] = (
+            if conversation_state is not None and (
+                conversation_state.v5_company_pair_flow
+                or conversation_state.model_led_flow
+            ):
+                properties = raw_schema["parameters"].setdefault("properties", {})
+                properties.pop("pickup_pincode", None)
+                properties.pop("delivery_pincode", None)
+                required = raw_schema["parameters"].get("required", [])
+                raw_schema["parameters"]["required"] = [
+                    field
+                    for field in required
+                    if field not in {"pickup_pincode", "delivery_pincode"}
+                ]
+            if conversation_state is not None and conversation_state.model_led_flow:
+                raw_schema["description"] = (
+                    "Calculate a shipment-specific verified rate from customer-confirmed details. "
+                    "Use only when the required route or zone, weight, payment basis, and COD order "
+                    "value where applicable are known; never invent an argument."
+                )
+            else:
+                raw_schema["description"] = (
                 f"{raw_schema['description']} The worker owns an authoritative, evidence-backed "
                 "gated state. Do not use this pricing tool to save partial answers and do not supply "
                 "Unknown, Not Applicable, or guessed qualification values. Call it only when the "
@@ -4012,11 +4357,11 @@ async def fetch_tools(
                 "for the first generic flat request, More Options only when alternatives are "
                 "requested, and Selected Service with the exact service after a selection. Never "
                 "ask for monthly shipment volume; include it only if volunteered. If the customer "
-                "changes only a pickup or delivery place without explicitly giving its new six-digit "
-                "pincode, never infer one from the city name. If the customer explicitly cannot "
-                "provide an asked pincode, weight, payment type, or required COD value, use the "
-                "general starting rate immediately."
-            )
+                "changes a pickup or delivery place, retain the stated city/locality and use the "
+                "route-zone starting-rate path. Never invent a pincode from a city name. If the "
+                "customer explicitly cannot provide weight, payment type, or required COD value, "
+                    "use the general starting rate immediately."
+                )
         elif tool_name == "get_shipkia_starting_rate":
             starting_description = (
                 ""
@@ -4025,12 +4370,17 @@ async def fetch_tools(
                 else raw_schema["description"]
             )
             raw_schema["description"] = (
-                f"{starting_description} The worker owns the trusted pricing mode and ignores "
-                "model-invented zones. Call once only when authoritative state says "
-                "pricing_mode=general_starting or zone_starting. Without a validated approved "
-                "zone, return the backend-verified general starting headline. Never infer or "
-                "supply an amount, retry automatically, or ask a follow-up question in the same "
-                "response."
+                "Return the verified starting rate for an explicitly requested Zone A-F, or the "
+                "general starting headline when no zone is supplied. Never invent a zone."
+                if conversation_state is not None and conversation_state.model_led_flow
+                else (
+                    f"{starting_description} The worker owns the trusted pricing mode and ignores "
+                    "model-invented zones. Call once only when authoritative state says "
+                    "pricing_mode=general_starting or zone_starting. Without a validated approved "
+                    "zone, return the backend-verified general starting headline. Never infer or "
+                    "supply an amount, retry automatically, or ask a follow-up question in the same "
+                    "response."
+                )
             )
         elif tool_name == "get_shipkia_flat_rates":
             properties = raw_schema["parameters"].setdefault("properties", {})
@@ -4041,6 +4391,9 @@ async def fetch_tools(
                 "All",
             ]
             raw_schema["description"] = (
+                "Return the complete verified Flat catalog for an explicit Flat request."
+                if conversation_state is not None and conversation_state.model_led_flow
+                else
                 f"{raw_schema['description']} For V5, an explicit Flat request is a direct catalog "
                 "request: call immediately and the worker forces response_scope=All and Prepaid, "
                 "without qualification, route, weight, or payment questions. For older guarded "
@@ -4051,6 +4404,9 @@ async def fetch_tools(
             properties = raw_schema["parameters"].setdefault("properties", {})
             properties.setdefault("payment_type", {})["enum"] = ["Prepaid", "COD"]
             raw_schema["description"] = (
+                "Return the complete verified Flat-Zonal catalog for an explicit Flat-Zonal request."
+                if conversation_state is not None and conversation_state.model_led_flow
+                else
                 f"{raw_schema['description']} Call only when authoritative V5 state says "
                 "pricing_mode=flat_zonal_catalog after the customer explicitly says Flat-Zonal, "
                 "flat zonal, zonal-flat, or zone-wise flat. The worker forces the verified "
@@ -4126,7 +4482,19 @@ class ShipKiaAssistant(Agent):
         if not system_prompt.strip():
             raise RuntimeError("Confluence did not provide the ShipKia system prompt.")
 
+        # A prompt may describe tools that are unavailable for this dispatch
+        # (for example, read-only Console calls do not expose CRM mutation
+        # functions). Remove their callable names before Gemini sees the
+        # prompt; a trailing warning alone does not reliably prevent native
+        # function calling.
         instructions = system_prompt.strip()
+        unavailable_tool_names = ALLOWED_TOOLS.difference(available_tool_names)
+        for unavailable_name in sorted(unavailable_tool_names):
+            instructions = re.sub(
+                rf"(?<![A-Za-z0-9_]){re.escape(unavailable_name)}(?![A-Za-z0-9_])",
+                "an available tool",
+                instructions,
+            )
         if personality.strip():
             instructions += f"\n\n## Voice personality\n{personality.strip()}"
 
@@ -4180,10 +4548,11 @@ class ShipKiaAssistant(Agent):
   new business with no shipping solution, treat current arrangement as Not Applicable and never ask
   arrangement, provider, current rate or current problem again. A future intention to use ShipKia
   does not reopen the current-arrangement question.
-- Ask each pincode once. A supplied pincode must be an explicit six-digit customer or CRM value;
+- For V5, collect pickup and delivery city/locality names and never request a pincode. For an older
+  flow that explicitly requires a pincode, it must be an explicit six-digit customer or CRM value;
   never invent one from a city such as Delhi or Mumbai. If the customer explicitly cannot provide
-  an asked pincode, weight, payment type or required COD order value, mark it handled and use the
-  general Rs 22 starting response immediately. Silence, noise and unrelated replies never trigger
+  a required endpoint, weight, payment type or required COD order value, mark it handled and use
+  the general starting response immediately. Silence, noise and unrelated replies never trigger
   this fallback. Weight is mandatory only for exact calculation and must never be assumed.
   Ask payment mode once. If the customer says both/dono or selects Prepaid and COD together, use
   payment_type="Both" and never ask for permission or COD order value. If the exact route is
@@ -4204,15 +4573,10 @@ class ShipKiaAssistant(Agent):
   fields remain handled for every later normal-rate or flat-rate request. Never ask them again.
   Answer from the prior tool result when sufficient; otherwise call calculate_shipkia_rate with
   only changed or request-specific details. The voice worker restores omitted unchanged fields.
-- Treat the supplied pickup and delivery pincodes as the active route. For a courier, service,
-  weight, payment, or flat-rate follow-up on that route, reuse both pincodes and never ask for them
-  again.
-- If the customer supplies a different 6-digit pickup or delivery pincode, update only that endpoint
-  and calculate immediately using every other remembered detail. If the customer names a different
-  city or locality without its new pincode, do not silently use the old endpoint and do not call
-  the rate tool yet; set pickup_location_changed=true or delivery_location_changed=true and ask
-  only for that location's 6-digit pincode.
-- A normal result marked as a starting rate must be described with the supplied pincode pair,
+- Treat the supplied pickup and delivery endpoints as the active route. For a courier, service,
+  weight, payment, or flat-rate follow-up on that route, reuse both endpoints and never ask for them
+  again. In V5 a changed city/locality replaces that endpoint directly; never ask for its pincode.
+- A normal result marked as a starting rate must be described with the supplied route,
   returned weight and payment basis in one direct, polite sentence. Give only the single returned
   verified lowest GST-inclusive "starting from" rate. Do not list alternatives, add a route or
   zone explanation, or ask a follow-up question. Never ask the customer for an internal zone.
@@ -4240,6 +4604,20 @@ class ShipKiaAssistant(Agent):
 - If saving fails, acknowledge internally and continue naturally; do not repeatedly ask the customer for the same answer.
 - Never send a message or invoke a messaging channel from this voice worker.
 """
+        model_led_runtime_rules = """
+
+## V6 runtime boundary
+- Own the conversation from the V6 sales prompt and the actual call history. Interpret natural
+  language semantically and continue from the customer's meaning; no exact phrase is required.
+- Treat every call as isolated. Mention a customer detail only when it appears in this call's
+  customer transcript, confirmed call context, or a successful tool result; never import an
+  example, an earlier call's route, or an inferred detail.
+- Never restart the greeting or repeat a handled question. Answer the current request before moving
+  naturally to the next useful sales step.
+- Pricing tools are the only authority for ShipKia amounts, zones, services, and availability. Use
+  customer-confirmed arguments, follow successful results, and never invent a missing fact.
+- Never speak tool names, field names, JSON, metadata, record IDs, or implementation details.
+"""
         v4_runtime_rules = """
 
 ## V4 voice runtime rules
@@ -4251,8 +4629,9 @@ class ShipKiaAssistant(Agent):
 - Complete consent and rate/onboarding intent before qualification. Qualification order is business
   name, business type, then current shipping arrangement. If no courier is currently used, skip
   provider, current rate, and current problem.
-- V5 normal starting-rate input order is pickup pincode or city, then delivery pincode or city. Once
-  both are confirmed, resolve the zone and speak its returned starting rate before asking shipment
+- For a V5 normal starting rate, ask once where shipments go from and to. Accept the pickup and
+  delivery city/locality directly and never ask for a pincode. Once both are confirmed, resolve the
+  zone and speak its returned starting rate before asking shipment
   quantity; do not delay it for weight or payment mode. Pan-India/All-India uses the resolver's Zone A
   starting basis. V5 has exactly three customer-facing structures: Zonal (route/Zone A-F based),
   Flat-Zonal (verified E-Kart Express Zone A-B and Zone C-F groups), and Flat (all-zone E-Kart
@@ -4299,11 +4678,12 @@ class ShipKiaAssistant(Agent):
   Yes/haan/ji/si, unclear audio, a partial word, silence, or thank-you by itself never authorizes
   this close.
 """
-        instructions += (
-            v4_runtime_rules
-            if conversation_state.v4_strict_flow
-            else legacy_runtime_rules
-        )
+        if conversation_state.model_led_flow:
+            instructions += model_led_runtime_rules
+        elif conversation_state.v4_strict_flow:
+            instructions += v4_runtime_rules
+        else:
+            instructions += legacy_runtime_rules
         if not conversation_state.v4_strict_flow:
             available_tools = ", ".join(available_tool_names)
             instructions += f"""
@@ -4353,7 +4733,10 @@ class ShipKiaAssistant(Agent):
 
     def _active_tools(self) -> list:
         enabled = []
-        expose_guarded_v5_pricing = self._conversation_state.v5_company_pair_flow
+        expose_guarded_v5_pricing = (
+            self._conversation_state.v5_company_pair_flow
+            or self._conversation_state.model_led_flow
+        )
         for name, tool in self._tools_by_name.items():
             if expose_guarded_v5_pricing and name in {
                 "calculate_shipkia_rate",
@@ -4361,8 +4744,10 @@ class ShipKiaAssistant(Agent):
                 "get_shipkia_flat_zonal_rates",
                 "get_shipkia_starting_rate",
             }:
-                # Keep function schemas stable during a realtime V5 turn. Every
-                # forwarder still fails closed against authoritative state.
+                # Gemini Live retains function names within the same session.
+                # Keep schemas stable so a later valid rate request cannot hit
+                # "unknown AI function". V5 gates calls through state; V6 lets
+                # the model choose the path while backend validation owns facts.
                 enabled.append(tool)
                 continue
             if name == "calculate_shipkia_rate" and not self._rate_tool_enabled:
@@ -4380,6 +4765,8 @@ class ShipKiaAssistant(Agent):
         return enabled
 
     async def sync_pricing_tools(self) -> None:
+        if self._conversation_state.model_led_flow:
+            return
         await self.update_instructions(
             self._base_instructions
             + _authoritative_call_state_instruction(
@@ -4428,6 +4815,33 @@ class ShipKiaAssistant(Agent):
     async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
         customer_text = new_message.text_content or ""
         turn_id = str(getattr(new_message, "id", "") or f"user:{time.time()}")
+        if self._conversation_state.model_led_flow:
+            # V6 owns the wording and pacing. Retain confirmed discovery facts
+            # in the background so semantic extraction cannot delay speech.
+            self._turn_processor.schedule(customer_text, turn_id=turn_id)
+            self._response_language = _response_language_for_turn(
+                customer_text,
+                self._response_language,
+            )
+            language_instruction = (
+                "Reply in natural English only."
+                if self._response_language == "English"
+                else "Reply in natural conversational Hinglish using Latin script only."
+            )
+            turn_ctx.add_message(
+                role="system",
+                content=(
+                    f"V6 turn guidance: {language_instruction} Understand the customer's meaning, "
+                    "answer it, and continue naturally without restarting or repeating a handled question. "
+                    "Retain every confirmed discovery fact, silently save meaningful new facts when the "
+                    "progress tool is available, and continue toward the next useful missing discovery "
+                    "topic before closing. After a confirmed shipping problem, explain the matching "
+                    "verified ShipKia solution before asking the next question. Normal route pricing "
+                    "is available only after discovery; follow a pricing tool's missing-information "
+                    "response naturally instead of retrying it or skipping ahead."
+                ),
+            )
+            return
         await self._turn_processor.process(customer_text, turn_id=turn_id)
 
         previous_agent_text = ""
@@ -4588,6 +5002,11 @@ class ShipKiaAssistant(Agent):
                 "sentence it requires:\n- " + "\n- ".join(policy_parts)
             ),
         )
+        if self._conversation_state.v5_company_pair_flow:
+            # Final-transcript scheduling owns the V5 response. If this SDK
+            # callback also runs, suppress its automatic native reply so two
+            # generators cannot speak over or truncate one another.
+            raise StopResponse()
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -4646,6 +5065,8 @@ async def entrypoint(ctx: JobContext) -> None:
     conversation_state = GatedConversationState(
         v4_strict_flow=prompt_version in STRICT_PROMPT_VERSIONS,
         v5_company_pair_flow=prompt_version == "shipkia-voice-v5",
+        direct_onboarding_flow=prompt_version in {"shipkia-voice-v5", "shipkia-voice-v6"},
+        model_led_flow=prompt_version == "shipkia-voice-v6",
     )
     conversation_state.seed_context(context)
     answer_guard = SemanticAnswerGuard()
@@ -4774,7 +5195,8 @@ async def entrypoint(ctx: JobContext) -> None:
         conversation_state=conversation_state,
         turn_processor=turn_processor,
     )
-    turn_processor.set_state_changed_callback(assistant.sync_pricing_tools)
+    if not conversation_state.model_led_flow:
+        turn_processor.set_state_changed_callback(assistant.sync_pricing_tools)
 
     call_done = asyncio.Event()
     participant_seen = bool(ctx.room.remote_participants)
@@ -4788,6 +5210,7 @@ async def entrypoint(ctx: JobContext) -> None:
     information_reply_scheduled_epochs: set[int] = set()
     controlled_information_reply_epochs: set[int] = set()
     flow_correction_epochs: set[int] = set()
+    high_volume_delivery_pending = False
 
     def schedule_controlled_information_reply(
         state_task: asyncio.Task[None] | None,
@@ -4799,24 +5222,14 @@ async def entrypoint(ctx: JobContext) -> None:
         ):
             return
         information_reply_scheduled_epochs.add(turn_epoch)
-        controlled_at_schedule = bool(
-            conversation_state.last_detailed_usp_query
-            or (
-                conversation_state.last_provider_options_query
-                and not conversation_state.last_provider_rates_query
-            )
-            or (
-                conversation_state.last_monthly_quantity_captured
-                and int(conversation_state.value("monthly_shipments") or 0) > 500
-                and not conversation_state.anything_else_checkpoint_consumed
-            )
-        )
+        controlled_at_schedule = conversation_state.v5_company_pair_flow
         if controlled_at_schedule:
             # Mark it before yielding so an incomplete native draft cannot
             # start a second, post-generation USP correction for this turn.
             controlled_information_reply_epochs.add(turn_epoch)
 
         async def reply_once() -> None:
+            nonlocal high_volume_delivery_pending
             if controlled_at_schedule:
                 try:
                     await session.interrupt()
@@ -4833,13 +5246,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.last_provider_options_query
                 and not conversation_state.last_provider_rates_query
             )
-            high_volume = bool(
+            newly_captured_high_volume = bool(
                 conversation_state.last_monthly_quantity_captured
                 and int(conversation_state.value("monthly_shipments") or 0) > 500
                 and not conversation_state.anything_else_checkpoint_consumed
             )
-            if runtime.user_turn_count != turn_epoch or not (
-                detailed_services or provider_options or high_volume
+            high_volume = bool(
+                newly_captured_high_volume or high_volume_delivery_pending
+            )
+            if (
+                runtime.user_turn_count != turn_epoch
+                or not participant_audio_active
+                or not (controlled_at_schedule or detailed_services or provider_options or high_volume)
             ):
                 return
             controlled_information_reply_epochs.add(turn_epoch)
@@ -4851,21 +5269,39 @@ async def entrypoint(ctx: JobContext) -> None:
                 except RuntimeError:
                     pass
             await assistant.sync_pricing_tools()
-            reply = session.generate_reply(
-                instructions=(
-                    _detailed_services_reply_instruction(assistant._response_language)
-                    if detailed_services
-                    else _provider_options_reply_instruction(
-                        assistant._response_language,
-                        conversation_state,
-                    )
-                    if provider_options
-                    else _high_volume_manager_reply_instruction(
-                        assistant._response_language,
-                        int(conversation_state.value("monthly_shipments") or 0),
-                    )
+            if detailed_services:
+                reply_instruction = _detailed_services_reply_instruction(
+                    assistant._response_language
                 )
-            )
+            elif provider_options:
+                reply_instruction = _provider_options_reply_instruction(
+                    assistant._response_language,
+                    conversation_state,
+                )
+            elif high_volume:
+                # Keep this obligation until the final assistant transcript
+                # proves that the manager benefit was actually delivered. An
+                # interrupted partial sentence must not advance to the close.
+                high_volume_delivery_pending = True
+                reply_instruction = _high_volume_manager_reply_instruction(
+                    assistant._response_language,
+                    int(conversation_state.value("monthly_shipments") or 0),
+                )
+            else:
+                reply_instruction = (
+                    "This is the only authorized response for the completed customer turn. "
+                    "Do not continue any earlier draft and do not create an extra checkpoint. "
+                    + conversation_state.guidance()
+                )
+            reply_kwargs: dict[str, object] = {"instructions": reply_instruction}
+            if controlled_at_schedule:
+                # Stable session schemas remain registered, but each settled
+                # V5 turn can invoke only its single authoritative pricing
+                # path. Information and qualification turns get no tools.
+                reply_kwargs["tools"] = _authorized_controlled_reply_tools(
+                    conversation_state
+                )
+            reply = session.generate_reply(**reply_kwargs)
             if hasattr(reply, "wait_for_playout"):
                 await reply.wait_for_playout()
             else:
@@ -4888,12 +5324,17 @@ async def entrypoint(ctx: JobContext) -> None:
         participant_audio_active = False
         logger.info("Customer left room: %s", participant.identity)
         if participant_seen and not ctx.room.remote_participants:
-            async def end_after_grace() -> None:
+            async def end_disconnected_call() -> None:
                 nonlocal close_reason
-                close_reason = "participant_disconnect_timeout"
+                try:
+                    await session.interrupt()
+                except RuntimeError:
+                    pass
+                close_reason = "participant_disconnected"
                 call_done.set()
 
-            runtime.participant_disconnected(end_after_grace)
+            task = asyncio.create_task(end_disconnected_call())
+            task.add_done_callback(VoiceSessionRuntime._log_task_exception)
 
     @session.on("close")
     def _session_closed(event):
@@ -4908,6 +5349,12 @@ async def entrypoint(ctx: JobContext) -> None:
         if getattr(event, "is_final", False):
             turn_id = f"user:{getattr(event, 'created_at', time.time())}"
             transcript = getattr(event, "transcript", "")
+            logger.info(
+                "Final customer transcript pending_field=%s language=%s text=%s",
+                conversation_state.pending_field(),
+                getattr(event, "language", None),
+                " ".join(str(transcript or "").split())[:300],
+            )
             normalized_transcript = _normalized_text(transcript)
             now_monotonic = time.monotonic()
             nonlocal asr_noise_quarantine_until
@@ -4964,7 +5411,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 task = asyncio.create_task(suppress_asr_noise())
                 task.add_done_callback(VoiceSessionRuntime._log_task_exception)
                 return
-            if _is_opening_noise_turn(transcript, conversation_state):
+            if (
+                not conversation_state.model_led_flow
+                and _is_opening_noise_turn(transcript, conversation_state)
+            ):
                 ignored_opening_noise[normalized_transcript] = now_monotonic
                 async def suppress_opening_noise() -> None:
                     try:
@@ -4986,13 +5436,15 @@ async def entrypoint(ctx: JobContext) -> None:
                     assistant._response_language,
                 )
                 state_task = turn_processor.schedule(transcript, turn_id=turn_id)
-                schedule_controlled_information_reply(
-                    state_task,
-                    runtime.user_turn_count,
-                )
+                if not conversation_state.model_led_flow:
+                    schedule_controlled_information_reply(
+                        state_task,
+                        runtime.user_turn_count,
+                    )
 
     @session.on("conversation_item_added")
     def _conversation_item_added(event):
+        nonlocal high_volume_delivery_pending
         item = getattr(event, "item", None)
         if not isinstance(item, ChatMessage):
             return
@@ -5025,7 +5477,10 @@ async def entrypoint(ctx: JobContext) -> None:
             if recently_ignored:
                 ignored_opening_noise.pop(noise_key, None)
                 return
-            if _is_opening_noise_turn(customer_text, conversation_state):
+            if (
+                not conversation_state.model_led_flow
+                and _is_opening_noise_turn(customer_text, conversation_state)
+            ):
                 return
             is_new_turn = runtime.add_user_turn(customer_text, turn_id=turn_id)
             assistant._response_language = _response_language_for_turn(
@@ -5037,12 +5492,20 @@ async def entrypoint(ctx: JobContext) -> None:
             # that guarantees the authoritative state still sees every turn.
             if is_new_turn:
                 state_task = turn_processor.schedule(customer_text, turn_id=turn_id)
-                schedule_controlled_information_reply(
-                    state_task,
-                    runtime.user_turn_count,
-                )
+                if not conversation_state.model_led_flow:
+                    schedule_controlled_information_reply(
+                        state_task,
+                        runtime.user_turn_count,
+                    )
         elif str(item.role) == "assistant":
             agent_text = item.text_content or ""
+            logger.info(
+                "Final assistant transcript pending_field=%s text=%s",
+                conversation_state.pending_field(),
+                " ".join(agent_text.split())[:500],
+            )
+            if _high_volume_manager_delivery_complete(agent_text):
+                high_volume_delivery_pending = False
             previous_agent_text = next(
                 (
                     str(turn.get("text") or "")
@@ -5291,6 +5754,10 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "Flat amounts as Flat-Zonal amounts. Follow only this current action: "
                                 + conversation_state.guidance()
                             )
+                        elif flow_violation == "flat_zonal_catalog_omitted":
+                            correction_direction = conversation_state.guidance()
+                        elif flow_violation == "flat_catalog_omitted":
+                            correction_direction = conversation_state.guidance()
                         elif flow_violation == "unexpected_anything_else_checkpoint":
                             correction_direction = (
                                 "The one information checkpoint is not authorized at this stage. "
@@ -5469,8 +5936,39 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         speech_id = str(getattr(handle, "id", ""))
         source = str(getattr(event, "source", "generate_reply"))
+        user_initiated = bool(getattr(event, "user_initiated", False))
+        expected_tool_reply = bool(
+            not user_initiated
+            and runtime.consume_expected_realtime_tool_reply()
+        )
+        if _suppress_unsolicited_realtime_speech(
+            controlled_flow=(
+                conversation_state.v5_company_pair_flow
+                and not conversation_state.model_led_flow
+            ),
+            user_initiated=user_initiated,
+            expected_tool_reply=expected_tool_reply,
+        ):
+            # This callback is emitted synchronously before LiveKit schedules
+            # the realtime generation, so cancellation prevents both the
+            # speculative audio fragment and its eager function calls.
+            handle.interrupt(force=True)
+            logger.info(
+                "Suppressed unsolicited realtime speech id=%s source=%s "
+                "pending_field=%s",
+                speech_id,
+                source,
+                conversation_state.pending_field(),
+            )
         runtime.track_agent_speech(speech_id, source=source)
-        logger.info("Agent speech created id=%s source=%s", speech_id, source)
+        logger.info(
+            "Agent speech created id=%s source=%s user_initiated=%s "
+            "expected_tool_reply=%s",
+            speech_id,
+            source,
+            user_initiated,
+            expected_tool_reply,
+        )
 
         def speech_done(completed_handle) -> None:
             interrupted = bool(getattr(completed_handle, "interrupted", False))
@@ -5483,6 +5981,31 @@ async def entrypoint(ctx: JobContext) -> None:
                 getattr(completed_handle, "id", speech_id),
                 interrupted,
             )
+            if not interrupted and conversation_state.flat_zonal_catalog_delivery_due:
+                latest_agent_text = next(
+                    (
+                        str(turn.get("text") or "")
+                        for turn in reversed(runtime.turns)
+                        if turn.get("role") == "AGENT"
+                    ),
+                    "",
+                )
+                if _flat_zonal_catalog_response_complete(
+                    latest_agent_text,
+                    conversation_state,
+                ):
+                    conversation_state.mark_flat_zonal_catalog_delivered()
+            if not interrupted and conversation_state.flat_catalog_delivery_due:
+                latest_agent_text = next(
+                    (
+                        str(turn.get("text") or "")
+                        for turn in reversed(runtime.turns)
+                        if turn.get("role") == "AGENT"
+                    ),
+                    "",
+                )
+                if _flat_catalog_response_complete(latest_agent_text, conversation_state):
+                    conversation_state.mark_flat_catalog_delivered()
             if (
                 conversation_state.onboarding_link_presented
                 or conversation_state.better_plan_close_presented
@@ -5507,6 +6030,11 @@ async def entrypoint(ctx: JobContext) -> None:
                 metrics=runtime.metrics(),
             )
         )
+
+    @session.on("user_state_changed")
+    def _user_state_changed(event):
+        if str(getattr(event, "new_state", "")) == "speaking":
+            runtime.clear_expected_realtime_tool_replies()
 
     @session.on("session_usage_updated")
     def _session_usage_updated(event):
@@ -5560,7 +6088,23 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_id = str(getattr(new_message, "id", "") or f"text:{time.time()}")
             runtime.add_user_turn(customer_text, turn_id=turn_id)
             turn_context = assistant.chat_ctx.copy()
-            await assistant.on_user_turn_completed(turn_context, new_message)
+            try:
+                await assistant.on_user_turn_completed(turn_context, new_message)
+            except StopResponse:
+                # Text input has no competing automatic native response; its
+                # single explicit generate_reply below remains the owner.
+                pass
+            if conversation_state.model_led_flow:
+                sess.generate_reply(
+                    user_input=new_message,
+                    chat_ctx=turn_context,
+                    instructions=(
+                        "Answer the customer's current request and continue the V6 sales flow "
+                        "naturally. Do not restart or repeat a handled question."
+                    ),
+                    input_modality="text",
+                )
+                return
             pending = conversation_state.pending_field()
             if conversation_state.starting_rate_due():
                 response_directive = (
@@ -5657,7 +6201,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     if not call_done.is_set():
         try:
-            if prompt_version in STRICT_PROMPT_VERSIONS:
+            if prompt_version in EXACT_OPENING_PROMPT_VERSIONS:
                 opening_instruction = (
                     "The ShipKia call has connected. Say exactly once: \"Namaste, main ShipKia ki "
                     "taraf se baat kar raha hoon. ShipKia ek shipping platform hai jo businesses "

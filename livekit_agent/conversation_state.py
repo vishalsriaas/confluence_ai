@@ -15,12 +15,13 @@ from google.genai import types as genai_types
 OPTIONAL_QUALIFICATION_FIELDS = (
     "business_name",
     "business_type",
+    "business_platform",
     "current_shipping_arrangement",
     "current_provider_name",
     "current_shipping_rate",
     "current_problem",
 )
-COMPANY_DETAIL_FIELDS = ("business_name", "business_type")
+COMPANY_DETAIL_FIELDS = ("business_name", "business_type", "business_platform")
 PINCODE_FIELDS = ("pickup_pincode", "delivery_pincode")
 LOCATION_FIELDS = ("pickup_location", "delivery_location")
 ROUTE_FIELDS = (*PINCODE_FIELDS, *LOCATION_FIELDS)
@@ -245,12 +246,15 @@ _EXPLICIT_RATE_INTENT_PATTERN = re.compile(
 _USP_QUERY_PATTERN = re.compile(
     r"(?:\b(?:feature|features|benefit|benefits|advantage|advantages|usp|usps|"
     r"facility|facilities|fayda|fayde|faayda|faayde)\b|\b(?:what|tell me|batao|bata do|bataye)\b.{0,35}"
-    r"\bship\s*kia\b|\b(?:what\s+is|about)\s+ship\s*kia\b|"
+    r"\b(?:ship\s*(?:kia|kya|yard)|shiv\s+priya)\b|\b(?:what\s+is|about)\s+ship\s*kia\b|"
     r"\bship\s*kia\b.{0,25}\b(?:kya\s+hai|what\s+is|about)\b|"
     r"\bship\b.{0,55}(?:kya[\s-]*){2}.{0,25}\b(?:kar|karte|karta|dete|deta)\b|"
+    r"\b(?:ship\s*(?:kya|yard)|shiv\s+priya)\b.{0,45}\b(?:about|bare|kya\s+hai|bata|bataye)\b|"
     r"\u092b\u0940\u091a\u0930|\u092b\u093e\u092f\u0926|\u092b\u093e\u092f\u0926\u0947|\u0938\u0941\u0935\u093f\u0927\u093e|"
     r"(?:\u0936\u093f\u092a\s*\u0915\u093f\u092f\u093e|\u0936\u093f\u092a\u0915\u093f\u092f\u093e).{0,25}"
-    r"\u0915\u094d\u092f\u093e\s+\u0939\u0948)",
+    r"\u0915\u094d\u092f\u093e\s+\u0939\u0948|"
+    r"(?:\u0936\u093f\u092a\s*\u0915\u094d\u092f\u093e|\u0936\u093f\u0935\s+\u092a\u094d\u0930\u093f\u092f\u093e).{0,45}"
+    r"(?:\u092c\u093e\u0930\u0947|\u0915\u094d\u092f\u093e\s+\u0939\u0948|\u092c\u0924\u093e))",
     re.IGNORECASE,
 )
 _BROAD_USP_QUERY_PATTERN = re.compile(
@@ -663,6 +667,8 @@ def _conversation_consent(text: object) -> str:
     }
     accepted = {
         "yes",
+        "yeah",
+        "yep",
         "yes sure",
         "sure",
         "haan",
@@ -704,16 +710,32 @@ def _conversation_consent(text: object) -> str:
     return ""
 
 
-def _current_provider_evidence(text: object, previous_agent_text: object) -> str:
+def _current_provider_evidence(
+    text: object,
+    previous_agent_text: object,
+    *,
+    question_is_pending: bool = False,
+) -> str:
     """Preserve an unfamiliar provider answer without guessing its brand or category."""
-    if not _arrangement_question_context(previous_agent_text):
+    if not question_is_pending and not _arrangement_question_context(previous_agent_text):
         return ""
     clean = re.sub(r"[.,!?।:;]+", " ", normalize_text(text))
     clean = " ".join(clean.split())
     if (
         not clean
         or clean in _BARE_NEGATIONS
+        or _conversation_consent(clean) == "Accepted"
         or _current_arrangement_none_evidence(text, previous_agent_text)
+        or question_is_pending
+        and (
+            re.search(
+                r"\b(?:pickup|delivery|drop|destination|weight|pincode|pin\s*code|"
+                r"prepaid|cod|cash\s+on\s+delivery|order\s+value)\b",
+                clean,
+                re.IGNORECASE,
+            )
+            or re.search(r"\b\d{6}\b", clean)
+        )
     ):
         return ""
     candidate = re.sub(
@@ -924,10 +946,14 @@ class GatedConversationState:
         minimum_confidence: float = 0.78,
         v4_strict_flow: bool = False,
         v5_company_pair_flow: bool = False,
+        direct_onboarding_flow: bool = False,
+        model_led_flow: bool = False,
     ) -> None:
         self.minimum_confidence = minimum_confidence
         self.v4_strict_flow = v4_strict_flow
         self.v5_company_pair_flow = v5_company_pair_flow
+        self.direct_onboarding_flow = direct_onboarding_flow
+        self.model_led_flow = model_led_flow
         self.fields: dict[str, FieldState] = {}
         self.optional_ended_by = ""
         self.company_details_ended_by = ""
@@ -950,8 +976,14 @@ class GatedConversationState:
         self.pending_catalogs: set[str] = set()
         self.catalog_choice_turn_ids: set[str] = set()
         self.flat_catalog_presented = False
+        self.flat_catalog_delivery_due = False
+        self.flat_catalog_options: list[dict[str, Any]] = []
+        self.flat_additional_options: list[dict[str, Any]] = []
         self.flat_zonal_catalog_presented = False
+        self.flat_zonal_catalog_delivery_due = False
         self.flat_zonal_group_totals: dict[str, float] = {}
+        self.flat_zonal_additional_weight_g = 0
+        self.flat_zonal_additional_total: float | None = None
         self.last_flat_zonal_route_query = False
         self.last_flat_structure_query = False
         self.verified_pricing_path = ""
@@ -995,6 +1027,7 @@ class GatedConversationState:
         mappings = {
             "business_name": ("business_name", "organization", "company_name"),
             "business_type": ("business_type", "shipkia_business_type"),
+            "business_platform": ("business_platform", "shipkia_business_platform"),
             "current_shipping_arrangement": (
                 "current_shipping_arrangement",
                 "shipkia_current_provider_type",
@@ -1041,7 +1074,10 @@ class GatedConversationState:
             )
 
     def optional_sequence(self) -> tuple[str, ...]:
-        sequence = ["business_name", "business_type", "current_shipping_arrangement"]
+        sequence = ["business_name", "business_type"]
+        if self.direct_onboarding_flow:
+            sequence.append("business_platform")
+        sequence.append("current_shipping_arrangement")
         arrangement = self.value("current_shipping_arrangement")
         if normalize_text(arrangement) in PROVIDER_ARRANGEMENTS:
             sequence.append("current_provider_name")
@@ -1092,7 +1128,11 @@ class GatedConversationState:
         if needs_route and not self.pan_india_requested:
             for endpoint in ("pickup", "delivery"):
                 if not self.route_endpoint_handled(endpoint):
-                    return f"{endpoint}_pincode"
+                    return (
+                        f"{endpoint}_location"
+                        if self.v5_company_pair_flow
+                        else f"{endpoint}_pincode"
+                    )
         if self.v5_company_pair_flow and needs_route:
             if self.route_zone_lookup_status in {"verified_starting", "unavailable"}:
                 return ""
@@ -1225,9 +1265,12 @@ class GatedConversationState:
 
     def route_input_unavailable(self) -> bool:
         return any(
-            self.fields.get(f"{endpoint}_pincode")
-            and self.fields[f"{endpoint}_pincode"].status in {"refused", "unavailable"}
-            and not self.is_confirmed(f"{endpoint}_location")
+            any(
+                self.fields.get(field)
+                and self.fields[field].status in {"refused", "unavailable"}
+                for field in (f"{endpoint}_pincode", f"{endpoint}_location")
+            )
+            and not self.route_endpoint_handled(endpoint)
             for endpoint in ("pickup", "delivery")
         )
 
@@ -1285,6 +1328,23 @@ class GatedConversationState:
             field = str(raw.get("field") or "").strip()
             disposition = str(raw.get("disposition") or "").strip().lower()
             confidence = _number(raw.get("confidence"))
+            if (
+                self.v5_company_pair_flow
+                and field == "business_type"
+                and pending_field_at_turn_start == "business_name"
+            ):
+                # Do not let an answer to a prematurely spoken later question
+                # skip the still-required business name.
+                continue
+            if (
+                self.v5_company_pair_flow
+                and field == "monthly_shipments"
+                and pending_field_at_turn_start != "monthly_shipments"
+                and not self.monthly_quantity_due
+            ):
+                # An incidental number is not monthly volume unless the
+                # customer labels it and the dedicated volume step is active.
+                continue
             if field in deterministically_updated_this_turn:
                 # Do not apply the semantic model's second interpretation of
                 # a field already confirmed from the same utterance. Besides
@@ -1990,6 +2050,29 @@ class GatedConversationState:
                 re.IGNORECASE,
             )
         )
+        if self.v5_company_pair_flow:
+            # A services answer can mention "shipments" without asking for
+            # volume. In V5, a bare number is a quantity only while the
+            # dedicated quantity step is due or the preceding sentence is an
+            # unmistakable quantity question.
+            previous_quantity_question = bool(
+                re.search(
+                    r"\b(?:how many|kitn(?:a|i|e)|quantity|volume|approx(?:imate)?|around)\b"
+                    r".{0,70}\b(?:monthly|month|shipments?|orders?)\b|"
+                    r"\b(?:monthly|month|shipments?|orders?)\b.{0,70}"
+                    r"\b(?:how many|kitn(?:a|i|e)|quantity|volume|approx(?:imate)?|around)\b",
+                    previous_clean,
+                    re.IGNORECASE,
+                )
+            )
+            quantity_context = bool(
+                not pincode_answer_context
+                and (
+                    self.monthly_quantity_due
+                    or pending == "monthly_shipments"
+                    or previous_quantity_question
+                )
+            )
         quantity_match = re.fullmatch(
             r"(?:around|approximately|approx|lagbhag|करीब|लगभग)?\s*"
             r"(\d[\d,]*)\s*(?:shipments?|orders?|शिपमेंट्स?|ऑर्डर्स?)?\s*[.!?।]*",
@@ -2060,7 +2143,11 @@ class GatedConversationState:
                     transition["source"] = "deterministic"
                     self.last_monthly_quantity_captured = True
                     self.monthly_quantity_due = False
-                    self.anything_else_question_due = not self.anything_else_checkpoint_consumed
+                    self.anything_else_question_due = (
+                        False
+                        if self.direct_onboarding_flow
+                        else not self.anything_else_checkpoint_consumed
+                    )
                     self.anything_else_detail_due = False
                     self.anything_else_decision = (
                         self.anything_else_decision
@@ -2068,7 +2155,7 @@ class GatedConversationState:
                         else ""
                     )
                     self.anything_else_question_presented = False
-                    self.move_forward_question_due = False
+                    self.move_forward_question_due = self.direct_onboarding_flow
                     applied.append(transition)
 
         business_name_question_context = bool(
@@ -2114,7 +2201,17 @@ class GatedConversationState:
                     confirmed = _spoken_business_type(mentioned_types[0])
                     if confirmed:
                         business_type = (confirmed[0], clean)
-        if business_type:
+        if business_type and (
+            not self.v5_company_pair_flow
+            or pending == "business_type"
+            or (
+                pending != "business_name"
+                and (
+                    not self.is_handled("business_type")
+                    or re.search(r"\b(?:sorry|correction|correct)\b", clean)
+                )
+            )
+        ):
             value, evidence = business_type
             transition = self.apply_decision(
                 field="business_type",
@@ -2128,6 +2225,37 @@ class GatedConversationState:
             if transition:
                 transition["source"] = "deterministic"
                 applied.append(transition)
+
+        platform_question_context = bool(
+            pending == "business_platform"
+            or re.search(
+                r"\b(?:shopify|woo\s*commerce|website|marketplace|platform)\b.{0,80}"
+                r"\b(?:operate|sell|business|orders?)\b|"
+                r"\b(?:operate|sell|business|orders?)\b.{0,80}"
+                r"\b(?:shopify|woo\s*commerce|website|marketplace|platform)\b",
+                previous_clean,
+            )
+        )
+        if platform_question_context and not self.is_handled("business_platform"):
+            platform_answer = str(customer_text or "").strip(" \t\r\n.,!?;")
+            if (
+                platform_answer
+                and len(platform_answer) <= 100
+                and not _contains_phrase(clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
+                and not _NON_ANSWER_CHATTER_PATTERN.fullmatch(clean)
+            ):
+                transition = self.apply_decision(
+                    field="business_platform",
+                    disposition="answered",
+                    value=platform_answer,
+                    evidence=platform_answer,
+                    confidence=1.0,
+                    customer_text=customer_text,
+                    turn_id=turn_id,
+                )
+                if transition:
+                    transition["source"] = "deterministic"
+                    applied.append(transition)
 
         provider_match = re.search(
             r"\b(?:ship\s*rocket|shipping\s*rocket|shirocket|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b|"
@@ -2173,7 +2301,11 @@ class GatedConversationState:
                     transition["source"] = "deterministic"
                     applied.append(transition)
 
-        if current_rate_question_context and not self.is_handled("current_shipping_rate"):
+        if (
+            current_rate_question_context
+            and (not self.v5_company_pair_flow or pending == "current_shipping_rate")
+            and not self.is_handled("current_shipping_rate")
+        ):
             rate_match = re.search(
                 r"(?:\b(?:rs\.?|inr|rate(?:\s+is|\s+mil\s+raha\s+hai)?)\s*)?"
                 r"(\d+(?:\.\d+)?)\b(?:\s*(?:rupees?|ka))?",
@@ -2230,6 +2362,7 @@ class GatedConversationState:
             provider_evidence = _current_provider_evidence(
                 customer_text,
                 previous_agent_text,
+                question_is_pending=pending == "current_shipping_arrangement",
             )
             if provider_evidence:
                 for field, value in (
@@ -2430,6 +2563,21 @@ class GatedConversationState:
             clean,
             re.IGNORECASE,
         ))
+        route_correction = bool(
+            len(location_routes) > 1
+            and re.search(
+                r"\b(?:nahi|nahin|nhi|not|instead|rather|actually|sorry|correction)\b",
+                clean,
+                re.IGNORECASE,
+            )
+        )
+        if route_correction:
+            # When one utterance rejects an earlier route and supplies a later
+            # replacement, only the last complete pair is authoritative. This
+            # is structural correction handling, independent of city names.
+            location_routes = [location_routes[-1]]
+            self.requested_routes.clear()
+            self._resolved_route_keys.clear()
         location_assignments: dict[str, str] = {}
         if location_routes:
             if current_rate_question_context:
@@ -2464,13 +2612,12 @@ class GatedConversationState:
                     "pickup_location": _LOCATION_ALIASES[location_route.group(1).casefold()],
                     "delivery_location": _LOCATION_ALIASES[location_route.group(2).casefold()],
                 }
-        elif pending in PINCODE_FIELDS:
+        elif pending in {*PINCODE_FIELDS, *LOCATION_FIELDS}:
             location_route = None
             whole_location = _LOCATION_ALIASES.get(clean)
             if whole_location:
-                location_assignments[
-                    "pickup_location" if pending == "pickup_pincode" else "delivery_location"
-                ] = whole_location
+                endpoint = "pickup" if pending.startswith("pickup_") else "delivery"
+                location_assignments[f"{endpoint}_location"] = whole_location
         for field, value in location_assignments.items():
             transition = self.apply_decision(
                 field=field,
@@ -2876,6 +3023,7 @@ class GatedConversationState:
             return canonical if re.fullmatch(r"[BDG]2[BC]", canonical) else None
         if field in {
             "business_name",
+            "business_platform",
             "current_provider_name",
             "current_problem",
             "current_rate_basis",
@@ -2884,6 +3032,11 @@ class GatedConversationState:
         }:
             rendered = str(value or "").strip()
             if not rendered or clean in INVALID_FREE_TEXT_VALUES:
+                return None
+            if _conversation_consent(rendered) == "Accepted":
+                # A bare acknowledgement is valid only for a consent/yes-no
+                # question. It is never a descriptive answer such as a name,
+                # platform, provider, problem, route, or service.
                 return None
             if field in LOCATION_FIELDS and clean in {
                 "pin",
@@ -3062,8 +3215,19 @@ class GatedConversationState:
         self.requested_rate_type = "Flat"
         self.pending_catalogs.add("Flat")
 
-    def mark_flat_catalog_presented(self) -> None:
+    def mark_flat_catalog_presented(
+        self,
+        flat_options: list[dict[str, Any]] | None = None,
+        additional_options: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.flat_catalog_presented = True
+        self.flat_catalog_options = [
+            dict(item) for item in (flat_options or []) if isinstance(item, dict)
+        ]
+        self.flat_additional_options = [
+            dict(item) for item in (additional_options or []) if isinstance(item, dict)
+        ]
+        self.flat_catalog_delivery_due = bool(self.flat_catalog_options)
         self.pending_catalogs.discard("Flat")
         if "Flat Zonal" in self.pending_catalogs:
             self.requested_rate_type = "Flat Zonal"
@@ -3077,8 +3241,10 @@ class GatedConversationState:
     def mark_flat_zonal_catalog_presented(
         self,
         zone_groups: list[dict[str, Any]] | None = None,
+        additional_weight: dict[str, Any] | None = None,
     ) -> None:
         self.flat_zonal_catalog_presented = True
+        self.flat_zonal_catalog_delivery_due = True
         self.pending_catalogs.discard("Flat Zonal")
         if "Flat" in self.pending_catalogs:
             self.requested_rate_type = "Flat"
@@ -3090,9 +3256,35 @@ class GatedConversationState:
                 and str(item.get("zone_group") or "").strip() in {"A-B", "C-F"}
                 and isinstance(item.get("total"), (int, float))
             }
+        if isinstance(additional_weight, dict):
+            unit = additional_weight.get("additional_weight_unit_g")
+            total = additional_weight.get("total")
+            self.flat_zonal_additional_weight_g = int(unit or 0)
+            self.flat_zonal_additional_total = (
+                float(total) if isinstance(total, (int, float)) else None
+            )
         self._append_transition(
             {
                 "event": "flat_zonal_catalog_presented",
+                "created_at": time.time(),
+            }
+        )
+
+    def mark_flat_catalog_delivered(self) -> None:
+        self.flat_catalog_delivery_due = False
+        self._append_transition(
+            {
+                "event": "flat_catalog_delivered",
+                "created_at": time.time(),
+            }
+        )
+
+    def mark_flat_zonal_catalog_delivered(self) -> None:
+        """Clear the durable delivery obligation only after complete playout."""
+        self.flat_zonal_catalog_delivery_due = False
+        self._append_transition(
+            {
+                "event": "flat_zonal_catalog_delivered",
                 "created_at": time.time(),
             }
         )
@@ -3408,8 +3600,12 @@ class GatedConversationState:
                 self.move_forward_question_due = False
             else:
                 self.monthly_quantity_due = False
-                self.anything_else_question_due = not self.anything_else_checkpoint_consumed
-                self.move_forward_question_due = False
+                self.anything_else_question_due = (
+                    False
+                    if self.direct_onboarding_flow
+                    else not self.anything_else_checkpoint_consumed
+                )
+                self.move_forward_question_due = self.direct_onboarding_flow
 
     def mark_anything_else_question_presented(self) -> None:
         if not self.anything_else_question_due:
@@ -3518,6 +3714,39 @@ class GatedConversationState:
                     "qualification, repeat any question, quote another rate, or send onboarding. "
                     "Give only one brief polite farewell if the customer speaks again."
                 )
+            if self.flat_catalog_delivery_due and self.flat_catalog_options:
+                slab_text = "; ".join(
+                    f"{int(item.get('min_weight_g') or 0)}-{int(item.get('max_weight_g') or 0)} "
+                    f"grams Rs {float(item.get('total') or 0):.2f}"
+                    for item in self.flat_catalog_options
+                )
+                shadowfax = self.flat_additional_options[0] if self.flat_additional_options else {}
+                breakdown = shadowfax.get("flat_additional_rate_breakdown")
+                breakdown = breakdown if isinstance(breakdown, dict) else {}
+                return (
+                    "Speak the complete verified Flat-related catalog now in one uninterrupted "
+                    f"answer. Option one is E-Kart Surface complete all-zone slabs: {slab_text}. "
+                    "Option two is Shadowfax Surface 5 KG's flat additional-weight condition: "
+                    f"after {int(shadowfax.get('applies_after_weight_g') or 0)} grams, each "
+                    f"additional {int(shadowfax.get('additional_weight_unit_g') or 0)} grams is "
+                    f"Rs {float(breakdown.get('total') or 0):.2f}, GST included. Clearly say its "
+                    "base shipment rate remains zonal and this is not a complete shipment rate. "
+                    "Do not omit either option and do not call another tool."
+                )
+            if self.flat_zonal_catalog_delivery_due:
+                group_ab = self.flat_zonal_group_totals.get("A-B")
+                group_cf = self.flat_zonal_group_totals.get("C-F")
+                additional = self.flat_zonal_additional_total
+                if group_ab is not None and group_cf is not None and additional is not None:
+                    return (
+                        "Speak the complete verified E-Kart Express Flat-Zonal catalog now in one "
+                        f"uninterrupted answer: Zones A-B, 500 grams, Rs {group_ab:.2f}; Zones C-F, "
+                        f"500 grams, Rs {group_cf:.2f}; then each additional "
+                        f"{self.flat_zonal_additional_weight_g} grams is Rs {additional:.2f}. State "
+                        "that all three amounts are GST-inclusive. Do not call a pricing tool again, "
+                        "do not ask which group they want, do not ask whether they want the rates, "
+                        "and do not ask 'kuch aur' in this response. End after the complete catalog."
+                    )
             if self.unsatisfied_problem_due:
                 return (
                     "The customer said they are not satisfied, but has not shared what exact problem "
@@ -3702,25 +3931,40 @@ class GatedConversationState:
                     "amount, ask permission, or ask another question first."
                 )
             if self.last_monthly_quantity_captured:
-                if self.anything_else_checkpoint_consumed:
+                if not self.direct_onboarding_flow:
+                    if self.anything_else_checkpoint_consumed:
+                        return (
+                            "Briefly acknowledge the captured monthly shipment quantity, then stop. "
+                            "The one information checkpoint was already consumed, so do not ask it "
+                            "again or add another question."
+                        )
+                    monthly_shipments = int(self.value("monthly_shipments") or 0)
+                    if monthly_shipments > 500:
+                        return (
+                            "Briefly acknowledge the captured monthly shipment quantity, then say "
+                            "that for this volume they will get a dedicated account manager who will "
+                            "help with support and ticketing. Then ask exactly: 'Kya aap kuch aur "
+                            "jaanna chahenge?' Do not ask for the quantity or any qualification field "
+                            "again."
+                        )
                     return (
-                        "Briefly acknowledge the captured monthly shipment quantity, then stop. "
-                        "The one information checkpoint was already consumed, so do not ask it "
-                        "again or add another question."
+                        "Briefly acknowledge the captured monthly shipment quantity, then ask exactly: "
+                        "'Kya aap kuch aur jaanna chahenge?' Do not ask for the quantity, business "
+                        "details, route, weight, or payment mode again."
                     )
                 monthly_shipments = int(self.value("monthly_shipments") or 0)
                 if monthly_shipments > 500:
                     return (
                         "Briefly acknowledge the captured monthly shipment quantity, then say "
                         "that for this volume they will get a dedicated account manager who will "
-                        "help with support and ticketing. Then ask exactly: 'Kya aap kuch aur "
-                        "jaanna chahenge?' Do not ask for the quantity or any qualification field "
-                        "again."
+                        "help with support and ticketing. Then ask exactly: 'Kya aap ShipKia ke "
+                        "saath aage badhna chahte hain?' Do not ask 'kuch aur', do not offer a "
+                        "menu, do not ask any qualification field again, and do not call a tool."
                     )
                 return (
                     "Briefly acknowledge the captured monthly shipment quantity, then ask exactly: "
-                    "'Kya aap kuch aur jaanna chahenge?' Do not ask for the "
-                    "quantity, business details, route, weight, or payment mode again."
+                    "'Kya aap ShipKia ke saath aage badhna chahte hain?' Do not ask 'kuch aur', "
+                    "offer a menu, repeat any discovery question, or call a tool."
                 )
             if self.anything_else_detail_due:
                 return (
@@ -3794,7 +4038,11 @@ class GatedConversationState:
                     if self.qualification_bridge_due()
                     else "Ask only for their business or brand name."
                 ),
-                "business_type": "Ask only whether their business is B2C or D2C.",
+                "business_type": "Ask only whether their business is B2C, B2B, D2C, marketplace-led, or another model.",
+                "business_platform": (
+                    "Ask only: 'Aap apna business kaise operate karte hain—Shopify, "
+                    "WooCommerce, marketplace, apni website, ya kisi aur platform se?'"
+                ),
                 "current_shipping_arrangement": (
                     "Ask only what courier or shipping arrangement they currently use."
                 ),
@@ -3805,6 +4053,13 @@ class GatedConversationState:
                 "current_problem": "Ask only their main current shipping challenge.",
                 "pickup_pincode": "Ask only for the six-digit pickup pincode or pickup city/location.",
                 "delivery_pincode": "Ask only for the six-digit delivery pincode or drop city/location.",
+                "pickup_location": (
+                    "Ask where the shipments go from and to, in one short question. Accept city or locality names; "
+                    "do not ask for a pincode."
+                ),
+                "delivery_location": (
+                    "Ask only for the delivery city or locality. Do not ask for a pincode."
+                ),
                 "dead_weight": "Ask only for the shipment weight.",
                 "payment_type": "Ask only whether the shipment is Prepaid, COD, or Both.",
                 "order_value": "Ask only for the COD order value.",
@@ -3966,9 +4221,15 @@ class GatedConversationState:
             "pending_catalogs": sorted(self.pending_catalogs),
             "flat_catalog_due": self.flat_catalog_due(),
             "flat_catalog_presented": self.flat_catalog_presented,
+            "flat_catalog_delivery_due": self.flat_catalog_delivery_due,
+            "flat_catalog_options": list(self.flat_catalog_options),
+            "flat_additional_options": list(self.flat_additional_options),
             "flat_zonal_catalog_due": self.flat_zonal_catalog_due(),
             "flat_zonal_catalog_presented": self.flat_zonal_catalog_presented,
+            "flat_zonal_catalog_delivery_due": self.flat_zonal_catalog_delivery_due,
             "flat_zonal_group_totals": dict(self.flat_zonal_group_totals),
+            "flat_zonal_additional_weight_g": self.flat_zonal_additional_weight_g,
+            "flat_zonal_additional_total": self.flat_zonal_additional_total,
             "shadowfax_surface_rate_due": self.shadowfax_surface_rate_due,
             "shadowfax_surface_rate_presented": self.shadowfax_surface_rate_presented,
             "customer_satisfied": self.customer_satisfied,

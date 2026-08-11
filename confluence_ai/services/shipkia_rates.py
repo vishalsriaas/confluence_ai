@@ -23,6 +23,8 @@ STARTING_RATE_WEIGHT_G = Decimal("500")
 GENERAL_STARTING_RATE = Decimal("22")
 FLAT_RATE_COURIER = "E-Kart"
 FLAT_RATE_SERVICE = "E-Kart SURFACE"
+SHADOWFAX_FLAT_COURIER = "Shadowfax"
+SHADOWFAX_FLAT_SERVICE = "Shadowfax Surface 5 KG"
 FLAT_ZONAL_RATE_COURIER = "E-Kart"
 FLAT_ZONAL_RATE_SERVICE = "E-Kart EXPRESS"
 EXPECTED_FLAT_RATE_SLABS = (
@@ -568,6 +570,7 @@ def _get_flat_rates_with_scope(
 
     try:
         rows = _verified_flat_rate_rows()
+        shadowfax_additional_option = _verified_shadowfax_flat_additional_option()
     except (FileNotFoundError, ValueError) as exc:
         return _flat_rate_error("configuration_required", str(exc))
 
@@ -619,7 +622,10 @@ def _get_flat_rates_with_scope(
     if response_scope == "All":
         returned_options = all_options
         response_type = "flat_all"
-        message = "Speak the three verified GST-inclusive E-Kart Surface flat-rate slabs."
+        message = (
+            "Speak the three verified GST-inclusive E-Kart Surface flat-rate slabs and the "
+            "separate verified Shadowfax Surface 5 KG flat additional-weight condition."
+        )
     elif response_scope == "Matching" and matching_option is not None:
         returned_options = [matching_option]
         response_type = "flat_matching"
@@ -654,8 +660,10 @@ def _get_flat_rates_with_scope(
         "exact_match_available": matching_option is not None,
         "starting_flat_rate": starting_option,
         "flat_rate_options": returned_options,
+        "flat_additional_rate_options": [shadowfax_additional_option],
+        "flat_additional_rate_available": True,
         "verified_flat_rate_count": len(all_options),
-        "excluded_additional_weight_components": True,
+        "excluded_additional_weight_components": False,
         "rate_card": rate_card_metadata(),
         "message": message,
     }
@@ -694,6 +702,50 @@ def _verified_flat_rate_rows() -> tuple[RateRow, ...]:
                 "amount until the new rule is reviewed."
             )
     return rows
+
+
+def _verified_shadowfax_flat_additional_option() -> dict[str, Any]:
+    """Return the one verified Shadowfax all-zone additional-weight condition."""
+    service_rows = tuple(
+        row
+        for row in load_rate_card()
+        if row.courier_partner == SHADOWFAX_FLAT_COURIER
+        and row.service == SHADOWFAX_FLAT_SERVICE
+        and row.movement == "FWD"
+    )
+    base_rows = [row for row in service_rows if not row.is_additional]
+    additional_rows = [row for row in service_rows if row.is_additional]
+    if len(base_rows) != 1 or len(additional_rows) != 1:
+        raise ValueError(
+            "The active rate card does not contain the expected Shadowfax Surface 5 KG rows."
+        )
+    base_row = base_rows[0]
+    additional_row = additional_rows[0]
+    shipping = additional_row.zone_prices[ZONES[0]]
+    if (
+        base_row.max_weight_g != Decimal("10000")
+        or additional_row.max_weight_g != Decimal("1000")
+        or shipping <= 0
+        or any(additional_row.zone_prices[zone] != shipping for zone in ZONES[1:])
+    ):
+        raise ValueError(
+            "The Shadowfax Surface 5 KG flat additional-weight configuration changed."
+        )
+    return {
+        "courier_partner": SHADOWFAX_FLAT_COURIER,
+        "service": SHADOWFAX_FLAT_SERVICE,
+        "option_type": "flat_additional_weight_component",
+        "applies_after_weight_g": int(base_row.max_weight_g),
+        "additional_weight_unit_g": int(additional_row.max_weight_g),
+        "additional_rate_is_flat": True,
+        "flat_additional_rate_breakdown": _amount_breakdown(
+            shipping=shipping,
+            payment_type="Prepaid",
+            order_value=None,
+            cod_minimum=Decimal("0"),
+            cod_percentage=Decimal("0"),
+        ),
+    }
 
 
 def _flat_catalog_option(
