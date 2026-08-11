@@ -344,7 +344,7 @@ _ZONAL_RATE_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _FLAT_RATE_REQUEST_PATTERN = re.compile(
-    r"(?:\b(?:flat|flatt|flait|flight|fly|plate|letter|slide|blood|blud)\s*(?:rate|rates|to|two|pricing|charge|charges)\b|"
+    r"(?:\b(?:flat|flatt|flait|flite|flight|fly|plate|letter|slide|blood|blud)\s*(?:rate|rates|to|two|pricing|charge|charges)\b|"
     # Realtime ASR has rendered "flat rate" as "play it rate" in an actual call.
     # Keep the alias tied to the following pricing noun so ordinary "play it" is safe.
     r"\bplay\s+it\s+(?:rate|rates|pricing|charge|charges)\b|"
@@ -1582,13 +1582,13 @@ class GatedConversationState:
                 # the company name merely because business_name was pending.
                 continue
             if field == "business_name" and re.fullmatch(
-                r"[bdg]\s*2\s*[bc]",
+                r"[a-z]\s*(?:2|to)\s*[a-z]",
                 normalize_text(raw.get("value")),
                 re.IGNORECASE,
             ):
-                # A business-model acronym such as G2C can be volunteered
-                # while business_name is pending, but it is never a company
-                # or brand name.
+                # A short business-model/ASR acronym such as T2C or G2C can
+                # be volunteered while business_name is pending, but it is
+                # never a company or brand name.
                 continue
             if (
                 self.v5_company_pair_flow
@@ -2234,7 +2234,7 @@ class GatedConversationState:
                 self.anything_else_detail_due = False
                 self.anything_else_decision = ""
                 self.move_forward_question_due = False
-                if self.anything_else_checkpoint_consumed:
+                if self.verified_rate_presented():
                     self.post_rate_followup_active = True
             if explicit_rate_type == "Flat Zonal":
                 if self.requested_rate_type != "Flat Zonal":
@@ -3977,6 +3977,15 @@ class GatedConversationState:
     def _refresh_post_rate_progress(self) -> None:
         if not self.model_led_flow or not self.verified_rate_presented():
             return
+        if self.flat_catalog_due() or self.flat_zonal_catalog_due():
+            # An older verified Zone/route answer must not reopen closing
+            # while a newly requested catalog is still owed. This was the
+            # direct cause of the Flite-rate yes/ask-again loop.
+            self.monthly_quantity_due = False
+            self.anything_else_question_due = False
+            self.anything_else_detail_due = False
+            self.move_forward_question_due = False
+            return
         if not self.discovery_complete():
             self.monthly_quantity_due = False
             self.move_forward_question_due = False
@@ -4145,8 +4154,10 @@ class GatedConversationState:
                 return "information"
             if self.model_led_flow and self.pending_field():
                 return "pending"
-            if self.v5_company_pair_flow and self.explicit_zone_requested():
-                return "zone_starting"
+            # The customer's latest requested pricing structure owns routing.
+            # A remembered explicit zone from an earlier Zonal answer must not
+            # shadow a later Flat/Flat-Zonal request or reactivate after that
+            # catalog is delivered.
             if self.flat_catalog_due():
                 return "flat_catalog"
             if self.flat_zonal_catalog_due():
@@ -4163,6 +4174,8 @@ class GatedConversationState:
                 and self.flat_zonal_catalog_presented
             ):
                 return "flat_zonal_catalog_presented"
+            if self.v5_company_pair_flow and self.explicit_zone_requested():
+                return "zone_starting"
             if self.v5_company_pair_flow and self.route_zone_lookup_status == "unavailable":
                 return "general_starting"
             if self.v5_company_pair_flow and self.route_zone_lookup_status == "verified_starting":

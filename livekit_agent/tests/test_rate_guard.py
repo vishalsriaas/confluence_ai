@@ -74,6 +74,32 @@ class TestRateGateResponse(unittest.TestCase):
             ["get_shipkia_flat_rates"],
         )
 
+    def test_v6_last_call_flite_rate_authorizes_only_flat_catalog_tool(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.seed_context(
+            {
+                "conversation_consent": "Accepted",
+                "assistance_intent": "Rates",
+                "zone": "D",
+            }
+        )
+        state.optional_ended_by = "business_name"
+
+        state.apply_deterministic_answers(
+            "Flite rate available hai aapke pass?", turn_id="flat-asr"
+        )
+
+        self.assertEqual(state.pricing_mode(), "flat_catalog")
+        self.assertEqual(
+            _authorized_controlled_reply_tools(state),
+            ["get_shipkia_flat_rates"],
+        )
+
     def test_interrupted_high_volume_sentence_is_not_marked_delivered(self):
         self.assertFalse(
             _high_volume_manager_delivery_complete(

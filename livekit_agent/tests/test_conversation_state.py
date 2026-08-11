@@ -4179,6 +4179,52 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.flat_catalog_due())
         self.assertEqual(state.pending_field(), "")
 
+    def test_v6_last_call_flite_rate_overrides_remembered_zone_d(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.seed_context(
+            {
+                "conversation_consent": "Accepted",
+                "assistance_intent": "Rates",
+                "business_name": "Acme",
+                "business_type": "D2C",
+                "business_platform": "Own website",
+                "current_shipping_arrangement": "Direct Courier",
+                "current_provider_name": "Delhivery",
+                "current_shipping_rate": 35,
+                "current_problem": "Support",
+                "pickup_location": "Delhi",
+                "delivery_location": "Bangalore",
+                "monthly_shipments": 2000,
+            }
+        )
+        state.apply_deterministic_answers(
+            "Zone D ke rates bata dijiye", turn_id="zone-d"
+        )
+        state.mark_starting_rate_presented()
+
+        state.apply_deterministic_answers(
+            "Flite rate available hai aapke pass?", turn_id="flat-asr"
+        )
+
+        self.assertEqual(state.requested_rate_type, "Flat")
+        self.assertTrue(state.flat_catalog_due())
+        self.assertEqual(state.pricing_mode(), "flat_catalog")
+        self.assertIn("get_shipkia_flat_rates", state.guidance())
+        self.assertNotIn("shipment weight", state.guidance())
+
+        state.apply_deterministic_answers("pkg, 1500 g", turn_id="weight")
+
+        self.assertEqual(state.value("dead_weight"), 1.5)
+        self.assertEqual(state.requested_rate_type, "Flat")
+        self.assertTrue(state.flat_catalog_due())
+        self.assertEqual(state.pricing_mode(), "flat_catalog")
+        self.assertIn("get_shipkia_flat_rates", state.guidance())
+
     def test_prepaid_and_cod_in_same_answer_is_both(self):
         state = GatedConversationState()
         state.apply_deterministic_answers(
@@ -4336,6 +4382,30 @@ class TestGatedConversationState(unittest.TestCase):
             },
             customer_text="Mera business G2C hai",
             turn_id="business-type-before-name",
+            pending_field_at_turn_start="business_name",
+        )
+
+        self.assertEqual(applied, [])
+        self.assertFalse(state.is_handled("business_name"))
+        self.assertEqual(state.pending_field(), "business_name")
+
+    def test_v6_last_call_t2c_classifier_value_never_becomes_business_name(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji", turn_id="consent")
+        state.apply_deterministic_answers("rates bata dijiye", turn_id="intent")
+
+        applied = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [decision("business_name", "t2c", "uska t2c")],
+            },
+            customer_text="Mera business hai, uska t2c.",
+            turn_id="asr-business-code",
             pending_field_at_turn_start="business_name",
         )
 
