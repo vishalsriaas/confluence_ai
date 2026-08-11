@@ -4430,6 +4430,53 @@ class TestGatedConversationState(unittest.TestCase):
         )
         self.assertEqual(state.value("business_platform"), "Meri khud ki website hai")
 
+    def test_v6_latest_call_slad_zonal_asr_never_opens_cod_questions(self):
+        state = self._v6_ready_for_ending()
+        state.flat_catalog_presented = True
+        state.flat_catalog_delivery_due = True
+        state.apply_deterministic_answers(
+            "\u0938\u094d\u0932\u093e\u0921 \u091c\u094b\u0928\u0932 \u0930\u0947\u091f \u092c\u0924\u093e\u0913\u0917\u0947 \u090f\u0915 \u092c\u093e\u0930?",
+            turn_id="slad-zonal-asr",
+        )
+
+        self.assertEqual(state.requested_rate_type, "Flat Zonal")
+        self.assertTrue(state.flat_zonal_catalog_due())
+        self.assertFalse(state.flat_catalog_delivery_due)
+        self.assertFalse(state.is_handled("payment_type"))
+        self.assertFalse(state.is_handled("order_value"))
+        self.assertNotEqual(state.pending_field(), "order_value")
+        self.assertIn("get_shipkia_flat_zonal_rates", state.guidance())
+
+    def test_v6_cod_flat_zonal_request_asks_only_amount_then_unlocks_catalog(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers(
+            "COD Flat-Zonal rates batao",
+            turn_id="cod-flat-zonal",
+        )
+
+        self.assertTrue(state.cod_rate_requested)
+        self.assertEqual(state.value("payment_type"), "COD")
+        self.assertEqual(state.pending_field(), "order_value")
+        self.assertIn("COD order value", state.guidance())
+        self.assertNotIn("business or brand name", state.guidance())
+
+        state.apply_deterministic_answers(
+            "2000",
+            turn_id="cod-amount",
+            previous_agent_text="Aapka COD order value kitna hai?",
+        )
+
+        self.assertEqual(state.value("order_value"), 2000)
+        self.assertEqual(state.pending_field(), "")
+        self.assertTrue(state.flat_zonal_catalog_due())
+        self.assertIn("get_shipkia_flat_zonal_rates", state.guidance())
+
     def test_v5_information_question_keeps_legacy_choice_gate_open(self):
         state = GatedConversationState(
             v4_strict_flow=True,

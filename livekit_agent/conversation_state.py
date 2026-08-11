@@ -317,6 +317,10 @@ _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"(?:rate|rates|pricing|available)\b|"
     r"\bflat\s+(?:channel|chainal|journal)\b|"
     r"\b(?:square|squire)\s+(?:channel|chainal|zonal)\s*(?:rate|rates|pricing)?\b|"
+    # Latest telephony ASR rendered spoken "flat zonal" as "slad zonal".
+    r"\bslad[\s-]*(?:zone|zonal)\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    r"\u0938\u094d\u0932\u093e\u0921[\s-]*\u091c\u093c?\u094b\u0928\u0932"
+    r"(?:[\s-]*\u0930\u0947\u091f(?:\u094d\u0938)?)?|"
     r"\u0938\u094d\u0915\u094d\u0935\u093e\u092f\u0930\s+\u091a\u0948\u0928\u0932\s*\u0930\u0947\u091f|"
     r"\b(?:zonal|donal|jonal)[\s-]*(?:flat|plate|flait)\s*"
     r"(?:rate|rates|pricing|charge|charges)?\b|"
@@ -433,6 +437,12 @@ _DISSATISFIED_PATTERN = re.compile(
     r"rates? (?:ka|ki) (?:issue|problem))\b|"
     r"\u0938\u0902\u0924\u0941\u0937\u094d\u091f \u0928\u0939\u0940\u0902|\u092e\u0939\u0902\u0917\u093e|"
     r"सेटिस्फाइड\s+नहीं|रेट(?:्स)?\s+(?:मुझे\s+)?पसंद\s+नहीं|रेट.{0,15}(?:ज्यादा|अधिक))",
+    re.IGNORECASE,
+)
+_COD_RATE_REQUEST_PATTERN = re.compile(
+    r"(?=.*(?:\bcod\b|\bcash\s+on\s+delivery\b|\u0938\u0940\s*\u0913\s*\u0921\u0940))"
+    r"(?=.*(?:\brate(?:s)?\b|\bpricing\b|\bcharges?\b|\bamount\b|"
+    r"\u0930\u0947\u091f(?:\u094d\u0938)?|\u091a\u093e\u0930\u094d\u091c))",
     re.IGNORECASE,
 )
 
@@ -1165,6 +1175,7 @@ class GatedConversationState:
         self.verified_starting_options: list[dict[str, Any]] = []
         self.available_courier_partners: list[str] = []
         self.requested_rate_type = ""
+        self.cod_rate_requested = False
         self.pending_catalogs: set[str] = set()
         self.catalog_choice_turn_ids: set[str] = set()
         self.flat_catalog_presented = False
@@ -1297,6 +1308,18 @@ class GatedConversationState:
                 return ""
             if not self.is_handled("assistance_intent"):
                 return "assistance_intent"
+
+        # COD pricing is customer-led in V6. Flat and Flat-Zonal rate cards
+        # need only the order value as their additional COD input.
+        if (
+            self.model_led_flow
+            and self.cod_rate_requested
+            and self.requested_rate_type in {"Flat", "Flat Zonal"}
+        ):
+            if not self.is_confirmed("order_value"):
+                return "order_value"
+            if self.flat_catalog_due() or self.flat_zonal_catalog_due():
+                return ""
 
         if not self.model_led_flow and self.v5_company_pair_flow and (
             self.explicit_zone_requested()
@@ -2166,6 +2189,7 @@ class GatedConversationState:
                 clean,
             )
         )
+        explicit_cod_rate_request = bool(_COD_RATE_REQUEST_PATTERN.search(clean))
         explicit_route_question_context = bool(
             re.search(
                 r"\b(?:kahan|kahaan|where)\b.{0,30}\b(?:se|from)\b.{0,30}"
@@ -2335,6 +2359,7 @@ class GatedConversationState:
             )
             same_presented_catalog = bool(
                 explicit_rate_type == self.requested_rate_type
+                and not explicit_cod_rate_request
                 and (
                     explicit_rate_type == "Flat" and self.flat_catalog_presented
                     or explicit_rate_type == "Flat Zonal" and self.flat_zonal_catalog_presented
@@ -2351,13 +2376,15 @@ class GatedConversationState:
                 if self.verified_rate_presented():
                     self.post_rate_followup_active = True
             if explicit_rate_type == "Flat Zonal":
-                if self.requested_rate_type != "Flat Zonal":
+                if self.requested_rate_type != "Flat Zonal" or explicit_cod_rate_request:
                     self.flat_zonal_catalog_presented = False
+                self.flat_catalog_delivery_due = False
                 self.requested_rate_type = "Flat Zonal"
                 self.pending_catalogs = {"Flat Zonal"}
             elif explicit_rate_type == "Flat":
-                if self.requested_rate_type != "Flat":
+                if self.requested_rate_type != "Flat" or explicit_cod_rate_request:
                     self.flat_catalog_presented = False
+                self.flat_zonal_catalog_delivery_due = False
                 self.requested_rate_type = "Flat"
                 self.pending_catalogs = {"Flat"}
             elif explicit_rate_type in {"Normal", "Zonal"}:
@@ -2396,6 +2423,18 @@ class GatedConversationState:
                     or _EKART_EXPRESS_PATTERN.search(clean)
                 ):
                     self.ekart_rate_choice_due = False
+
+                if explicit_cod_rate_request:
+                    self.cod_rate_requested = True
+                    if not explicit_rate_type and self.requested_rate_type == "Flat":
+                        self.flat_catalog_presented = False
+                        self.pending_catalogs = {"Flat"}
+                    elif (
+                        not explicit_rate_type
+                        and self.requested_rate_type == "Flat Zonal"
+                    ):
+                        self.flat_zonal_catalog_presented = False
+                        self.pending_catalogs = {"Flat Zonal"}
 
                 if _SHADOWFAX_SURFACE_RATE_PATTERN.search(clean):
                     self.shadowfax_surface_rate_due = True
@@ -4956,6 +4995,16 @@ class GatedConversationState:
             # A newly requested catalog supersedes a stale sales-close
             # checkpoint. The turn parser normally clears the close flags, but
             # this ordering also protects realtime classifier/tool timing races.
+            if (
+                self.cod_rate_requested
+                and self.requested_rate_type in {"Flat", "Flat Zonal"}
+                and not self.is_confirmed("order_value")
+            ):
+                return (
+                    "The customer explicitly requested COD pricing. Ask only for their positive "
+                    "COD order value. Do not ask business details, route, weight, payment mode, "
+                    "monthly volume, or another question, and do not call a pricing tool yet."
+                )
             if self.flat_catalog_due():
                 return (
                     "Call get_shipkia_flat_rates exactly once now for the complete verified Flat "
@@ -5195,6 +5244,7 @@ class GatedConversationState:
             "pricing_trigger_field": self.pricing_trigger_field(),
             "starting_rate_due": self.starting_rate_due(),
             "requested_rate_type": self.requested_rate_type,
+            "cod_rate_requested": self.cod_rate_requested,
             "pending_catalogs": sorted(self.pending_catalogs),
             "flat_catalog_due": self.flat_catalog_due(),
             "flat_catalog_presented": self.flat_catalog_presented,

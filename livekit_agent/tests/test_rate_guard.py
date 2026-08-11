@@ -3103,6 +3103,73 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ask only", result["spoken_response_instruction"])
         self.assertNotIn("76.58", result["spoken_response_instruction"])
 
+    async def test_v6_cod_flat_zonal_forwards_customer_amount_to_knowledge_base(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers(
+            "COD Flat-Zonal rates batao",
+            turn_id="cod-flat-zonal",
+        )
+        state.apply_deterministic_answers(
+            "2000",
+            turn_id="order-value",
+            previous_agent_text="Aapka COD order value kitna hai?",
+        )
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_flat_zonal_rates",
+            "v6-cod-flat-zonal-test",
+            conversation_state=state,
+            backend_argument_names=frozenset({"payment_type", "order_value"}),
+        )
+
+        with patch(
+            "livekit_agent.agent.aiohttp.ClientSession",
+            _FlatZonalFakeClientSession,
+        ):
+            result = json.loads(await forwarder({}))
+
+        arguments = _FlatZonalFakeClientSession.captured_payload["params"]["arguments"]
+        self.assertEqual(arguments, {"payment_type": "COD", "order_value": 2000})
+        self.assertEqual(result["status"], "success")
+
+    def test_v6_cod_question_is_blocked_until_customer_requests_cod(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("flat zonal rates batao", turn_id="flat-zonal")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Kya aap COD shipments karte hain?",
+            customer_text="Flat zonal rates batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+        self.assertEqual(violation, "unsolicited_cod_question")
+        self.assertTrue(
+            _flow_violation_requires_correction(violation, model_led_flow=True)
+        )
+
+        state.apply_deterministic_answers(
+            "COD Flat-Zonal rates batao",
+            turn_id="cod-flat-zonal",
+        )
+        allowed = _shipkia_flow_response_violation(
+            agent_text="Aapka COD order value kitna hai?",
+            customer_text="COD Flat-Zonal rates batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+        self.assertNotEqual(allowed, "unsolicited_cod_question")
+
     async def test_processor_passes_previous_agent_question_to_guard(self):
         state = GatedConversationState()
         guard = _AnswerGuard()

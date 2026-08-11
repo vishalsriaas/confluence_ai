@@ -645,6 +645,10 @@ _AGENT_RATE_PERMISSION_RE = re.compile(
     r"\bdo\s+you\s+want\b.{0,45}\b(?:rate|rates|pricing)\b",
     re.IGNORECASE,
 )
+_AGENT_COD_QUESTION_RE = re.compile(
+    r"\bcod\b|\bcash\s+on\s+delivery\b",
+    re.IGNORECASE,
+)
 _CUSTOMER_POLITE_END_RE = re.compile(
     r"^(?:no[,.! ]*(?:thank\s*you|thanks)|thank\s*you[,.! ]*(?:bye|goodbye)?|"
     r"thanks[,.! ]*(?:bye|goodbye)?|that's\s+all|that\s+is\s+all|"
@@ -960,6 +964,7 @@ _V6_BLOCKING_FLOW_VIOLATIONS = frozenset(
         "unverified_flat_zonal_claim",
         "contradicted_verified_route",
         "unauthorized_better_plan",
+        "unsolicited_cod_question",
     }
 )
 
@@ -1066,6 +1071,15 @@ def _shipkia_flow_response_violation(
         and _AGENT_OPENING_RE.search(agent_clean)
     ):
         return "restarted_opening"
+    if (
+        conversation_state.model_led_flow
+        and any(
+            _AGENT_COD_QUESTION_RE.search(scope)
+            for scope in _assistant_question_scopes(agent_text)
+        )
+        and conversation_state.pending_field() != "order_value"
+    ):
+        return "unsolicited_cod_question"
     if (
         _AGENT_FLAT_ZONAL_CLAIM_RE.search(agent_clean)
         and not conversation_state.flat_zonal_catalog_presented
@@ -3407,6 +3421,16 @@ def make_mcp_forwarder(
                         }
                     )
                 arguments = {"response_scope": "All", "payment_type": "Prepaid"}
+                if (
+                    conversation_state.cod_rate_requested
+                    and conversation_state.is_confirmed("order_value")
+                ):
+                    arguments.update(
+                        {
+                            "payment_type": "COD",
+                            "order_value": conversation_state.value("order_value"),
+                        }
+                    )
                 rate_metadata["direct_model_led_flat_catalog"] = True
             elif conversation_state is not None:
                 direct_v5_catalog = bool(
@@ -3538,6 +3562,16 @@ def make_mcp_forwarder(
                         }
                     )
                 arguments = {"payment_type": "Prepaid"}
+                if (
+                    conversation_state.cod_rate_requested
+                    and conversation_state.is_confirmed("order_value")
+                ):
+                    arguments.update(
+                        {
+                            "payment_type": "COD",
+                            "order_value": conversation_state.value("order_value"),
+                        }
+                    )
                 rate_metadata["direct_model_led_flat_zonal_catalog"] = True
             elif conversation_state is not None:
                 if (
