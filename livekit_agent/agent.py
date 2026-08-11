@@ -6401,7 +6401,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 source,
                 conversation_state.pending_field(),
             )
-        runtime.track_agent_speech(speech_id, source=source)
+        runtime.track_agent_speech(
+            speech_id,
+            source=source,
+            # LiveKit/Gemini can resume its own server-started native draft.
+            # Explicit worker-owned replies cannot be resumed by that path and
+            # need the runtime's false-interruption fallback instead.
+            native_resume_eligible=not user_initiated,
+        )
         logger.info(
             "Agent speech created id=%s source=%s user_initiated=%s "
             "expected_tool_reply=%s",
@@ -6494,11 +6501,18 @@ async def entrypoint(ctx: JobContext) -> None:
             max_chars=_SAME_CALL_MEMORY_MAX_CHARS,
         )
         if reason == "false_interruption":
-            recovery_direction = (
-                "The previous speech was cut off by brief microphone activity, but the customer did "
-                "not begin a real new turn. Continue and finish the interrupted thought naturally. "
-                "Do not greet again, restart the whole answer, or apologize."
-            )
+            if _worker_owns_realtime_turn(conversation_state):
+                recovery_direction = (
+                    "The worker-owned response was cut off without a real customer turn. Do not "
+                    "repeat a handled question, greet, or apologize. Continue only with the current "
+                    "authoritative action: " + conversation_state.guidance()
+                )
+            else:
+                recovery_direction = (
+                    "The previous speech was cut off by brief microphone activity, but the customer "
+                    "did not begin a real new turn. Continue and finish the interrupted thought "
+                    "naturally. Do not greet again, restart the whole answer, or apologize."
+                )
         else:
             recovery_direction = (
                 "The customer is still connected and the previous response stalled. Apologize once "

@@ -78,6 +78,7 @@ class VoiceSessionRuntime:
         self._recovery_callback: RecoveryCallback | None = None
         self._active_speech_id = ""
         self._speech_turns: dict[str, int] = {}
+        self._speech_native_resume_eligible: dict[str, bool] = {}
         self._expected_realtime_tool_replies = 0
         self._finished = False
 
@@ -175,12 +176,19 @@ class VoiceSessionRuntime:
     def mark_agent_speaking(self) -> None:
         self._record_response_latency()
 
-    def track_agent_speech(self, speech_id: object, *, source: object = "generate_reply") -> None:
+    def track_agent_speech(
+        self,
+        speech_id: object,
+        *,
+        source: object = "generate_reply",
+        native_resume_eligible: bool = False,
+    ) -> None:
         clean_id = str(speech_id or "")
         if not clean_id:
             return
         self._active_speech_id = clean_id
         self._speech_turns[clean_id] = self._last_user_turn
+        self._speech_native_resume_eligible[clean_id] = bool(native_resume_eligible)
         self._cancel_watchdog()
         self._cancel_playout_watchdog()
 
@@ -215,6 +223,10 @@ class VoiceSessionRuntime:
         if not clean_id:
             return
         speech_turn = self._speech_turns.pop(clean_id, self._last_user_turn)
+        native_resume_eligible = self._speech_native_resume_eligible.pop(
+            clean_id,
+            False,
+        )
         if clean_id == self._active_speech_id:
             self._active_speech_id = ""
             self._cancel_playout_watchdog()
@@ -230,7 +242,10 @@ class VoiceSessionRuntime:
                 )
             )
             if (
-                not self.native_false_interruption_resume
+                not (
+                    self.native_false_interruption_resume
+                    and native_resume_eligible
+                )
                 and self._last_user_turn <= speech_turn
             ):
                 self._schedule_interruption_recovery(

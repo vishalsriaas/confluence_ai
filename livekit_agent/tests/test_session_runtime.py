@@ -202,7 +202,10 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         )
         runtime.set_recovery_callback(recover)
         runtime.add_user_turn("Explain the benefits.", turn_id="user-one")
-        runtime.track_agent_speech("speech-one")
+        runtime.track_agent_speech(
+            "speech-one",
+            native_resume_eligible=True,
+        )
         runtime.complete_agent_playout("speech-one", interrupted=True)
         runtime.add_user_turn("Wait, tell me the rates first.", turn_id="user-two")
         await asyncio.sleep(0.04)
@@ -228,7 +231,10 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         )
         runtime.set_recovery_callback(recover)
         runtime.add_user_turn("Please continue.", turn_id="user-one")
-        runtime.track_agent_speech("speech-one")
+        runtime.track_agent_speech(
+            "speech-one",
+            native_resume_eligible=True,
+        )
         runtime.complete_agent_playout("speech-one", interrupted=True)
         await asyncio.sleep(0.03)
         await runtime.finish("test_finished")
@@ -236,6 +242,40 @@ class TestVoiceSessionRuntime(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovery_reasons, [])
         self.assertEqual(runtime.metrics()["interruption_count"], 1)
         self.assertEqual(runtime.metrics()["false_interruption_recoveries"], 0)
+
+    async def test_explicit_reply_recovers_when_native_resume_is_enabled(self) -> None:
+        recovery_reasons: list[str] = []
+
+        async def recover(_customer_text: str, reason: str) -> None:
+            recovery_reasons.append(reason)
+
+        runtime = VoiceSessionRuntime(
+            emit=self.runtime.emit,
+            response_timeout_seconds=0.1,
+            playout_timeout_seconds=0.1,
+            recovery_timeout_seconds=0.01,
+            reconnect_grace_seconds=0.01,
+            false_interruption_timeout_seconds=0.01,
+            native_false_interruption_resume=True,
+        )
+        runtime.set_recovery_callback(recover)
+        runtime.add_user_turn(
+            "Mere business ka naam Harsh Enterprises hai.",
+            turn_id="business-name",
+        )
+        runtime.track_agent_speech(
+            "worker-owned-speech",
+            native_resume_eligible=False,
+        )
+        runtime.complete_agent_playout(
+            "worker-owned-speech",
+            interrupted=True,
+        )
+        await asyncio.sleep(0.03)
+        await runtime.finish("test_finished")
+
+        self.assertEqual(recovery_reasons, ["false_interruption"])
+        self.assertEqual(runtime.metrics()["false_interruption_recoveries"], 1)
 
     async def test_same_call_context_is_bounded_and_redacted(self) -> None:
         self.runtime.add_user_turn("My OTP is 123456", turn_id="user-secret")
