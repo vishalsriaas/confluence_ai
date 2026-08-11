@@ -983,7 +983,9 @@ def _flow_violation_requires_correction(
             or violation in _V6_BLOCKING_FLOW_VIOLATIONS
             or (
                 preverified_rate_flow
-                and violation.startswith("skipped_pending:")
+                and violation.startswith(
+                    ("skipped_pending:", "reasked_handled:")
+                )
             )
         )
     )
@@ -6073,7 +6075,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 and not (unverified_amounts or unverified_pincodes or unverified_zones)
                 and (
                     response_turn_epoch not in controlled_information_reply_epochs
-                    or flow_violation.startswith("skipped_pending:")
+                    or flow_violation.startswith(
+                        ("skipped_pending:", "reasked_handled:")
+                    )
                 )
                 and response_turn_epoch not in flow_correction_epochs
             ):

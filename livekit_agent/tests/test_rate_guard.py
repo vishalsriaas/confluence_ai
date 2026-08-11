@@ -1718,6 +1718,48 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 preverified_rate_flow=False,
             )
         )
+        self.assertTrue(
+            _flow_violation_requires_correction(
+                "reasked_handled:business_name",
+                model_led_flow=True,
+                preverified_rate_flow=True,
+            )
+        )
+        self.assertFalse(
+            _flow_violation_requires_correction(
+                "reasked_handled:business_name",
+                model_led_flow=True,
+                preverified_rate_flow=False,
+            )
+        )
+
+    def test_v6_latest_call_repeated_business_name_is_a_blocking_pre_rate_violation(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
+        state.seed_context({"business_name": "Harsh Enterprises"})
+        self.assertEqual(state.pending_field(), "business_type")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Sorry, main sunn nahi paya. Aapke business ka naam kya hai?",
+            customer_text="Mere business ka naam Harsh Enterprises hai",
+            previous_agent_text="Aapke business ka naam kya hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "reasked_handled:business_name")
+        self.assertTrue(
+            _flow_violation_requires_correction(
+                violation,
+                model_led_flow=True,
+                preverified_rate_flow=True,
+            )
+        )
 
     async def test_route_correction_keeps_only_the_last_complete_pair(self):
         state = GatedConversationState(
