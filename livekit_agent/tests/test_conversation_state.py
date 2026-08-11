@@ -4366,6 +4366,240 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.starting_rate_due())
         self.assertFalse(state.pricing_close_locked())
 
+    def _v6_ready_for_ending(self) -> GatedConversationState:
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("ji", turn_id="consent")
+        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
+        state.optional_ended_by = "business_name"
+        state.authorize_rate_result(
+            {"status": "success", "response_type": "zone_starting", "amount": 31.15}
+        )
+        state.mark_route_zone_verified("C", starting_presented=True)
+        state.mark_pricing_verified("get_shipkia_starting_rate")
+        state.apply_deterministic_answers(
+            "2000",
+            turn_id="volume",
+            previous_agent_text="Aapki monthly shipments kitni hain?",
+        )
+        state.mark_anything_else_question_presented()
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="nothing-else",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+        self.assertTrue(state.move_forward_question_due)
+        return state
+
+    def test_v6_rate_rejection_overrides_move_forward_close(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Nahi, mujhe rates pasand nahi aaye.",
+            turn_id="rates-rejected",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.rate_sentiment, "Unsuitable")
+        self.assertTrue(state.unsatisfied_problem_due)
+        self.assertFalse(state.move_forward_question_due)
+        self.assertFalse(state.polite_close_due)
+        self.assertFalse(state.onboarding_link_due)
+        self.assertIn("specific zone", state.guidance())
+
+    def test_v6_possible_dropped_rate_negation_requires_clarification(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Nahi, abhi nahi. Mujhe rates pasand hain.",
+            turn_id="ambiguous-negation",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.rate_sentiment, "Unclear")
+        self.assertEqual(state.move_forward_decision, "Later")
+        self.assertTrue(state.rate_sentiment_clarification_due)
+        self.assertFalse(state.polite_close_due)
+        self.assertIn("suitable lage, ya suitable nahi lage", state.guidance())
+
+        state.apply_deterministic_answers(
+            "Rates pasand nahi aaye.",
+            turn_id="sentiment-clarified",
+            previous_agent_text=(
+                "Jo rates share hue woh aapko suitable lage, ya suitable nahi lage?"
+            ),
+        )
+        self.assertEqual(state.rate_sentiment, "Unsuitable")
+        self.assertFalse(state.rate_sentiment_clarification_due)
+        self.assertTrue(state.unsatisfied_problem_due)
+
+    def test_v6_positive_sentiment_after_dropped_negation_gets_deferred_close(self):
+        state = self._v6_ready_for_ending()
+        state.apply_deterministic_answers(
+            "Nahi, abhi nahi. Mujhe rates pasand hain.",
+            turn_id="ambiguous-negation",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        state.apply_deterministic_answers(
+            "Haan, rates suitable hain.",
+            turn_id="sentiment-positive",
+            previous_agent_text=(
+                "Jo rates share hue woh aapko suitable lage, ya suitable nahi lage?"
+            ),
+        )
+
+        self.assertEqual(state.rate_sentiment, "Suitable")
+        self.assertTrue(state.deferred_close_due)
+        self.assertIn("pressure-free close", state.guidance())
+
+    def test_v6_specific_price_objection_offers_review_before_close(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Zone C ka rate zyada hai.",
+            turn_id="specific-objection",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertTrue(state.unsatisfied_resolution_due)
+        self.assertFalse(state.unsatisfied_problem_due)
+        self.assertFalse(state.polite_close_due)
+        self.assertIn("pricing team", state.guidance())
+
+    def test_v6_pricing_review_yes_gets_one_consented_review_close(self):
+        state = self._v6_ready_for_ending()
+        state.apply_deterministic_answers(
+            "Zone C ka rate zyada hai.",
+            turn_id="specific-objection",
+        )
+
+        state.apply_deterministic_answers(
+            "haan",
+            turn_id="review-yes",
+            previous_agent_text=(
+                "Kya aap chahenge ki pricing team aapke shipment volume ke basis par isko review kare?"
+            ),
+        )
+
+        self.assertEqual(state.pricing_review_decision, "Yes")
+        self.assertTrue(state.better_plan_close_due)
+        self.assertFalse(state.onboarding_link_due)
+        self.assertIn("accepted a pricing-team review", state.guidance())
+
+    def test_v6_pricing_review_no_gets_polite_close_without_promise(self):
+        state = self._v6_ready_for_ending()
+        state.apply_deterministic_answers(
+            "Flat rate mehenga hai.",
+            turn_id="specific-objection",
+        )
+
+        state.apply_deterministic_answers(
+            "nahi",
+            turn_id="review-no",
+            previous_agent_text=(
+                "Kya aap chahenge ki pricing team aapke shipment volume ke basis par isko review kare?"
+            ),
+        )
+
+        self.assertEqual(state.pricing_review_decision, "No")
+        self.assertTrue(state.polite_close_due)
+        self.assertFalse(state.better_plan_close_due)
+
+    def test_v6_not_now_is_distinct_from_rejection(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Abhi nahi.",
+            turn_id="later",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.move_forward_decision, "Later")
+        self.assertTrue(state.deferred_close_due)
+        self.assertTrue(state.polite_close_due)
+        self.assertIn("promise no callback", state.guidance())
+
+    def test_v6_clear_yes_and_no_keep_distinct_terminal_actions(self):
+        yes_state = self._v6_ready_for_ending()
+        yes_state.apply_deterministic_answers(
+            "haan",
+            turn_id="yes",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+        self.assertTrue(yes_state.onboarding_link_due)
+        self.assertFalse(yes_state.polite_close_due)
+
+        no_state = self._v6_ready_for_ending()
+        no_state.apply_deterministic_answers(
+            "nahi",
+            turn_id="no",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+        self.assertEqual(no_state.move_forward_decision, "No")
+        self.assertTrue(no_state.polite_close_due)
+        self.assertFalse(no_state.onboarding_link_due)
+
+    def test_v6_positive_rate_comment_never_implies_onboarding(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Rates mujhe pasand hain.",
+            turn_id="positive-only",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.rate_sentiment, "Suitable")
+        self.assertTrue(state.move_forward_question_due)
+        self.assertFalse(state.onboarding_link_due)
+
+    def test_v6_conditional_lower_rate_request_enters_pricing_review(self):
+        state = self._v6_ready_for_ending()
+
+        state.apply_deterministic_answers(
+            "Rate kam ho toh main proceed karunga.",
+            turn_id="conditional",
+            previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
+        )
+
+        self.assertEqual(state.rate_sentiment, "Unsuitable")
+        self.assertTrue(state.unsatisfied_resolution_due)
+        self.assertFalse(state.onboarding_link_due)
+
+    def test_v6_followup_rates_do_not_repeat_close_until_customer_is_done(self):
+        state = self._v6_ready_for_ending()
+        state.move_forward_question_due = False
+        state.anything_else_question_due = True
+        state.anything_else_question_presented = True
+        state.anything_else_checkpoint_consumed = False
+
+        state.apply_deterministic_answers(
+            "Zone D ke rates batao",
+            turn_id="zone-followup",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+        self.assertTrue(state.post_rate_followup_active)
+        state.mark_pricing_verified("get_shipkia_starting_rate")
+        self.assertFalse(state.anything_else_question_due)
+        self.assertFalse(state.move_forward_question_due)
+
+        state.apply_deterministic_answers(
+            "Flat zonal rates bhi batao",
+            turn_id="flat-zonal-followup",
+        )
+        state.mark_flat_zonal_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_zonal_rates")
+        self.assertTrue(state.post_rate_followup_active)
+        self.assertFalse(state.move_forward_question_due)
+
+        state.apply_deterministic_answers("bas itna hi", turn_id="done")
+        self.assertFalse(state.post_rate_followup_active)
+        self.assertTrue(state.move_forward_question_due)
+
     def test_v6_no_thank_you_gets_terminal_polite_close(self):
         state = GatedConversationState(
             v4_strict_flow=True,

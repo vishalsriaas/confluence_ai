@@ -427,10 +427,33 @@ _DISSATISFIED_PATTERN = re.compile(
     r"(?:\b(?:not satisfied|satisfied (?:nahi|nahin|nhi)|khush (?:nahi|nahin|nhi)|"
     r"not good|does not work|doesn't work|too high|mehenga|"
     r"mahanga|jyada|zyada|rate achha nahi|rate theek nahi|rate thik nahi|"
-    r"rate pasand (?:nahi|nahin|nhi)|"
+    r"rates? (?:mujhe )?pasand (?:nahi|nahin|nhi)(?: (?:aaye|aye|aaya|aya))?|"
+    r"rates? (?:mujhe )?suit (?:nahi|nahin|nhi)(?: karte)?|"
+    r"rates? (?:kam|lower) ho (?:to|toh)|"
     r"rates? (?:ka|ki) (?:issue|problem))\b|"
     r"\u0938\u0902\u0924\u0941\u0937\u094d\u091f \u0928\u0939\u0940\u0902|\u092e\u0939\u0902\u0917\u093e|"
-    r"सेटिस्फाइड\s+नहीं|रेट.{0,15}(?:ज्यादा|अधिक))",
+    r"सेटिस्फाइड\s+नहीं|रेट(?:्स)?\s+(?:मुझे\s+)?पसंद\s+नहीं|रेट.{0,15}(?:ज्यादा|अधिक))",
+    re.IGNORECASE,
+)
+_RATE_SUITABLE_PATTERN = re.compile(
+    r"\b(?:(?:mujhe )?rates? (?:mujhe )?pasand (?:hai|hain|aaye|aye)|"
+    r"rates? (?:theek|thik|fine|good|suitable)|"
+    r"rates? (?:mujhe )?suit karte)\b|रेट(?:्स)?\s+(?:मुझे\s+)?पसंद\s+(?:है|हैं)",
+    re.IGNORECASE,
+)
+_NOT_NOW_PATTERN = re.compile(
+    r"\b(?:abhi nahi|abhi nahin|not now|later|baad mein|baad me|filhaal nahi)\b|"
+    r"(?:अभी|फिलहाल)\s+नहीं|बाद\s+में",
+    re.IGNORECASE,
+)
+_PRICING_REVIEW_QUESTION_PATTERN = re.compile(
+    r"(?:pricing|rate).{0,45}(?:team|review)|(?:team|review).{0,45}(?:pricing|rate)|"
+    r"प्राइसिंग.{0,45}टीम",
+    re.IGNORECASE,
+)
+_EXPLICIT_PROCEED_PATTERN = re.compile(
+    r"\b(?:aage (?:badhna|badna) chaht|want to proceed|want to move forward|start onboarding)\b|"
+    r"आगे\s+बढ़ना\s+चाह",
     re.IGNORECASE,
 )
 _UNEXPLAINED_PRICING_PATTERN = re.compile(
@@ -465,7 +488,8 @@ _ANYTHING_ELSE_NO_PATTERN = re.compile(
 )
 _POST_INFORMATION_DONE_PATTERN = re.compile(
     r"^(?:(?:ok|okay)(?:\s+(?:ok|okay))*|(?:theek|thik)\s+hai|"
-    r"koi\s+baat\s+nahi|yaad\s+nahi|bhool\s+gaya|bhul\s+gaya|"
+    r"koi\s+baat\s+nahi|bas\s+itna(?:\s+hi)?|that's\s+all|that\s+is\s+all|"
+    r"yaad\s+nahi|bhool\s+gaya|bhul\s+gaya|"
     r"mujhe.{0,30}(?:yaad\s+nahi|bhool\s+gaya|bhul\s+gaya).{0,35}|"
     r"\u0920\u0940\u0915\s+\u0939\u0948|\u092f\u093e\u0926\s+\u0928\u0939\u0940\u0902|"
     r".{0,35}\u092d\u0942\u0932\s+\u0917\u092f\u093e.{0,45})[.!?\u0964]*$",
@@ -1101,6 +1125,7 @@ class GatedConversationState:
         self.anything_else_decision = ""
         self.anything_else_checkpoint_consumed = False
         self.anything_else_question_presented = False
+        self.post_rate_followup_active = False
         self.move_forward_question_due = False
         self.move_forward_decision = ""
         self.onboarding_link_due = False
@@ -1119,6 +1144,11 @@ class GatedConversationState:
         self.rate_answer_owed = False
         self.provider_clarification_due = False
         self.last_customer_dissatisfied = False
+        self.rate_sentiment = ""
+        self.rate_sentiment_clarification_due = False
+        self.move_forward_clarification_due = False
+        self.deferred_close_due = False
+        self.pricing_review_decision = ""
         self.unsatisfied_problem_due = False
         self.unsatisfied_resolution_due = False
         self.unsatisfied_resolution_presented = False
@@ -1432,6 +1462,10 @@ class GatedConversationState:
             or self.better_plan_close_presented
             or self.unsatisfied_resolution_due
             or self.unsatisfied_resolution_presented
+            or self.unsatisfied_problem_due
+            or self.rate_sentiment_clarification_due
+            or self.move_forward_clarification_due
+            or self.deferred_close_due
             or self.polite_close_due
             or self.polite_close_presented
         )
@@ -1676,6 +1710,10 @@ class GatedConversationState:
             self.better_plan_close_due = False
             self.unsatisfied_problem_due = False
             self.unsatisfied_resolution_due = False
+            self.rate_sentiment_clarification_due = False
+            self.move_forward_clarification_due = False
+            self.deferred_close_due = False
+            self.post_rate_followup_active = False
             transition = {
                 "event": "polite_close_requested",
                 "evidence": str(customer_text or "").strip(),
@@ -1797,9 +1835,17 @@ class GatedConversationState:
             self.anything_else_checkpoint_consumed = True
             self.anything_else_question_presented = False
             self.move_forward_question_due = False
+            self.post_rate_followup_active = True
         self.last_problem_captured = False
-        awaiting_unsatisfied_problem = self.unsatisfied_problem_due
-        self.last_customer_dissatisfied = bool(
+        closing_answer = normalize_closing_answer(clean)
+        starts_with_no = bool(
+            re.match(
+                r"^(?:no|nahi|nahin|nhi|\u0928\u0939\u0940\u0902)\b",
+                clean,
+                re.IGNORECASE,
+            )
+        )
+        rate_dissatisfied = bool(
             self.v5_company_pair_flow
             and self.verified_rate_presented()
             and (
@@ -1807,10 +1853,101 @@ class GatedConversationState:
                 or _UNEXPLAINED_PRICING_PATTERN.search(clean)
             )
         )
+        rate_suitable = bool(
+            self.v5_company_pair_flow
+            and self.verified_rate_presented()
+            and not rate_dissatisfied
+            and _RATE_SUITABLE_PATTERN.search(clean)
+        )
+
+        # A transcript such as "nahi, abhi nahi, rates pasand hain" may have
+        # lost the rate-sentiment negation while still preserving a clear
+        # not-now readiness decision. Clarify sentiment instead of closing or
+        # treating the positive keyword as onboarding consent.
+        possible_dropped_rate_negation = bool(
+            self.move_forward_question_due
+            and starts_with_no
+            and _NOT_NOW_PATTERN.search(clean)
+            and rate_suitable
+        )
+        if possible_dropped_rate_negation:
+            self.rate_sentiment = "Unclear"
+            self.rate_sentiment_clarification_due = True
+            self.move_forward_question_due = False
+            self.move_forward_decision = "Later"
+            self.deferred_close_due = False
+            transition = {
+                "event": "rate_sentiment_clarification_requested",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+        elif self.rate_sentiment_clarification_due and rate_suitable:
+            self.rate_sentiment = "Suitable"
+            self.rate_sentiment_clarification_due = False
+            self.deferred_close_due = self.move_forward_decision == "Later"
+            self.polite_close_due = self.deferred_close_due
+            transition = {
+                "event": "rate_sentiment_clarified",
+                "sentiment": "Suitable",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+
+        pricing_review_context = bool(
+            self.unsatisfied_resolution_due
+            and _PRICING_REVIEW_QUESTION_PATTERN.search(previous_clean)
+        )
+        if pricing_review_context and _ANYTHING_ELSE_YES_PATTERN.fullmatch(closing_answer):
+            self.unsatisfied_resolution_due = False
+            self.pricing_review_decision = "Yes"
+            self.better_plan_close_due = True
+            self.post_rate_followup_active = False
+            transition = {
+                "event": "pricing_review_decided",
+                "decision": "Yes",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+        elif pricing_review_context and is_anything_else_no_answer(closing_answer):
+            self.unsatisfied_resolution_due = False
+            self.pricing_review_decision = "No"
+            self.polite_close_due = True
+            self.post_rate_followup_active = False
+            transition = {
+                "event": "pricing_review_decided",
+                "decision": "No",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+
+        awaiting_unsatisfied_problem = self.unsatisfied_problem_due
+        self.last_customer_dissatisfied = bool(
+            rate_dissatisfied and not pricing_review_context
+        )
         captured_unsatisfied_problem = False
-        if awaiting_unsatisfied_problem and not self.last_customer_dissatisfied:
+        if (
+            awaiting_unsatisfied_problem
+            and not self.last_customer_dissatisfied
+            and not pricing_review_context
+        ):
             concern = str(customer_text or "").strip(" \t\r\n.,!?;")[:240]
-            if concern:
+            if concern and not _NON_ANSWER_CHATTER_PATTERN.fullmatch(clean):
                 self.unsatisfied_concern = concern
                 self.callback_close_concern = concern
                 self.unsatisfied_problem_due = False
@@ -1827,48 +1964,72 @@ class GatedConversationState:
                 applied.append(transition)
         if self.last_customer_dissatisfied and not captured_unsatisfied_problem:
             self.customer_satisfied = False
+            self.rate_sentiment = "Unsuitable"
+            self.rate_sentiment_clarification_due = False
             self.onboarding_link_due = False
-            explicit_move_forward_decline = bool(
-                self.move_forward_question_due
-                and _MOVE_FORWARD_QUESTION_PATTERN.search(
-                    normalize_text(previous_agent_text)
+            self.deferred_close_due = False
+            self.polite_close_due = False
+            self.better_plan_close_due = False
+            if not self.model_led_flow:
+                explicit_move_forward_decline = bool(
+                    self.move_forward_question_due
+                    and _MOVE_FORWARD_QUESTION_PATTERN.search(previous_clean)
+                    and starts_with_no
                 )
-                and re.match(
-                    r"^(?:no|nahi|nahin|nhi|\u0928\u0939\u0940\u0902)\b",
-                    clean,
-                    re.IGNORECASE,
+                if not explicit_move_forward_decline:
+                    self.move_forward_question_due = False
+                    self.move_forward_decision = ""
+                explicit_concern = bool(
+                    _UNEXPLAINED_PRICING_PATTERN.search(clean)
+                    or re.search(
+                        r"\b(?:rate|rates|price|pricing|mehenga|mahanga|jyada|zyada|"
+                        r"support|ticket|ndr|rto|delay|delayed|pickup|delivery|claim|"
+                        r"problem|issue|dikkat|pareshani)\b",
+                        clean,
+                    )
                 )
-            )
-            if not explicit_move_forward_decline:
+                known_problem = str(self.value("current_problem") or "").strip()
+                if explicit_concern:
+                    concern = str(customer_text or "").strip(" \t\r\n.,!?;")[:240]
+                    self.unsatisfied_concern = concern or known_problem or "current concern"
+                    self.callback_close_concern = self.unsatisfied_concern
+                    self.unsatisfied_problem_due = False
+                    self.unsatisfied_resolution_due = True
+                elif known_problem:
+                    self.unsatisfied_concern = known_problem[:240]
+                    self.callback_close_concern = self.unsatisfied_concern
+                    self.unsatisfied_problem_due = False
+                    self.unsatisfied_resolution_due = True
+                else:
+                    self.unsatisfied_concern = ""
+                    self.callback_close_concern = ""
+                    self.unsatisfied_problem_due = True
+                    self.unsatisfied_resolution_due = False
+            else:
                 self.move_forward_question_due = False
                 self.move_forward_decision = ""
-            self.better_plan_close_due = False
-            explicit_concern = bool(
-                _UNEXPLAINED_PRICING_PATTERN.search(clean)
-                or re.search(
-                    r"\b(?:rate|rates|price|pricing|mehenga|mahanga|jyada|zyada|"
-                    r"support|ticket|ndr|rto|delay|delayed|pickup|delivery|claim|"
-                    r"problem|issue|dikkat|pareshani)\b",
-                    clean,
+                specific_pricing_concern = bool(
+                    re.search(
+                        r"\b(?:too high|mehenga|mahanga|jyada|zyada|kam|lower|zone|flat|"
+                        r"zonal|weight|slab|cod|prepaid|comparison|compare|exact|"
+                        r"explain|clarify)\b|(?:ज्यादा|महंगा|कम|ज़ोन|जोन|वज़न)",
+                        clean,
+                        re.IGNORECASE,
+                    )
                 )
-            )
-            known_problem = str(self.value("current_problem") or "").strip()
-            if explicit_concern:
-                concern = str(customer_text or "").strip(" \t\r\n.,!?;")[:240]
-                self.unsatisfied_concern = concern or known_problem or "current concern"
-                self.callback_close_concern = self.unsatisfied_concern
-                self.unsatisfied_problem_due = False
-                self.unsatisfied_resolution_due = True
-            elif known_problem:
-                self.unsatisfied_concern = known_problem[:240]
-                self.callback_close_concern = self.unsatisfied_concern
-                self.unsatisfied_problem_due = False
-                self.unsatisfied_resolution_due = True
-            else:
-                self.unsatisfied_concern = ""
-                self.callback_close_concern = ""
-                self.unsatisfied_problem_due = True
-                self.unsatisfied_resolution_due = False
+                if specific_pricing_concern:
+                    concern = str(customer_text or "").strip(" \t\r\n.,!?;")[:240]
+                    self.unsatisfied_concern = concern or "pricing concern"
+                    self.callback_close_concern = self.unsatisfied_concern
+                    self.unsatisfied_problem_due = False
+                    self.unsatisfied_resolution_due = True
+                else:
+                    self.unsatisfied_concern = ""
+                    self.callback_close_concern = ""
+                    self.unsatisfied_problem_due = True
+                    self.unsatisfied_resolution_due = False
+        elif rate_suitable and not possible_dropped_rate_negation:
+            self.rate_sentiment = "Suitable"
         pending = self.pending_field()
         if _RATE_ANSWER_OMISSION_PATTERN.search(clean):
             self.rate_answer_owed = True
@@ -2073,6 +2234,8 @@ class GatedConversationState:
                 self.anything_else_detail_due = False
                 self.anything_else_decision = ""
                 self.move_forward_question_due = False
+                if self.anything_else_checkpoint_consumed:
+                    self.post_rate_followup_active = True
             if explicit_rate_type == "Flat Zonal":
                 if self.requested_rate_type != "Flat Zonal":
                     self.flat_zonal_catalog_presented = False
@@ -2188,6 +2351,7 @@ class GatedConversationState:
         ):
             self.customer_satisfied = True
             self.onboarding_link_due = True
+            self.deferred_close_due = False
             self.callback_close_concern = ""
             transition = {
                 "event": "customer_satisfied",
@@ -2208,7 +2372,16 @@ class GatedConversationState:
                 or _ANYTHING_ELSE_QUESTION_PATTERN.search(previous_clean)
             )
         )
-        if anything_else_context and (
+        ending_objection_active = bool(
+            self.model_led_flow
+            and (
+                self.last_customer_dissatisfied
+                or self.rate_sentiment_clarification_due
+                or self.unsatisfied_problem_due
+                or self.unsatisfied_resolution_due
+            )
+        )
+        if not ending_objection_active and anything_else_context and (
             is_anything_else_no_answer(move_forward_answer)
             or _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
         ):
@@ -2228,7 +2401,11 @@ class GatedConversationState:
             }
             self._append_transition(transition)
             applied.append(transition)
-        elif anything_else_context and _ANYTHING_ELSE_YES_PATTERN.fullmatch(move_forward_answer):
+        elif (
+            not ending_objection_active
+            and anything_else_context
+            and _ANYTHING_ELSE_YES_PATTERN.fullmatch(move_forward_answer)
+        ):
             self.anything_else_question_due = False
             self.anything_else_detail_due = True
             self.anything_else_decision = "Yes"
@@ -2252,12 +2429,14 @@ class GatedConversationState:
             and not self.anything_else_question_due
             and not self.anything_else_detail_due
             and not self.move_forward_question_due
+            and not ending_objection_active
             and _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
         ):
             # After answering one or more requested follow-ups, a simple
             # acknowledgement or "I forgot" should advance to the one
             # move-forward question instead of resurrecting anything-else.
             self.anything_else_decision = "No"
+            self.post_rate_followup_active = False
             self.move_forward_question_due = True
             transition = {
                 "event": "post_information_completed",
@@ -2268,11 +2447,20 @@ class GatedConversationState:
             }
             self._append_transition(transition)
             applied.append(transition)
+        spontaneous_proceed = bool(
+            self.sales_close_ready() and _EXPLICIT_PROCEED_PATTERN.search(clean)
+        )
         move_forward_context = bool(
             self.v5_company_pair_flow
-            and self.move_forward_question_due
+            and (
+                self.move_forward_question_due
+                or self.move_forward_clarification_due
+                or spontaneous_proceed
+            )
             and (
                 _MOVE_FORWARD_QUESTION_PATTERN.search(previous_clean)
+                or self.move_forward_clarification_due
+                or spontaneous_proceed
                 or (
                     not previous_clean
                     and (
@@ -2284,23 +2472,39 @@ class GatedConversationState:
         )
         move_forward_no = bool(
             _MOVE_FORWARD_NO_PATTERN.fullmatch(move_forward_answer)
-            or (
-                re.match(
-                    r"^(?:no|nahi|nahin|nhi|\u0928\u0939\u0940\u0902)\b",
-                    move_forward_answer,
-                    re.IGNORECASE,
-                )
-                and (
-                    _DISSATISFIED_PATTERN.search(clean)
-                    or _UNEXPLAINED_PRICING_PATTERN.search(clean)
-                )
+            or re.match(
+                r"^(?:no|nahi|nahin|nhi|\u0928\u0939\u0940\u0902)\b",
+                move_forward_answer,
+                re.IGNORECASE,
             )
         )
-        if move_forward_context and _MOVE_FORWARD_YES_PATTERN.fullmatch(move_forward_answer):
+        conflicting_readiness = bool(
+            move_forward_context and starts_with_no and _EXPLICIT_PROCEED_PATTERN.search(clean)
+        )
+        explicit_move_forward_yes = bool(
+            _MOVE_FORWARD_YES_PATTERN.fullmatch(move_forward_answer)
+            or spontaneous_proceed
+        )
+        if conflicting_readiness and not ending_objection_active:
+            self.move_forward_question_due = False
+            self.move_forward_clarification_due = True
+            self.move_forward_decision = ""
+            transition = {
+                "event": "move_forward_clarification_requested",
+                "evidence": str(customer_text or "").strip(),
+                "turn_id": turn_id,
+                "source": "deterministic",
+                "created_at": time.time(),
+            }
+            self._append_transition(transition)
+            applied.append(transition)
+        elif move_forward_context and explicit_move_forward_yes and not ending_objection_active:
             self.customer_satisfied = True
             self.anything_else_question_due = False
             self.anything_else_detail_due = False
+            self.post_rate_followup_active = False
             self.move_forward_question_due = False
+            self.move_forward_clarification_due = False
             self.move_forward_decision = "Yes"
             self.onboarding_link_due = True
             self.better_plan_close_due = False
@@ -2317,12 +2521,16 @@ class GatedConversationState:
             }
             self._append_transition(transition)
             applied.append(transition)
-        elif move_forward_context and move_forward_no:
+        elif move_forward_context and move_forward_no and not ending_objection_active:
             self.customer_satisfied = False
             self.anything_else_question_due = False
             self.anything_else_detail_due = False
+            self.post_rate_followup_active = False
             self.move_forward_question_due = False
-            self.move_forward_decision = "No"
+            self.move_forward_clarification_due = False
+            is_deferred = bool(_NOT_NOW_PATTERN.search(clean))
+            self.move_forward_decision = "Later" if is_deferred else "No"
+            self.deferred_close_due = is_deferred
             self.onboarding_link_due = False
             self.better_plan_close_due = not self.model_led_flow
             self.polite_close_due = self.model_led_flow
@@ -2330,7 +2538,7 @@ class GatedConversationState:
             self.unsatisfied_resolution_due = False
             transition = {
                 "event": "move_forward_decided",
-                "decision": "No",
+                "decision": self.move_forward_decision,
                 "evidence": str(customer_text or "").strip(),
                 "turn_id": turn_id,
                 "source": "deterministic",
@@ -3777,8 +3985,12 @@ class GatedConversationState:
             self.move_forward_question_due = False
         else:
             self.monthly_quantity_due = False
-            self.anything_else_question_due = not self.anything_else_checkpoint_consumed
-            self.move_forward_question_due = self.anything_else_checkpoint_consumed
+            if self.post_rate_followup_active:
+                self.anything_else_question_due = False
+                self.move_forward_question_due = False
+            else:
+                self.anything_else_question_due = not self.anything_else_checkpoint_consumed
+                self.move_forward_question_due = self.anything_else_checkpoint_consumed
 
     def authorize_rate_result(self, payload: object) -> None:
         """Remember only monetary amounts returned by a successful pricing result."""
@@ -4195,7 +4407,26 @@ class GatedConversationState:
             )
         )
         if self.v4_strict_flow:
+            if self.rate_sentiment_clarification_due:
+                return (
+                    "The latest answer may have lost a critical rate-sentiment negation. Ask only: "
+                    "'Bas confirm kar loon—jo rates share hue woh aapko suitable lage, ya suitable "
+                    "nahi lage?' Do not infer satisfaction, close, offer onboarding, or repeat a rate."
+                )
+            if self.move_forward_clarification_due:
+                return (
+                    "The customer's proceed/not-proceed answer was contradictory. Ask only: "
+                    "'Bas confirm kar loon—kya aap abhi ShipKia onboarding ke saath proceed karna "
+                    "chahte hain?' Wait for a clear yes or no and do not infer it."
+                )
             if self.polite_close_due:
+                if self.deferred_close_due or self.move_forward_decision == "Later":
+                    return (
+                        "The customer clearly said not now/later. Give one pressure-free close: "
+                        "'Bilkul, koi problem nahi. Jab aapke liye convenient ho tab ShipKia se "
+                        "connect kar sakte hain. Aapke time ke liye thank you.' Ask no question, "
+                        "promise no callback, and do not offer onboarding again."
+                    )
                 return (
                     "The customer clearly ended the conversation. Say one warm, concise farewell: "
                     "'Theek hai, aapke time ke liye thank you. Aapse baat karke achha laga. Have "
@@ -4231,12 +4462,20 @@ class GatedConversationState:
                     "another question."
                 )
             if self.better_plan_close_due:
+                if not self.model_led_flow or self.pricing_review_decision != "Yes":
+                    return (
+                        "The customer explicitly declined moving forward or rejected the current "
+                        "offer. Say exactly once: 'Theek hai, main aapke liye ek better plan team ke "
+                        "saath discuss karke aapko batata hoon. Thank you for calling ShipKia.' Then "
+                        "end politely. Do not ask another question, send an onboarding link, quote a "
+                        "new rate, or promise a specific discount."
+                    )
                 return (
-                    "The customer explicitly declined moving forward or rejected the current "
-                    "offer. Say exactly once: 'Theek hai, main aapke liye ek better plan team ke "
-                    "saath discuss karke aapko batata hoon. Thank you for calling ShipKia.' Then "
-                    "end politely. Do not ask another question, send an onboarding link, quote a "
-                    "new rate, or promise a specific discount."
+                    "The customer explicitly accepted a pricing-team review for their stated "
+                    f"concern: {self.unsatisfied_concern or self.callback_close_concern}. Say once: "
+                    "'Theek hai, main aapka pricing concern team ke saath discuss karke better plan "
+                    "review karwaunga. Thank you for calling ShipKia.' Then end. Do not ask another "
+                    "question, send onboarding, quote a new rate, or promise a discount or outcome."
                 )
             if self.onboarding_link_presented or self.better_plan_close_presented:
                 return (
@@ -4285,20 +4524,35 @@ class GatedConversationState:
                         "and do not ask 'kuch aur' in this response. End after the complete catalog."
                     )
             if self.unsatisfied_problem_due:
+                if not self.model_led_flow:
+                    return (
+                        "The customer said they are not satisfied, but has not shared what exact problem "
+                        "is unresolved. Ask only: 'Aapko exactly kya problem aa rahi hai?' Wait for the "
+                        "answer. Do not ask business type, provider, route, monthly quantity, or the "
+                        "move-forward question, and do not assume their problem."
+                    )
                 return (
-                    "The customer said they are not satisfied, but has not shared what exact problem "
-                    "is unresolved. Ask only: 'Aapko exactly kya problem aa rahi hai?' Wait for the "
-                    "answer. Do not ask business type, provider, route, monthly quantity, or the "
-                    "move-forward question, and do not assume their problem."
+                    "The customer said the rates are not suitable but did not identify the pricing "
+                    "concern. Ask only: 'Rates mein aapko exactly kis cheez ka concern hai—overall "
+                    "price, kisi specific zone, ya weight slab?' Wait for the answer. Do not reuse "
+                    "an earlier operational problem, close, offer onboarding, or assume the concern."
                 )
             if self.unsatisfied_resolution_due:
                 concern = self.unsatisfied_concern or self.callback_close_concern or "current concern"
+                if not self.model_led_flow:
+                    return (
+                        f"The customer's exact unresolved concern is: {concern}. Briefly acknowledge "
+                        "that same concern, then say in natural Hinglish: 'Main aapki is problem ko "
+                        "apni team ke saath discuss karke aapko solution ya better plan deta hoon. "
+                        "Thank you for calling ShipKia.' Do not ask another question, restart discovery, "
+                        "send onboarding, invent a rate, or promise a specific discount."
+                    )
                 return (
-                    f"The customer's exact unresolved concern is: {concern}. Briefly acknowledge "
-                    "that same concern, then say in natural Hinglish: 'Main aapki is problem ko "
-                    "apni team ke saath discuss karke aapko solution ya better plan deta hoon. "
-                    "Thank you for calling ShipKia.' Do not ask another question, restart discovery, "
-                    "send onboarding, invent a rate, or promise a specific discount."
+                    f"The customer's exact pricing concern is: {concern}. Briefly acknowledge "
+                    "that concern, make no discount or outcome promise, then ask exactly once: "
+                    "'Kya aap chahenge ki pricing team aapke shipment volume ke basis par isko "
+                    "review kare?' Wait for a clear yes or no. Do not close, send onboarding, "
+                    "repeat a rate, or ask another question in this response."
                 )
             if self.provider_clarification_due:
                 return (
@@ -4789,7 +5043,13 @@ class GatedConversationState:
             "anything_else_decision": self.anything_else_decision,
             "anything_else_checkpoint_consumed": self.anything_else_checkpoint_consumed,
             "anything_else_question_presented": self.anything_else_question_presented,
+            "post_rate_followup_active": self.post_rate_followup_active,
             "move_forward_decision": self.move_forward_decision,
+            "move_forward_clarification_due": self.move_forward_clarification_due,
+            "deferred_close_due": self.deferred_close_due,
+            "rate_sentiment": self.rate_sentiment,
+            "rate_sentiment_clarification_due": self.rate_sentiment_clarification_due,
+            "pricing_review_decision": self.pricing_review_decision,
             "onboarding_link_due": self.onboarding_link_due,
             "better_plan_close_due": self.better_plan_close_due,
             "better_plan_close_presented": self.better_plan_close_presented,

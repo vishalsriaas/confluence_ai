@@ -262,6 +262,15 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("Never claim ShipKia is universally better", compact)
         self.assertIn("resume the most useful missing discovery topic", compact)
         self.assertIn("anything-else checkpoint before asking whether", compact)
+        self.assertIn(
+            "Keep more-information, rate sentiment, and onboarding readiness separate",
+            compact,
+        )
+        self.assertIn(
+            "never repeat anything-else or move-forward after each answer", compact
+        )
+        self.assertIn("Unsuitable rates are an objection, not a no", compact)
+        self.assertIn("Satisfaction alone never means onboarding", compact)
         self.assertIn("lookup_pincode_serviceability", prompt)
         self.assertIn("get_shipkia_starting_rate", prompt)
         self.assertIn(
