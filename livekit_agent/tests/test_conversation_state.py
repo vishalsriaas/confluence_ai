@@ -4627,6 +4627,55 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertFalse(state.polite_close_due)
         self.assertIn("pricing team", state.guidance())
 
+    def test_v6_latest_call_clear_proceed_reverses_prior_rate_rejection(self):
+        state = self._v6_ready_for_ending()
+        state.apply_deterministic_answers(
+            "Nahi, main nahi judna chahta. Rate zyada lag raha hai.",
+            turn_id="rejected",
+            previous_agent_text="Kya aap ShipKia ke saath judna chahenge?",
+        )
+        state.polite_close_due = True
+        state.polite_close_presented = True
+
+        state.apply_deterministic_answers(
+            "Main aapke saath aage badhna chahta hoon.",
+            turn_id="reversed",
+            previous_agent_text="Call karne ke liye dhanyavaad.",
+        )
+
+        self.assertEqual(state.move_forward_decision, "Yes")
+        self.assertTrue(state.onboarding_link_due)
+        self.assertFalse(state.polite_close_due)
+        self.assertFalse(state.polite_close_presented)
+        self.assertFalse(state.unsatisfied_problem_due)
+        self.assertFalse(state.unsatisfied_resolution_due)
+        self.assertIn("WhatsApp", state.guidance())
+
+    def test_v6_latest_call_named_provider_rate_reopens_objection_close(self):
+        state = self._v6_ready_for_ending()
+        state.verified_starting_options = [
+            {"courier": "Bluedart", "service": "Surface", "amount": 42.5},
+            {"courier": "Delhivery", "service": "Surface", "amount": 39.0},
+        ]
+        state.available_courier_partners = ["Bluedart", "Delhivery"]
+        state.apply_deterministic_answers(
+            "Rate zyada lag raha hai.", turn_id="objection"
+        )
+        self.assertTrue(state.unsatisfied_resolution_due)
+
+        state.apply_deterministic_answers(
+            "Aap mujhe Blue Dart ke rate bata dijiye.",
+            turn_id="bluedart-rate",
+        )
+
+        self.assertEqual(state.requested_provider_rate_name, "Blue Dart")
+        self.assertTrue(state.provider_rates_answer_due)
+        self.assertFalse(state.unsatisfied_resolution_due)
+        self.assertTrue(state.pricing_close_locked())
+        guidance = state.guidance()
+        self.assertIn("42.5", guidance)
+        self.assertNotIn('"amount":39.0', guidance)
+
     def test_v6_pricing_review_yes_gets_one_consented_review_close(self):
         state = self._v6_ready_for_ending()
         state.apply_deterministic_answers(

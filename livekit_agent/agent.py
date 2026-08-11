@@ -2767,7 +2767,14 @@ def _catalog_continuation_instruction(
             " Then call get_shipkia_flat_rates immediately and speak its complete verified Flat "
             "catalog. Do not ask another question between the two catalogs."
         )
-    if conversation_state.post_rate_followup_active:
+    if (
+        conversation_state.post_rate_followup_active
+        or conversation_state.verified_rate_presented()
+    ):
+        # Tool conversion happens before the new catalog is marked verified.
+        # An already verified earlier rate therefore proves this is a later
+        # follow-up even if asynchronous state extraction has not set the
+        # post-follow-up flag yet.
         return " Then stop without asking another question."
     if not conversation_state.is_handled("monthly_shipments"):
         return " Then ask only for the customer's approximate monthly shipment quantity."
@@ -2975,7 +2982,8 @@ def _voice_flat_zonal_catalog_result(
         f"{groups[1].get('zone_group')} Rs {float(groups[1].get('total') or 0):.2f}. "
         f"Then say the returned additional {int(additional.get('additional_weight_unit_g') or 0)}-gram "
         f"GST-inclusive amount is Rs {float(additional.get('total') or 0):.2f}. "
-        "Do not call this all-zone Flat pricing and do not infer a route zone."
+        "Say every Rs amount in rupees, never as paise. Do not call this all-zone Flat pricing "
+        "and do not infer a route zone."
         + continuation
     )
     return {
@@ -5734,13 +5742,7 @@ async def entrypoint(ctx: JobContext) -> None:
             if ignored_noise_at is not None and time.monotonic() - ignored_noise_at <= 5.0:
                 ignored_asr_noise.pop(noise_key, None)
                 return
-            if (
-                not participant_audio_active
-                or conversation_state.onboarding_link_presented
-                or conversation_state.better_plan_close_presented
-                or conversation_state.unsatisfied_resolution_presented
-                or conversation_state.polite_close_presented
-            ):
+            if not participant_audio_active:
                 return
             item_noise_reason = _asr_noise_reason(
                 customer_text,

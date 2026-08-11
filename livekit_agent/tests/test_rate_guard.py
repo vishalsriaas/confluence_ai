@@ -3033,7 +3033,10 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             model_led_flow=True,
         )
         state.seed_context({"monthly_shipments": 2000})
-        state.post_rate_followup_active = True
+        # Reproduce the realtime race: the previous route rate is verified,
+        # while async extraction has not yet raised post_rate_followup_active.
+        state.verified_pricing_tool = "get_shipkia_starting_rate"
+        state.post_rate_followup_active = False
         result = _voice_flat_catalog_result(
             {
                 "status": "success",

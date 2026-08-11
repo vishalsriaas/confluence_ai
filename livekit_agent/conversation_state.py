@@ -435,6 +435,23 @@ _DISSATISFIED_PATTERN = re.compile(
     r"सेटिस्फाइड\s+नहीं|रेट(?:्स)?\s+(?:मुझे\s+)?पसंद\s+नहीं|रेट.{0,15}(?:ज्यादा|अधिक))",
     re.IGNORECASE,
 )
+
+
+def _requested_provider_rate_name(text: object) -> str:
+    clean = normalize_text(text)
+    if not _EXPLICIT_RATE_INTENT_PATTERN.search(clean):
+        return ""
+    aliases = (
+        (r"\b(?:bluedart|blue\s+dart)\b", "Blue Dart"),
+        (r"\bdelhivery\b", "Delhivery"),
+        (r"\bamazon\b", "Amazon"),
+        (r"\bxpressbees\b", "Xpressbees"),
+        (r"\bshree\s+maruti\b", "Shree Maruti"),
+    )
+    for pattern, canonical in aliases:
+        if re.search(pattern, clean, re.IGNORECASE):
+            return canonical
+    return ""
 _RATE_SUITABLE_PATTERN = re.compile(
     r"\b(?:(?:mujhe )?rates? (?:mujhe )?pasand (?:hai|hain|aaye|aye)|"
     r"rates? (?:theek|thik|fine|good|suitable)|"
@@ -452,7 +469,8 @@ _PRICING_REVIEW_QUESTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_PROCEED_PATTERN = re.compile(
-    r"\b(?:aage (?:badhna|badna) chaht|want to proceed|want to move forward|start onboarding)\b|"
+    r"\b(?:aage (?:badhna|badna|badhana) (?:chahta|chahti|chahte)|"
+    r"want to proceed|want to move forward|start onboarding)\b|"
     r"आगे\s+बढ़ना\s+चाह",
     re.IGNORECASE,
 )
@@ -1189,6 +1207,7 @@ class GatedConversationState:
         self.last_provider_options_query = False
         self.last_provider_rates_query = False
         self.provider_rates_answer_due = False
+        self.requested_provider_rate_name = ""
         self.last_problem_captured = False
         self.shadowfax_surface_rate_due = False
         self.shadowfax_surface_rate_presented = False
@@ -1499,6 +1518,7 @@ class GatedConversationState:
             or self.deferred_close_due
             or self.polite_close_due
             or self.polite_close_presented
+            or self.provider_rates_answer_due
         )
 
     def mark_provider_rates_presented(self) -> None:
@@ -1833,8 +1853,28 @@ class GatedConversationState:
                 )
                 or self.verified_starting_options
                 and _PROVIDER_RATE_ASR_PATTERN.search(clean)
+                or _requested_provider_rate_name(clean)
             )
         )
+        requested_provider_rate_name = _requested_provider_rate_name(clean)
+        if requested_provider_rate_name:
+            self.requested_provider_rate_name = requested_provider_rate_name
+            # A concrete retained-rate follow-up reopens the active call from
+            # a stale objection/farewell state without erasing discovery.
+            self.move_forward_question_due = False
+            self.move_forward_clarification_due = False
+            self.move_forward_decision = ""
+            self.onboarding_link_due = False
+            self.better_plan_close_due = False
+            self.better_plan_close_presented = False
+            self.unsatisfied_problem_due = False
+            self.unsatisfied_resolution_due = False
+            self.unsatisfied_resolution_presented = False
+            self.rate_sentiment_clarification_due = False
+            self.deferred_close_due = False
+            self.polite_close_due = False
+            self.polite_close_presented = False
+            self.pricing_review_decision = ""
         if detected_provider_rates_query:
             self.provider_rates_answer_due = True
         self.last_provider_rates_query = bool(
@@ -2425,6 +2465,26 @@ class GatedConversationState:
             applied.append(transition)
 
         move_forward_answer = normalize_closing_answer(clean)
+        explicit_proceed_reversal = bool(
+            self.model_led_flow
+            and self.sales_close_ready()
+            and not starts_with_no
+            and _EXPLICIT_PROCEED_PATTERN.search(clean)
+        )
+        if explicit_proceed_reversal:
+            # The room is still live: a clear new decision supersedes an
+            # earlier price objection, no/not-now answer, or spoken farewell.
+            self.last_customer_dissatisfied = False
+            self.rate_sentiment_clarification_due = False
+            self.unsatisfied_problem_due = False
+            self.unsatisfied_resolution_due = False
+            self.unsatisfied_resolution_presented = False
+            self.deferred_close_due = False
+            self.polite_close_due = False
+            self.polite_close_presented = False
+            self.better_plan_close_due = False
+            self.better_plan_close_presented = False
+            self.pricing_review_decision = ""
         anything_else_context = bool(
             self.v5_company_pair_flow
             and self.anything_else_question_due
@@ -4636,8 +4696,23 @@ class GatedConversationState:
                 )
             if self.last_provider_options_query:
                 if self.last_provider_rates_query and self.verified_starting_options:
+                    selected_options = self.verified_starting_options
+                    if self.requested_provider_rate_name:
+                        requested = re.sub(
+                            r"\W+", "", normalize_text(self.requested_provider_rate_name)
+                        )
+                        matching_options = [
+                            option
+                            for option in selected_options
+                            if requested
+                            in re.sub(r"\W+", "", normalize_text(option.get("courier")))
+                            or requested
+                            in re.sub(r"\W+", "", normalize_text(option.get("service")))
+                        ]
+                        if matching_options:
+                            selected_options = matching_options
                     options = json.dumps(
-                        self.verified_starting_options,
+                        selected_options,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
@@ -4650,7 +4725,7 @@ class GatedConversationState:
                         "ask the move-forward question in this response."
                     )
                     return (
-                        "The customer explicitly asked which courier/service options and rates are "
+                        "The customer explicitly asked for courier/service starting rates. "
                         "available. Answer that question before any move-forward close. List every "
                         f"worker-verified starting option in this exact data: {options}. Explain that "
                         "each amount is a GST-inclusive 500 g Forward starting option for the already "
@@ -5155,6 +5230,7 @@ class GatedConversationState:
             "last_provider_rates_query": self.last_provider_rates_query,
             "last_flat_structure_query": self.last_flat_structure_query,
             "provider_rates_answer_due": self.provider_rates_answer_due,
+            "requested_provider_rate_name": self.requested_provider_rate_name,
             "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
             "state_revision": self.revision,
