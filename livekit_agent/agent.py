@@ -1569,25 +1569,22 @@ def _authorized_controlled_reply_tools(
 
 
 def _worker_owns_realtime_turn(conversation_state: GatedConversationState) -> bool:
-    """Keep V6 native except at the two rate-safety boundaries.
+    """Prevent native V6 from speaking before a KB rate is verified.
 
     V5 remains fully worker-controlled. In V6, native Gemini owns ordinary
-    discovery and post-rate conversation; the worker takes over only while a
-    current-rate/problem answer can otherwise leak an invented quote, or when
-    authoritative state has enabled one exact pricing tool.
+    information/onboarding and post-rate conversation. Once the customer
+    selects Rates, the worker owns every pre-rate turn so a native model draft
+    can never invent a ShipKia amount while collecting qualification details.
+    The settled state exposes at most one authoritative pricing tool.
     """
     if not conversation_state.v5_company_pair_flow:
         return False
     if not conversation_state.model_led_flow:
         return True
-    if _authorized_controlled_reply_tools(conversation_state):
-        return True
     return bool(
         conversation_state.value("assistance_intent") == "Rates"
         and not conversation_state.verified_rate_presented()
-        and conversation_state.pending_field()
-        in {"current_shipping_rate", "current_problem"}
-    )
+    ) or bool(_authorized_controlled_reply_tools(conversation_state))
 
 
 def _normal_rates_declined(text: object, previous_agent_text: object = "") -> bool:

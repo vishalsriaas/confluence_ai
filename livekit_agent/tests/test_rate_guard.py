@@ -63,7 +63,7 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
-    def test_v6_worker_owns_only_rate_safety_boundary(self):
+    def test_v6_worker_owns_entire_preverified_rate_flow(self):
         state = GatedConversationState(
             v4_strict_flow=True,
             v5_company_pair_flow=True,
@@ -74,7 +74,7 @@ class TestRateGateResponse(unittest.TestCase):
         state.apply_deterministic_answers("rates chahiye", turn_id="intent")
         state.seed_context({"business_name": "Harsh Enterprises"})
         self.assertEqual(state.pending_field(), "business_type")
-        self.assertFalse(_worker_owns_realtime_turn(state))
+        self.assertTrue(_worker_owns_realtime_turn(state))
 
         state.seed_context(
             {
@@ -92,7 +92,7 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertTrue(_worker_owns_realtime_turn(state))
 
         state.seed_context({"current_problem": "Support issue"})
-        self.assertFalse(_worker_owns_realtime_turn(state))
+        self.assertTrue(_worker_owns_realtime_turn(state))
 
         state.seed_context(
             {"pickup_location": "Delhi", "delivery_location": "Bengaluru"}
