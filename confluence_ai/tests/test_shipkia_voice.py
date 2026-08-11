@@ -235,6 +235,8 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("32 6", prompt)
         self.assertIn("not a question about the products they ship", compact)
         self.assertIn("current courier, aggregator, or own shipping setup", compact)
+        self.assertIn("never announce the process", compact)
+        self.assertIn("pehle main", compact)
         self.assertIn("comparable current shipping rate", compact)
         self.assertIn("main shipping problem", compact)
         self.assertIn(

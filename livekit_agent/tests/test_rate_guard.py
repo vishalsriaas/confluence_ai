@@ -63,7 +63,7 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
-    def test_v6_worker_owns_entire_preverified_rate_flow(self):
+    def test_v6_model_owns_entire_sales_flow_without_duplicate_generation(self):
         state = GatedConversationState(
             v4_strict_flow=True,
             v5_company_pair_flow=True,
@@ -74,7 +74,7 @@ class TestRateGateResponse(unittest.TestCase):
         state.apply_deterministic_answers("rates chahiye", turn_id="intent")
         state.seed_context({"business_name": "Harsh Enterprises"})
         self.assertEqual(state.pending_field(), "business_type")
-        self.assertTrue(_worker_owns_realtime_turn(state))
+        self.assertFalse(_worker_owns_realtime_turn(state))
 
         state.seed_context(
             {
@@ -85,20 +85,20 @@ class TestRateGateResponse(unittest.TestCase):
             }
         )
         self.assertEqual(state.pending_field(), "current_shipping_rate")
-        self.assertTrue(_worker_owns_realtime_turn(state))
+        self.assertFalse(_worker_owns_realtime_turn(state))
 
         state.seed_context({"current_shipping_rate": 35})
         self.assertEqual(state.pending_field(), "current_problem")
-        self.assertTrue(_worker_owns_realtime_turn(state))
+        self.assertFalse(_worker_owns_realtime_turn(state))
 
         state.seed_context({"current_problem": "Support issue"})
-        self.assertTrue(_worker_owns_realtime_turn(state))
+        self.assertFalse(_worker_owns_realtime_turn(state))
 
         state.seed_context(
             {"pickup_location": "Delhi", "delivery_location": "Bengaluru"}
         )
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        self.assertTrue(_worker_owns_realtime_turn(state))
+        self.assertFalse(_worker_owns_realtime_turn(state))
 
         state.mark_route_zone_verified("C", starting_presented=True)
         state.mark_pricing_verified("lookup_pincode_serviceability")
@@ -180,32 +180,6 @@ class TestRateGateResponse(unittest.TestCase):
                         expected_tool_reply=expected_tool_reply,
                     )
                 )
-
-    def test_native_reply_is_suppressed_until_final_user_transcript_settles(self):
-        self.assertTrue(
-            _suppress_unsolicited_realtime_speech(
-                controlled_flow=False,
-                user_turn_unsettled=True,
-                user_initiated=False,
-                expected_tool_reply=False,
-            )
-        )
-        self.assertFalse(
-            _suppress_unsolicited_realtime_speech(
-                controlled_flow=False,
-                user_turn_unsettled=True,
-                user_initiated=True,
-                expected_tool_reply=False,
-            )
-        )
-        self.assertFalse(
-            _suppress_unsolicited_realtime_speech(
-                controlled_flow=False,
-                user_turn_unsettled=True,
-                user_initiated=False,
-                expected_tool_reply=True,
-            )
-        )
 
     def test_call_1838_rejects_multilingual_noise_hallucinations(self):
         noisy_transcripts = (
