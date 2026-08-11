@@ -181,6 +181,32 @@ class TestRateGateResponse(unittest.TestCase):
                     )
                 )
 
+    def test_native_reply_is_suppressed_until_final_user_transcript_settles(self):
+        self.assertTrue(
+            _suppress_unsolicited_realtime_speech(
+                controlled_flow=False,
+                user_turn_unsettled=True,
+                user_initiated=False,
+                expected_tool_reply=False,
+            )
+        )
+        self.assertFalse(
+            _suppress_unsolicited_realtime_speech(
+                controlled_flow=False,
+                user_turn_unsettled=True,
+                user_initiated=True,
+                expected_tool_reply=False,
+            )
+        )
+        self.assertFalse(
+            _suppress_unsolicited_realtime_speech(
+                controlled_flow=False,
+                user_turn_unsettled=True,
+                user_initiated=False,
+                expected_tool_reply=True,
+            )
+        )
+
     def test_call_1838_rejects_multilingual_noise_hallucinations(self):
         noisy_transcripts = (
             ("nai. Ladki, kaun? Nai nai.", None, "repeated_negative_fragment"),

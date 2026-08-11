@@ -1540,18 +1540,22 @@ def _gemini_end_sensitivity() -> genai_types.EndSensitivity:
 def _suppress_unsolicited_realtime_speech(
     *,
     controlled_flow: bool,
+    user_turn_unsettled: bool = False,
     user_initiated: bool,
     expected_tool_reply: bool,
 ) -> bool:
-    """Reject Gemini's server-started draft when V5 owns the response turn.
+    """Reject a premature Gemini server draft before its response turn is safe.
 
     LiveKit marks an explicit ``session.generate_reply`` speech as
     ``user_initiated=True``. A Gemini server-side/AAD generation is marked
     false. A server-started generation is still permitted when LiveKit is
     explicitly waiting for Gemini's automatic reply to a completed tool call.
+    ``user_turn_unsettled`` covers the interval from speech-start until the
+    final user transcript is published; replying inside that interval caused
+    Gemini to talk over the customer and collide with the guarded response.
     """
     return bool(
-        controlled_flow
+        (controlled_flow or user_turn_unsettled)
         and not user_initiated
         and not expected_tool_reply
     )
@@ -5598,6 +5602,7 @@ async def entrypoint(ctx: JobContext) -> None:
     controlled_information_reply_epochs: set[int] = set()
     flow_correction_epochs: set[int] = set()
     high_volume_delivery_pending = False
+    user_turn_unsettled = False
 
     def schedule_controlled_information_reply(
         state_task: asyncio.Task[None] | None,
@@ -5849,11 +5854,16 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("conversation_item_added")
     def _conversation_item_added(event):
-        nonlocal high_volume_delivery_pending
+        nonlocal high_volume_delivery_pending, user_turn_unsettled
         item = getattr(event, "item", None)
         if not isinstance(item, ChatMessage):
             return
         if str(item.role) == "user":
+            # Gemini may emit a native response while the customer is still
+            # speaking, before this final transcript exists. From this point
+            # the final turn is settled and deterministic state preparation
+            # below can safely choose the single response owner.
+            user_turn_unsettled = False
             turn_id = getattr(item, "id", None)
             customer_text = item.text_content or ""
             noise_key = _normalized_text(customer_text)
@@ -6440,6 +6450,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         if _suppress_unsolicited_realtime_speech(
             controlled_flow=_worker_owns_realtime_turn(conversation_state),
+            user_turn_unsettled=user_turn_unsettled,
             user_initiated=user_initiated,
             expected_tool_reply=expected_tool_reply,
         ):
@@ -6449,10 +6460,11 @@ async def entrypoint(ctx: JobContext) -> None:
             handle.interrupt(force=True)
             logger.info(
                 "Suppressed unsolicited realtime speech id=%s source=%s "
-                "pending_field=%s",
+                "pending_field=%s user_turn_unsettled=%s",
                 speech_id,
                 source,
                 conversation_state.pending_field(),
+                user_turn_unsettled,
             )
         runtime.track_agent_speech(
             speech_id,
@@ -6535,8 +6547,17 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_state_changed")
     def _user_state_changed(event):
-        if str(getattr(event, "new_state", "")) == "speaking":
+        nonlocal user_turn_unsettled
+        new_state = str(getattr(event, "new_state", ""))
+        if new_state == "speaking":
+            user_turn_unsettled = True
             runtime.clear_expected_realtime_tool_replies()
+        logger.info(
+            "Customer audio state changed old=%s new=%s user_turn_unsettled=%s",
+            str(getattr(event, "old_state", "")),
+            new_state,
+            user_turn_unsettled,
+        )
 
     @session.on("session_usage_updated")
     def _session_usage_updated(event):
