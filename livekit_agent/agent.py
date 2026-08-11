@@ -969,13 +969,22 @@ _V6_BLOCKING_FLOW_VIOLATIONS = frozenset(
 )
 
 
-def _flow_violation_requires_correction(violation: str, *, model_led_flow: bool) -> bool:
-    """Keep V6 advisory sales checks from becoming a second response owner."""
+def _flow_violation_requires_correction(
+    violation: str,
+    *,
+    model_led_flow: bool,
+    preverified_rate_flow: bool = False,
+) -> bool:
+    """Keep V6 advisory checks single-owner, except required pre-rate gates."""
     return bool(
         violation
         and (
             not model_led_flow
             or violation in _V6_BLOCKING_FLOW_VIOLATIONS
+            or (
+                preverified_rate_flow
+                and violation.startswith("skipped_pending:")
+            )
         )
     )
 
@@ -5869,6 +5878,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 if _flow_violation_requires_correction(
                     observed_flow_violation,
                     model_led_flow=conversation_state.model_led_flow,
+                    preverified_rate_flow=bool(
+                        conversation_state.value("assistance_intent") == "Rates"
+                        and not conversation_state.verified_rate_presented()
+                    ),
                 )
                 else ""
             )
@@ -6058,7 +6071,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 flow_violation
                 and not correction_active
                 and not (unverified_amounts or unverified_pincodes or unverified_zones)
-                and response_turn_epoch not in controlled_information_reply_epochs
+                and (
+                    response_turn_epoch not in controlled_information_reply_epochs
+                    or flow_violation.startswith("skipped_pending:")
+                )
                 and response_turn_epoch not in flow_correction_epochs
             ):
                 flow_correction_epochs.add(response_turn_epoch)

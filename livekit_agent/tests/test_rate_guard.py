@@ -1704,6 +1704,20 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 model_led_flow=False,
             )
         )
+        self.assertTrue(
+            _flow_violation_requires_correction(
+                "skipped_pending:current_shipping_rate",
+                model_led_flow=True,
+                preverified_rate_flow=True,
+            )
+        )
+        self.assertFalse(
+            _flow_violation_requires_correction(
+                "skipped_pending:current_shipping_rate",
+                model_led_flow=True,
+                preverified_rate_flow=False,
+            )
+        )
 
     async def test_route_correction_keeps_only_the_last_complete_pair(self):
         state = GatedConversationState(

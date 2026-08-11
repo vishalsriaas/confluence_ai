@@ -5014,6 +5014,78 @@ class TestGatedConversationState(unittest.TestCase):
         )
         self.assertEqual(state.value("monthly_shipments"), 1000)
 
+    def test_v6_latest_call_platform_cannot_also_become_business_name(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
+        self.assertEqual(state.pending_field(), "business_name")
+
+        state.apply_deterministic_answers(
+            "Haan, mere orders WooCommerce se aate hain",
+            turn_id="platform-not-name",
+            previous_agent_text="Aapke orders Shopify, marketplace ya website se aate hain?",
+        )
+        applied = state.apply_classifier_result(
+            {
+                "turn_disposition": "answered",
+                "decisions": [
+                    decision(
+                        "business_name",
+                        "WooCommerce",
+                        "WooCommerce",
+                    )
+                ],
+            },
+            customer_text="Haan, mere orders WooCommerce se aate hain",
+            turn_id="platform-not-name",
+            pending_field_at_turn_start="business_name",
+        )
+
+        self.assertTrue(state.is_handled("business_platform"))
+        self.assertFalse(state.is_handled("business_name"))
+        self.assertEqual(state.pending_field(), "business_name")
+        self.assertEqual(applied, [])
+
+    def test_v6_latest_call_remembers_explicit_route_while_current_rate_pending(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "D2C",
+                "business_platform": "WooCommerce",
+                "current_shipping_arrangement": "Shipping Aggregator",
+                "current_provider_name": "Shiprocket",
+                "current_problem": "Support issue",
+            }
+        )
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+
+        state.apply_deterministic_answers(
+            "Mere shipment pickup hote hain Delhi se and deliver hote hain Bangalore mein",
+            turn_id="route-while-rate-pending",
+            previous_agent_text="Aapke shipments kahan se pick up hote hain?",
+        )
+
+        self.assertEqual(state.value("pickup_location"), "Delhi")
+        self.assertEqual(state.value("delivery_location"), "Bengaluru")
+        self.assertEqual(state.pending_field(), "current_shipping_rate")
+        self.assertEqual(
+            state.active_route(),
+            {"pickup_location": "Delhi", "delivery_location": "Bengaluru"},
+        )
+
 
 class _FakeModels:
     def __init__(self, response=None, *, delay=0):

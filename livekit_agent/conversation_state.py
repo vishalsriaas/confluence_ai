@@ -1655,6 +1655,12 @@ class GatedConversationState:
             and transition.get("field") == "monthly_shipments"
             for transition in self.transitions
         )
+        platform_captured_this_turn = any(
+            transition.get("turn_id") == turn_id
+            and transition.get("event") == "field_updated"
+            and transition.get("field") == "business_platform"
+            for transition in self.transitions
+        )
         deterministically_updated_this_turn = {
             str(transition.get("field") or "")
             for transition in self.transitions
@@ -1712,6 +1718,20 @@ class GatedConversationState:
             if field == "business_name" and monthly_quantity_captured_this_turn:
                 # A volume answer such as "around 2,000" cannot also become
                 # the company name merely because business_name was pending.
+                continue
+            if (
+                field == "business_name"
+                and platform_captured_this_turn
+                and re.fullmatch(
+                    r"(?:shopify|woo\s*commerce|woocommerce|marketplace|website|web\s*site|"
+                    r"instagram|facebook|amazon|flipkart|meesho|offline)",
+                    normalize_text(raw.get("value")),
+                    re.IGNORECASE,
+                )
+            ):
+                # A platform volunteered while business_name is still pending
+                # is useful out-of-order information, but its brand token is
+                # never the customer's company name.
                 continue
             if field == "business_name" and re.fullmatch(
                 r"[a-z]\s*(?:2|to)\s*[a-z]",
@@ -2237,6 +2257,14 @@ class GatedConversationState:
                 r"\b(?:kahan|kahaan|where)\b.{0,30}\b(?:se|from)\b.{0,30}"
                 r"\b(?:kahan|kahaan|where|tak|to)\b|"
                 r"\b(?:from\s+where\s+to\s+where|where\s+do\s+your\s+shipments\s+go)\b",
+                previous_clean,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"\b(?:kahan|kahaan|where)\b.{0,50}"
+                r"\b(?:pick[\s-]?up|deliver|delivery|shipments?)\b|"
+                r"\b(?:pick[\s-]?up|deliver|delivery|shipments?)\b.{0,50}"
+                r"\b(?:kahan|kahaan|where)\b",
                 previous_clean,
                 re.IGNORECASE,
             )
@@ -3397,14 +3425,14 @@ class GatedConversationState:
             # without being asked to repeat the whole route.
             pickup_match = re.search(
                 rf"(?:(?:\bfrom\b|\bpick[\s-]?up(?:\s+(?:city|location))?\b|\borigin\b)"
-                rf"\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
+                rf"(?:\s+\w+){{0,6}}?\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
                 rf"(?<!\w)(?P<suffix>{_LOCATION_ALTERNATION})(?!\w)\s+(?:se|from)\b)",
                 clean,
                 re.IGNORECASE,
             )
             delivery_match = re.search(
-                rf"(?:(?:\bto\b|\bdelivery(?:\s+(?:city|location))?\b|\bdrop\b|\bdestination\b)"
-                rf"\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
+                rf"(?:(?:\bto\b|\bdeliver(?:y|ed|\s+hote)?(?:\s+(?:city|location))?\b|\bdrop\b|\bdestination\b)"
+                rf"(?:\s+\w+){{0,6}}?\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
                 rf"(?<!\w)(?P<suffix>{_LOCATION_ALTERNATION})(?!\w)\s+"
                 rf"(?:tak|ke\s+liye|ka\s+rate|ke\s+rates?)\b)",
                 clean,
