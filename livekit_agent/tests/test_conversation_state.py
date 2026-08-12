@@ -110,6 +110,41 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("current_provider_name"), "nimbuspost")
         self.assertEqual(state.value("current_shipping_arrangement"), "Other")
 
+    def test_v7_provider_is_followed_by_problem_and_matching_usp_transition(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers(
+            "Haan ji, main handle karta hoon aur abhi baat kar sakte hain.",
+            turn_id="consent",
+            previous_agent_text=(
+                "Kya main business ki shipping ya operations handle karne wale person se baat "
+                "kar raha hoon, aur kya abhi around do minute baat karna convenient hai?"
+            ),
+        )
+        state.apply_deterministic_answers(
+            "Rates check karne hain",
+            turn_id="intent",
+            previous_agent_text="Aapko shipping mein abhi kis cheez ki help chahiye?",
+        )
+        state.seed_context({"business_name": "Evergreen", "business_type": "D2C"})
+        state.apply_deterministic_answers(
+            "Main Shiprocket use kar raha hun.",
+            turn_id="provider",
+            previous_agent_text="Abhi aap kaunsa shipping provider use karte hain?",
+        )
+
+        self.assertEqual(state.pending_field(), "current_problem")
+        self.assertIn("main current shipping challenge", state.guidance())
+
+        apply(
+            state,
+            "RTO follow-up mein dikkat hai.",
+            decision("current_problem", "RTO follow-up mein dikkat hai", "RTO follow-up mein dikkat hai"),
+            turn_id="problem",
+        )
+
+        self.assertEqual(state.pending_field(), "pickup_location")
+        self.assertIn("central problem-to-USP response rule", state.guidance())
+
     def test_unrecognized_p2c_audio_cannot_be_rewritten_as_d2c(self):
         state = V6ConversationState()
         state.seed_context(
@@ -230,6 +265,52 @@ class TestGatedConversationState(unittest.TestCase):
             any(item["event"] == "noncritical_field_skipped_after_retry" for item in transitions)
         )
 
+    def test_v7_sentence_fragment_is_not_saved_as_business_name(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("Ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Rates check karne hain", turn_id="intent")
+
+        transitions = state.apply_deterministic_answers(
+            "B.Tech ka naam hai I am a queen.",
+            turn_id="bad-name",
+            previous_agent_text="Aapke business ka naam kya hai?",
+        )
+
+        self.assertFalse(any(item.get("field") == "business_name" for item in transitions))
+        self.assertFalse(state.is_handled("business_name"))
+        self.assertEqual(state.pending_field(), "business_name")
+
+    def test_v7_new_generic_route_clears_old_provider_scope_and_pricing(self):
+        state = V6ConversationState()
+        state.seed_context(
+            {
+                "conversation_consent": "Accepted",
+                "assistance_intent": "Rates",
+                "business_name": "Evergreen",
+                "business_type": "D2C",
+                "current_shipping_arrangement": "Own Arrangement",
+                "pickup_location": "Delhi",
+                "delivery_location": "Kerala",
+            }
+        )
+        state.mark_pricing_verified("get_shipkia_starting_rate")
+        state.begin_provider_rate_request("Blue Dart")
+
+        state.apply_deterministic_answers(
+            "Delhi to Noida ka rate batao",
+            turn_id="changed-route",
+        )
+
+        self.assertEqual(state.active_route(), {
+            "pickup_location": "Delhi",
+            "delivery_location": "Noida",
+        })
+        self.assertEqual(state.provider_rate_scope, "")
+        self.assertEqual(state.requested_provider_rate_name, "")
+        self.assertFalse(state.provider_rates_answer_due)
+        self.assertFalse(state.verified_rate_presented())
+        self.assertEqual(state.pricing_mode(), "route_starting_pending")
+
     def test_v7_semantic_model_cannot_rewrite_a_customer_business_name(self):
         state = V6ConversationState()
         state.seed_context({"business_name": "Elite Fashion"})
@@ -253,32 +334,23 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("business_name"), "Elite Fashion")
         self.assertEqual(transitions, [])
 
-    def test_v7_opening_confirms_shipping_person_before_conversation_permission(self):
+    def test_v7_opening_uses_one_combined_consent(self):
         state = V6ConversationState()
 
         first = state.apply_deterministic_answers(
-            "Haan, main hi handle karta hoon.",
-            turn_id="correct-person",
+            "Haan ji, main handle karta hoon aur abhi baat kar sakte hain.",
+            turn_id="combined-consent",
             previous_agent_text=(
-                "Kya main business ki shipping ya operations handle karne wale person se "
-                "baat kar raha hoon?"
+                "Kya main business ki shipping ya operations handle karne wale person se baat "
+                "kar raha hoon, aur kya abhi around do minute baat karna convenient hai?"
             ),
         )
 
         self.assertTrue(state.correct_person_confirmed)
-        self.assertFalse(state.is_handled("conversation_consent"))
-        self.assertEqual(state.pending_field(), "conversation_consent")
-        self.assertTrue(any(item["event"] == "correct_person_confirmed" for item in first))
-        self.assertIn("convenient time", state.guidance())
-
-        state.apply_deterministic_answers(
-            "Haan ji, bataiye.",
-            turn_id="permission",
-            previous_agent_text="Kya abhi baat karna convenient hai?",
-        )
-
         self.assertEqual(state.value("conversation_consent"), "Accepted")
         self.assertEqual(state.pending_field(), "assistance_intent")
+        self.assertTrue(any(item["event"] == "correct_person_confirmed" for item in first))
+        self.assertTrue(any(item.get("field") == "conversation_consent" for item in first))
 
     def test_production_v6_state_has_no_legacy_mode_selection(self):
         state = V6ConversationState()
@@ -295,7 +367,7 @@ class TestGatedConversationState(unittest.TestCase):
         state.seed_context({"monthly_shipments": 1000})
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("rates batao", turn_id="intent")
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertTrue(state.anything_else_question_due)
         state.mark_anything_else_question_presented()
 
@@ -661,25 +733,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("then stop", guidance)
         self.assertNotIn("Kya aap kuch aur jaanna chahenge", guidance)
 
-    def test_call_1698_delivery_pincode_never_becomes_monthly_shipments(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("haan", turn_id="consent")
-        state.apply_deterministic_answers("rates janna chahta hoon", turn_id="intent")
-        state.monthly_quantity_due = True
-
-        state.apply_deterministic_answers(
-            "166403",
-            turn_id="delivery-pincode",
-            previous_agent_text=(
-                "Pan India shipments ke liye mujhe aapka delivery pincode chahiye. "
-                "Kya aap bata sakte hain?"
-            ),
-        )
-
-        self.assertEqual(state.value("delivery_pincode"), "166403")
-        self.assertFalse(state.is_handled("monthly_shipments"))
-        self.assertTrue(state.monthly_quantity_due)
-
     def test_call_1693_filler_repeated_no_advances_once_to_move_forward(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.anything_else_question_due = True
@@ -1013,7 +1066,7 @@ class TestGatedConversationState(unittest.TestCase):
         state.seed_context({"monthly_shipments": 5000})
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("Zone D rate batao", turn_id="rate")
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         transitions = state.apply_deterministic_answers(
             "\u0928\u0939\u0940\u0902\u0964 \u0925\u0948\u0902\u0915 \u092f\u0942\u0964",
@@ -1293,7 +1346,7 @@ class TestGatedConversationState(unittest.TestCase):
                 ],
             }
         )
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         for index, customer_text in enumerate(
             ("इन सबके रेट बता दीजिए।", "मैंने पूछा है सबके रेट बता दीजिए।")
@@ -1645,7 +1698,7 @@ class TestGatedConversationState(unittest.TestCase):
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("Zone C rate batao", turn_id="rate")
         state.authorize_rate_result({"status": "success", "amount": 31.15})
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         state.apply_deterministic_answers("How much?", turn_id="repeat-rate")
 
@@ -1926,7 +1979,7 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertFalse(state.route_ready_for_lookup())
         self.assertEqual(state.pending_field(), "delivery_location")
         self.assertIn("delivery city or locality", state.guidance())
-        self.assertIn("do not ask for a pincode", state.guidance().casefold())
+        self.assertIn("delivery city or locality", state.guidance().casefold())
 
     def test_v5_features_side_question_does_not_lock_rates_intent(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -2366,7 +2419,7 @@ class TestGatedConversationState(unittest.TestCase):
         guidance = state.guidance()
         self.assertIn("return/RTO problem", guidance)
         self.assertIn("WhatsApp/IVR NDR", guidance)
-        self.assertIn("lookup_pincode_serviceability", guidance)
+        self.assertIn("lookup_shipkia_route_rate", guidance)
         self.assertIn("Never ask permission", guidance)
         self.assertEqual(
             state.next_route_for_lookup(),
@@ -2399,9 +2452,9 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertIn("WhatsApp order confirmation", guidance)
         self.assertIn("call confirmation", guidance)
         self.assertIn("dedicated account-manager", guidance)
-        self.assertIn("lookup_pincode_serviceability", guidance)
+        self.assertIn("lookup_shipkia_route_rate", guidance)
 
-    def test_v5_devanagari_city_routes_are_queued_without_pincodes(self):
+    def test_v5_devanagari_city_routes_are_queued(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers(
@@ -2533,7 +2586,7 @@ class TestGatedConversationState(unittest.TestCase):
         state.apply_deterministic_answers("Delhi to Mumbai rate batao", turn_id="route")
         route = state.next_route_for_lookup()
         state.mark_route_zone_verified("C", starting_presented=True, route_arguments=route)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         state.apply_deterministic_answers(
             "बट मैं सेटिस्फाइड नहीं हूं, रेट ज्यादा है",
@@ -2567,63 +2620,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.unsatisfied_concern, "RTO problem")
         self.assertIn("solution ya better plan", state.guidance())
 
-    def test_v4_replays_call_1443_without_skips_or_pincode_overwrite(self):
-        state = GatedConversationState(v4_strict_flow=True)
-
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers(
-            "main check karna chaunga",
-            turn_id="intent",
-            previous_agent_text="Aap rates check karna chahenge ya onboarding help?",
-        )
-        self.assertEqual(state.value("assistance_intent"), "Rates")
-        self.assertEqual(state.pending_field(), "business_name")
-
-        apply(
-            state,
-            "Mera business Alpha Store hai",
-            decision("business_name", "Alpha Store", "Alpha Store"),
-            turn_id="business-name",
-        )
-        apply(
-            state,
-            "D2C",
-            decision("business_type", "D2C", "D2C"),
-            turn_id="business-type",
-        )
-        state.apply_deterministic_answers(
-            "main koi courier use nahi karta",
-            turn_id="arrangement",
-            previous_agent_text="Abhi aap kaunsa courier ya aggregator use karte hain?",
-        )
-        self.assertEqual(state.pending_field(), "pickup_pincode")
-        self.assertFalse(state.is_handled("current_provider_name"))
-        self.assertFalse(state.is_handled("current_problem"))
-
-        state.apply_deterministic_answers(
-            "110001",
-            turn_id="delivery-pin",
-            previous_agent_text="Aapka delivery pincode kya hai?",
-        )
-        self.assertEqual(state.value("delivery_pincode"), "110001")
-        state.apply_deterministic_answers(
-            "201305",
-            turn_id="pickup-pin",
-            previous_agent_text=(
-                "Delivery pincode mil gaya. Ab pickup pincode bata sakte hain?"
-            ),
-        )
-        self.assertEqual(state.value("pickup_pincode"), "201305")
-        self.assertEqual(state.value("delivery_pincode"), "110001")
-        self.assertEqual(state.pending_field(), "dead_weight")
-
-        state.apply_deterministic_answers("0.5 kg", turn_id="weight")
-        self.assertEqual(state.pending_field(), "payment_type")
-        state.apply_deterministic_answers("dono", turn_id="payment")
-        self.assertEqual(state.value("payment_type"), "Both")
-        self.assertEqual(state.pricing_mode(), "exact")
-        self.assertEqual(state.pending_field(), "")
-
     def test_v4_customer_question_guidance_never_exposes_internal_context(self):
         state = GatedConversationState(v4_strict_flow=True)
         state.apply_deterministic_answers("haan ji", turn_id="consent")
@@ -2640,38 +2636,6 @@ class TestGatedConversationState(unittest.TestCase):
             "set to Normal",
         ):
             self.assertNotIn(internal_phrase.casefold(), guidance.casefold())
-
-    def test_v4_unlabelled_pincode_does_not_overwrite_confirmed_endpoint(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        for field, value in (
-            ("conversation_consent", "Accepted"),
-            ("assistance_intent", "Rates"),
-            ("business_name", "Alpha"),
-            ("business_type", "D2C"),
-        ):
-            apply(state, str(value), decision(field, value, str(value)), turn_id=field)
-        apply(
-            state,
-            "No courier",
-            decision(
-                "current_shipping_arrangement",
-                None,
-                "No courier",
-                disposition="not_applicable",
-            ),
-            turn_id="arrangement",
-        )
-        apply(state, "201305", decision("pickup_pincode", "201305", "201305"), turn_id="pickup")
-        apply(state, "110001", decision("delivery_pincode", "110001", "110001"), turn_id="delivery")
-
-        state.apply_deterministic_answers(
-            "400001",
-            turn_id="noise-pin",
-            previous_agent_text="Shipment ka weight kitna hai?",
-        )
-        self.assertEqual(state.value("pickup_pincode"), "201305")
-        self.assertEqual(state.value("delivery_pincode"), "110001")
-        self.assertEqual(state.pending_field(), "dead_weight")
 
     def test_v4_extended_hindi_hinglish_consent_variants(self):
         for spoken in (
@@ -2736,60 +2700,7 @@ class TestGatedConversationState(unittest.TestCase):
 
         self.assertEqual(state.requested_rate_type, "Normal")
 
-    def test_explicit_answers_are_remembered_even_when_state_is_one_question_behind(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.apply_deterministic_answers("haan ji", turn_id="consent")
-        state.apply_deterministic_answers(
-            "rates check karne hain", turn_id="intent"
-        )
-
-        state.apply_deterministic_answers("D2C", turn_id="business-type")
-        state.apply_deterministic_answers(
-            "main Shirocket use kar raha hoon",
-            turn_id="provider",
-        )
-        state.apply_deterministic_answers(
-            "pickup 201305",
-            turn_id="pickup",
-            previous_agent_text="Noida ka pincode kya hai?",
-        )
-        state.apply_deterministic_answers(
-            "\u092a\u094d\u0930\u0940\u092a\u0947\u0921 \u0915\u093e \u092c\u0924\u093e \u0926\u0940\u091c\u093f\u090f",
-            turn_id="payment",
-        )
-
-        self.assertEqual(state.value("business_type"), "D2C")
-        self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
-        self.assertEqual(state.value("current_provider_name"), "Shiprocket")
-        self.assertEqual(state.value("pickup_pincode"), "201305")
-        self.assertEqual(state.value("payment_type"), "Prepaid")
-
-    def test_v4_pan_india_normal_rate_still_requires_route_weight_and_payment(self):
-        for spoken in ("Pan India na?", "Noida se all over India"):
-            with self.subTest(spoken=spoken):
-                state = GatedConversationState(v4_strict_flow=True)
-                state.seed_context(
-                    {
-                        "business_name": "Work Shop",
-                        "business_type": "D2C",
-                        "current_shipping_arrangement": "Own Arrangement",
-                        "current_shipping_rate": 40,
-                        "current_problem": "High Rates",
-                    }
-                )
-                state.apply_deterministic_answers("haan ji", turn_id="consent")
-                state.apply_deterministic_answers(
-                    "normal rates check karne hain",
-                    turn_id="intent",
-                )
-
-                state.apply_deterministic_answers(spoken, turn_id="pan-india")
-
-                self.assertEqual(state.pricing_mode(), "pending")
-                self.assertFalse(state.starting_rate_due())
-                self.assertEqual(state.pending_field(), "pickup_pincode")
-
-    def test_v4_flat_rate_skips_route_pincodes_but_requires_weight_and_payment(self):
+    def test_v4_flat_rate_skips_route_but_requires_weight_and_payment(self):
         state = GatedConversationState(v4_strict_flow=True)
         state.seed_context(
             {
@@ -2804,9 +2715,6 @@ class TestGatedConversationState(unittest.TestCase):
         state.apply_deterministic_answers("flat rate check karna hai", turn_id="intent")
 
         self.assertEqual(state.pending_field(), "dead_weight")
-        self.assertFalse(state.is_handled("pickup_pincode"))
-        self.assertFalse(state.is_handled("delivery_pincode"))
-
         state.apply_deterministic_answers("500 gram", turn_id="weight")
         self.assertEqual(state.pending_field(), "payment_type")
 
@@ -2930,7 +2838,7 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pending_field(), "pickup_location")
         state.apply_deterministic_answers("Delhi se Bangalore", turn_id="route")
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
 
     def test_operating_model_guidance_uses_plain_language_not_acronym_menu(self):
         state = GatedConversationState(
@@ -2969,7 +2877,7 @@ class TestGatedConversationState(unittest.TestCase):
         )
 
         self.assertEqual(state.optional_ended_by, "business_name")
-        self.assertEqual(state.pending_field(), "pickup_pincode")
+        self.assertEqual(state.pending_field(), "pickup_location")
         self.assertEqual(state.rate_arguments()["qualification_refused_field"], "business_name")
 
     def test_v5_company_refusal_skips_pair_but_continues_provider_discovery(self):
@@ -3020,43 +2928,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pending_field(), "current_shipping_arrangement")
         self.assertEqual(state.value("current_shipping_arrangement"), "")
 
-    def test_v5_unresolved_route_never_enables_a_generic_fallback(self):
-        state = GatedConversationState(
-            v4_strict_flow=True,
-            v5_company_pair_flow=True,
-        )
-        state.seed_context(
-            {
-                "business_name": "North Star",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
-            }
-        )
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
-
-        self.assertEqual(state.pending_field(), "")
-        self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        state.mark_route_zone_lookup_unavailable(fallback_presented=True)
-
-        self.assertEqual(state.route_zone_lookup_status, "unavailable")
-        self.assertEqual(state.pending_field(), "")
-        self.assertEqual(state.pricing_mode(), "pending")
-        self.assertFalse(state.starting_rate_due())
-
-        state.apply_deterministic_answers(
-            "delivery pincode change 400001",
-            turn_id="route-correction",
-        )
-        self.assertEqual(state.route_zone_lookup_status, "")
-        self.assertEqual(state.value("delivery_pincode"), "400001")
-        self.assertEqual(state.pending_field(), "")
-        self.assertEqual(state.pricing_mode(), "route_starting_pending")
-
     def test_v5_city_route_is_complete_and_waits_for_zone_starting_lookup(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context(
@@ -3076,13 +2947,13 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("delivery_location"), "Noida")
         self.assertTrue(state.route_ready_for_lookup())
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
 
         self.assertTrue(state.mark_route_zone_verified("A", starting_presented=True))
         self.assertEqual(state.pricing_mode(), "zone_starting")
         self.assertFalse(state.starting_rate_due())
 
-    def test_v5_pan_india_uses_route_lookup_without_pincodes(self):
+    def test_v5_pan_india_uses_route_lookup(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context(
             {
@@ -3142,7 +3013,7 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pending_field(), "")
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
         self.assertEqual(state.next_route_for_lookup(), {"pan_india": True})
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
 
     def test_v5_call_1582_retains_route_but_requires_shiprocket_problem_first(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -3309,33 +3180,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.unresolved_route_count(), 0)
         self.assertEqual(state.value("zone"), "A")
 
-    def test_v5_city_route_replaces_stale_pincode_route(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.seed_context(
-            {
-                "business_name": "North Star",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
-            }
-        )
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
-        state.apply_deterministic_answers(
-            "Delhi to Bengaluru",
-            turn_id="new-route",
-        )
-
-        self.assertFalse(state.is_confirmed("pickup_pincode"))
-        self.assertFalse(state.is_confirmed("delivery_pincode"))
-        self.assertEqual(
-            state.next_route_for_lookup(),
-            {"pickup_location": "Delhi", "delivery_location": "Bengaluru"},
-        )
-
     def test_v6_active_route_keeps_other_endpoint_until_customer_changes_it(self):
         state = GatedConversationState(
             v4_strict_flow=True,
@@ -3393,7 +3237,7 @@ class TestGatedConversationState(unittest.TestCase):
             starting_presented=True,
             route_arguments=first_route,
         )
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         state.apply_deterministic_answers(
             "और दिल्ली टू मुंबई के भी रेट्स बता दो, फिर डिटेल्स बताता हूं",
@@ -3475,7 +3319,7 @@ class TestGatedConversationState(unittest.TestCase):
             starting_presented=True,
             route_arguments=route,
         )
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         self.assertEqual(state.pending_field(), "business_name")
         state.apply_deterministic_answers(
@@ -3500,6 +3344,13 @@ class TestGatedConversationState(unittest.TestCase):
         )
         self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
         self.assertEqual(state.value("current_provider_name"), "Shiprocket")
+        self.assertEqual(state.pending_field(), "current_problem")
+        apply(
+            state,
+            "RTO follow-up mein dikkat hai",
+            decision("current_problem", "RTO follow-up mein dikkat hai", "RTO follow-up mein dikkat hai"),
+            turn_id="problem",
+        )
         self.assertEqual(state.pending_field(), "monthly_shipments")
 
     def test_v6_observed_flame_zona_red_asr_requests_flat_zonal_catalog(self):
@@ -3548,23 +3399,6 @@ class TestGatedConversationState(unittest.TestCase):
             {"pickup_location": "Delhi", "delivery_location": "Bengaluru"},
         )
 
-    def test_multi_detail_reply_saves_explicit_fields_but_keeps_earlier_gap_pending(self):
-        state = GatedConversationState()
-        text = "Business North Star hai, D2C hai, pickup 110001 aur delivery 400001."
-
-        apply(
-            state,
-            text,
-            decision("business_name", "North Star", "North Star"),
-            decision("business_type", "D2C", "D2C"),
-            decision("pickup_pincode", "110001", "110001"),
-            decision("delivery_pincode", "400001", "400001"),
-        )
-
-        self.assertEqual(state.value("business_name"), "North Star")
-        self.assertEqual(state.value("delivery_pincode"), "400001")
-        self.assertEqual(state.pending_field(), "current_shipping_arrangement")
-
     def test_low_confidence_or_missing_evidence_fails_closed(self):
         state = GatedConversationState()
         apply(
@@ -3596,65 +3430,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("business_name"), "ShipKraft")
         self.assertEqual(state.transitions[-1]["previous_value"], "ShipCart")
 
-    def test_explicitly_unavailable_pincode_does_not_enable_generic_rate(self):
-        state = GatedConversationState()
-        apply(
-            state,
-            "business ka pata nahi",
-            decision("business_name", None, "pata nahi", disposition="unknown"),
-        )
-        apply(
-            state,
-            "pickup pincode pata nahi",
-            decision("pickup_pincode", None, "pata nahi", disposition="unknown"),
-            turn_id="pin-one",
-        )
-        apply(
-            state,
-            "delivery 400001",
-            decision("delivery_pincode", "400001", "400001"),
-            turn_id="pin-two",
-        )
-        apply(
-            state,
-            "weight 1 kg",
-            decision("dead_weight", 1, "1 kg"),
-            turn_id="weight",
-        )
-        apply(
-            state,
-            "prepaid",
-            decision("payment_type", "Prepaid", "prepaid"),
-            turn_id="payment",
-        )
-
-        self.assertFalse(state.pricing_ready())
-        self.assertEqual(state.pricing_mode(), "pending")
-        self.assertFalse(state.starting_rate_due())
-        arguments = state.rate_arguments()
-        self.assertNotIn("pickup_pincode", arguments)
-        self.assertEqual(arguments["pickup_pincode_status"], "Unavailable")
-        self.assertEqual(arguments["dead_weight"], 1.0)
-
-    def test_missing_weight_never_becomes_pricing_ready(self):
-        state = GatedConversationState()
-        apply(
-            state,
-            "business pata nahi",
-            decision("business_name", None, "pata nahi", disposition="unknown"),
-        )
-        apply(
-            state,
-            "pickup 110001 delivery 400001 prepaid",
-            decision("pickup_pincode", "110001", "110001"),
-            decision("delivery_pincode", "400001", "400001"),
-            decision("payment_type", "Prepaid", "prepaid"),
-        )
-
-        self.assertEqual(state.pending_field(), "dead_weight")
-        self.assertFalse(state.pricing_ready())
-        self.assertNotIn("dead_weight", state.rate_arguments())
-
     def test_payment_and_cod_refusals_do_not_enable_generic_rate(self):
         payment_state = GatedConversationState()
         apply(
@@ -3664,9 +3439,9 @@ class TestGatedConversationState(unittest.TestCase):
         )
         apply(
             payment_state,
-            "110001 se 400001, 2 kg",
-            decision("pickup_pincode", "110001", "110001"),
-            decision("delivery_pincode", "400001", "400001"),
+            "Delhi se Mumbai, 2 kg",
+            decision("pickup_location", "Delhi", "Delhi"),
+            decision("delivery_location", "Mumbai", "Mumbai"),
             decision("dead_weight", 2, "2 kg"),
         )
         apply(
@@ -3686,9 +3461,9 @@ class TestGatedConversationState(unittest.TestCase):
         )
         apply(
             cod_state,
-            "110001 se 400001, 2 kg COD",
-            decision("pickup_pincode", "110001", "110001"),
-            decision("delivery_pincode", "400001", "400001"),
+            "Delhi se Mumbai, 2 kg COD",
+            decision("pickup_location", "Delhi", "Delhi"),
+            decision("delivery_location", "Mumbai", "Mumbai"),
             decision("dead_weight", 2, "2 kg"),
             decision("payment_type", "COD", "COD"),
         )
@@ -3720,15 +3495,15 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pricing_mode(), "pending")
 
         state.apply_deterministic_answers(
-            "pickup 110001",
+            "pickup Delhi",
             turn_id="specific-route",
         )
         self.assertEqual(state.pricing_mode(), "pending")
 
-    def test_explicit_zone_has_precedence_and_is_never_inferred_from_pincode(self):
+    def test_explicit_zone_is_not_inferred_from_route(self):
         state = GatedConversationState()
         state.apply_deterministic_answers(
-            "pickup 110001 delivery 560001",
+            "Delhi se Bengaluru",
             turn_id="route",
         )
         self.assertFalse(state.is_confirmed("zone"))
@@ -3754,36 +3529,6 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.value("zone"), "")
         self.assertEqual(state.pricing_mode(), "pending")
         self.assertFalse(state.starting_rate_due())
-
-    def test_weight_refusal_is_handled_without_generic_rate(self):
-        state = GatedConversationState()
-        state.apply_deterministic_answers("business pata nahi", turn_id="optional")
-        state.apply_deterministic_answers(
-            "pickup 110001 delivery 560001",
-            turn_id="route",
-        )
-
-        transitions = state.apply_deterministic_answers(
-            "weight nahi pata",
-            turn_id="weight",
-        )
-
-        self.assertTrue(any(item.get("field") == "dead_weight" for item in transitions))
-        self.assertTrue(state.is_handled("dead_weight"))
-        self.assertEqual(state.pending_field(), "payment_type")
-        self.assertEqual(state.pricing_mode(), "pending")
-
-    def test_explicit_skip_phrase_does_not_enable_generic_rate(self):
-        state = GatedConversationState()
-        state.apply_deterministic_answers("business pata nahi", turn_id="optional")
-
-        state.apply_deterministic_answers(
-            "pickup pincode skip karo",
-            turn_id="pickup",
-        )
-
-        self.assertEqual(state.fields["pickup_pincode"].status, "unavailable")
-        self.assertEqual(state.pricing_mode(), "pending")
 
     def test_later_optional_refusal_preserves_earlier_business_type_gap(self):
         state = GatedConversationState()
@@ -3823,28 +3568,12 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertFalse(state.pricing_ready())
         self.assertEqual(state.transitions[-1]["event"], "guard_failed")
 
-    def test_structured_shipment_answers_are_validated_without_classifier(self):
-        state = GatedConversationState()
-        state.apply_deterministic_answers("business pata nahi", turn_id="optional")
-
-        transitions = state.apply_deterministic_answers(
-            "pickup 110001 delivery 400001, weight 750 g, prepaid",
-            turn_id="shipment",
-        )
-
-        self.assertEqual(state.value("pickup_pincode"), "110001")
-        self.assertEqual(state.value("delivery_pincode"), "400001")
-        self.assertEqual(state.value("dead_weight"), 0.75)
-        self.assertEqual(state.value("payment_type"), "Prepaid")
-        self.assertTrue(state.pricing_ready())
-        self.assertEqual(len([item for item in transitions if item["field"] == "dead_weight"]), 1)
-
-    def test_unlabelled_single_six_digit_number_does_not_bypass_optional_question(self):
+    def test_unlabelled_number_does_not_bypass_optional_question(self):
         state = GatedConversationState()
 
         state.apply_deterministic_answers("100000", turn_id="ambiguous")
 
-        self.assertFalse(state.is_handled("pickup_pincode"))
+        self.assertFalse(state.is_handled("pickup_location"))
         self.assertEqual(state.pending_field(), "business_name")
 
     def test_deterministic_unknown_and_classifier_result_do_not_duplicate_transition(self):
@@ -3871,19 +3600,7 @@ class TestGatedConversationState(unittest.TestCase):
 
         self.assertEqual(len(transitions), 1)
         self.assertEqual(state.optional_ended_by, "business_name")
-        self.assertEqual(state.pending_field(), "pickup_pincode")
-
-    def test_native_script_unknown_and_both_payment_are_deterministic(self):
-        state = GatedConversationState()
-        state.apply_deterministic_answers("पता नहीं", turn_id="unknown")
-        state.apply_deterministic_answers(
-            "pickup 201305 delivery 110001 weight 500 g دونوں",
-            turn_id="shipment",
-        )
-
-        self.assertEqual(state.value("payment_type"), "Both")
-        self.assertEqual(state.value("dead_weight"), 0.5)
-        self.assertTrue(state.pricing_ready())
+        self.assertEqual(state.pending_field(), "pickup_location")
 
     def test_common_hindi_asr_both_variants_are_deterministic(self):
         for index, utterance in enumerate(("\u0926\u094b\u0928\u093e", "\u0926\u094b\u0928\u094b", "donon")):
@@ -3898,84 +3615,6 @@ class TestGatedConversationState(unittest.TestCase):
                     turn_id=f"shipment-{index}",
                 )
                 self.assertEqual(state.value("payment_type"), "Both")
-
-    def test_v4_both_with_incomplete_route_requires_delivery_before_pricing(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.seed_context(
-            {
-                "business_name": "Work Shop",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-            }
-        )
-        state.apply_deterministic_answers("जी बताइए।", turn_id="consent")
-        state.apply_deterministic_answers("normal rate check karna hai", turn_id="intent")
-        state.apply_deterministic_answers(
-            "pickup 201305 weight 500 g dono",
-            turn_id="shipment",
-        )
-
-        self.assertEqual(state.value("conversation_consent"), "Accepted")
-        self.assertEqual(state.value("payment_type"), "Both")
-        self.assertEqual(state.pending_field(), "delivery_pincode")
-        self.assertEqual(state.pricing_mode(), "pending")
-        self.assertEqual(state.pricing_trigger_field(), "delivery_pincode")
-        self.assertFalse(state.starting_rate_due())
-
-    def test_v4_both_with_complete_route_is_exact_prepaid_basis(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.seed_context(
-            {
-                "business_name": "Work Shop",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
-                "dead_weight": 0.5,
-                "payment_type": "Both",
-            }
-        )
-        state.apply_deterministic_answers("yes", turn_id="consent")
-        state.apply_deterministic_answers("normal rate check karna hai", turn_id="intent")
-
-        self.assertEqual(state.pricing_mode(), "exact")
-        self.assertTrue(state.pricing_ready())
-        self.assertNotEqual(state.pending_field(), "order_value")
-
-    def test_call_1392_no_current_arrangement_ends_optional_sequence(self):
-        state = arrangement_pending_state()
-        state.apply_deterministic_answers(
-            "pickup 110001 delivery 201305 weight 500 g",
-            turn_id="shipment",
-        )
-
-        transitions = state.apply_deterministic_answers(
-            "Abhi mein kuchh use nahi kar raha hun naya home business mein.",
-            turn_id="arrangement-none",
-            previous_agent_text=(
-                "Abhi aap shipping ke liye kaun sa solution use kar rahe hain? "
-                "Koi courier company ya koi aggregator?"
-            ),
-        )
-
-        self.assertEqual(len(transitions), 1)
-        self.assertEqual(transitions[0]["field"], "current_shipping_arrangement")
-        self.assertEqual(transitions[0]["status"], "not_applicable")
-        self.assertTrue(transitions[0]["optional_sequence_ended"])
-        self.assertEqual(state.optional_ended_by, "current_shipping_arrangement")
-        self.assertEqual(state.pending_field(), "payment_type")
-        self.assertEqual(state.value("pickup_pincode"), "110001")
-        self.assertEqual(state.value("delivery_pincode"), "201305")
-        self.assertEqual(state.value("dead_weight"), 0.5)
-        self.assertNotIn("current_shipping_arrangement", state.rate_arguments())
-        self.assertEqual(
-            state.rate_arguments()["qualification_refused_field"],
-            "current_shipping_arrangement",
-        )
 
     def test_no_current_arrangement_hinglish_hindi_and_english_variants(self):
         variants = (
@@ -3997,7 +3636,7 @@ class TestGatedConversationState(unittest.TestCase):
                     state.fields["current_shipping_arrangement"].status,
                     "not_applicable",
                 )
-                self.assertEqual(state.pending_field(), "pickup_pincode")
+                self.assertEqual(state.pending_field(), "pickup_location")
 
     def test_contextual_bare_no_handles_direct_but_not_negative_confirmation(self):
         direct_state = arrangement_pending_state()
@@ -4074,45 +3713,6 @@ class TestGatedConversationState(unittest.TestCase):
                 turn_disposition="unrelated",
             ),
             [],
-        )
-
-    def test_future_shipkia_intent_and_noise_do_not_reopen_arrangement(self):
-        state = arrangement_pending_state()
-        state.apply_deterministic_answers(
-            "kuch nahi",
-            turn_id="none",
-        )
-        state.apply_deterministic_answers(
-            "pickup 110001 delivery 201305 weight 500 g",
-            turn_id="shipment",
-        )
-
-        self.assertEqual(
-            state.apply_deterministic_answers("select 190", turn_id="noise-one"),
-            [],
-        )
-        self.assertEqual(
-            state.apply_deterministic_answers("boot", turn_id="noise-two"),
-            [],
-        )
-        apply(
-            state,
-            "Ab ShipKia hi use karunga",
-            decision("service", "ShipKia", "ShipKia"),
-            turn_id="future-service",
-        )
-
-        self.assertEqual(state.optional_ended_by, "current_shipping_arrangement")
-        self.assertEqual(state.pending_field(), "payment_type")
-        self.assertEqual(
-            len(
-                [
-                    item
-                    for item in state.transitions
-                    if item.get("field") == "current_shipping_arrangement"
-                ]
-            ),
-            1,
         )
 
     def test_payment_words_never_become_service(self):
@@ -4240,105 +3840,11 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertTrue(state.rate_claim_amounts_authorized([26.40, 4.75]))
         self.assertFalse(state.rate_claim_amounts_authorized([45.0]))
 
-    def test_call_1623_asr_flow_keeps_state_clean_and_switches_catalogs(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        greeting = (
-            "ShipKia ek shipping platform hai jo multiple courier partners ke saath shipments "
-            "manage karta hai. Kya abhi baat kar sakte hain?"
-        )
-        state.apply_deterministic_answers(
-            "ji bataiye",
-            turn_id="consent",
-            previous_agent_text=greeting,
-        )
-        self.assertFalse(state.is_handled("current_shipping_arrangement"))
-        self.assertFalse(state.is_handled("current_provider_name"))
-
-        state.apply_deterministic_answers(
-            "on board hai kya?",
-            turn_id="onboarding",
-            previous_agent_text="Rates check karna chahenge ya onboarding help chahiye?",
-        )
-        self.assertEqual(state.value("assistance_intent"), "Onboarding")
-        state.apply_deterministic_answers(
-            "Mein rash check karna chahunga.",
-            turn_id="rate-switch",
-            previous_agent_text="Main onboarding mein help kar sakta hoon.",
-        )
-        self.assertEqual(state.value("assistance_intent"), "Rates")
-        apply(
-            state,
-            "Mein rash check karna chahunga.",
-            decision("service", "rash", "rash"),
-            turn_id="rate-switch-semantic",
-        )
-        self.assertFalse(state.is_handled("service"))
-
-        apply(
-            state,
-            "Mera business Harsh Enterprises hai",
-            decision("business_name", "Harsh Enterprises", "Harsh Enterprises"),
-            turn_id="business",
-        )
-        state.apply_deterministic_answers("D2C", turn_id="business-type")
-        self.assertEqual(state.pending_field(), "current_shipping_arrangement")
-        state.apply_deterministic_answers(
-            "Abhi main shipping nahi kar raha, shuru karne ki soch raha hoon.",
-            turn_id="new-shipper",
-            previous_agent_text="Abhi aap kaun sa courier ya provider use kar rahe hain?",
-        )
-        self.assertEqual(state.value("current_shipping_arrangement"), "No Current Arrangement")
-        self.assertEqual(state.pending_field(), "pickup_location")
-
-        state.apply_deterministic_answers(
-            "Noida 201305",
-            turn_id="pickup",
-            previous_agent_text="Apna pickup pincode bataiye.",
-        )
-        apply(
-            state,
-            "Noida 201305",
-            decision("pickup_location", "Noida", "Noida"),
-            turn_id="pickup",
-        )
-        self.assertEqual(state.value("pickup_pincode"), "201305")
-        self.assertFalse(state.is_handled("pickup_location"))
-
-        state.apply_deterministic_answers(
-            "Difficulty hai Pen India.",
-            turn_id="pan-india",
-            previous_agent_text="Delivery pincode bataiye.",
-        )
-        self.assertTrue(state.pan_india_requested)
-        self.assertEqual(state.pending_field(), "")
-        self.assertEqual(state.next_route_for_lookup(), {"pan_india": True})
-
-        apply(
-            state,
-            "1000",
-            decision("service", "1000", "1000"),
-            turn_id="quantity-service-noise",
-        )
-        self.assertFalse(state.is_handled("service"))
-
-        state.apply_deterministic_answers("slide rate bata do", turn_id="flat-asr")
-        self.assertEqual(state.requested_rate_type, "Flat")
-        self.assertTrue(state.flat_catalog_due())
-        state.mark_flat_catalog_presented()
-        state.apply_deterministic_answers("blood rate bata do", turn_id="flat-repeat")
-        self.assertFalse(state.flat_catalog_due())
-        state.apply_deterministic_answers(
-            "flat rate ya flat channel ke option hain?",
-            turn_id="flat-zonal-asr",
-        )
-        self.assertEqual(state.requested_rate_type, "Flat Zonal")
-        self.assertTrue(state.flat_zonal_catalog_due())
-
     def test_call_1627_contextual_bhojpuri_17_asr_authorizes_flat_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("shipping rates", turn_id="rates")
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         state.apply_deterministic_answers(
             "Bhojpuri 17",
@@ -4430,7 +3936,7 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(semantic, [])
         self.assertFalse(state.move_forward_question_due)
         self.assertFalse(state.unsatisfied_resolution_due)
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
 
         state.primary_rate_amount = 31.15
         self.assertIn("Rs 31.15", state.guidance())
@@ -4726,6 +4232,7 @@ class TestGatedConversationState(unittest.TestCase):
                 "business_type": "D2C",
                 "current_shipping_arrangement": "Shipping Aggregator",
                 "current_provider_name": "Shiprocket",
+                "current_problem": "RTO follow-up",
             }
         )
 
@@ -4975,11 +4482,11 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertEqual(state.pending_field(), "")
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
         self.assertEqual(state.next_route_for_lookup(), {"pan_india": True})
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
         self.assertFalse(state.verified_rate_presented())
         self.assertFalse(state.move_forward_question_due)
 
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertEqual(state.pending_field(), "business_type")
         state.seed_context(
             {
@@ -5171,7 +4678,7 @@ class TestGatedConversationState(unittest.TestCase):
         state.apply_deterministic_answers("ji", turn_id="consent")
         state.apply_deterministic_answers("rates chahiye", turn_id="intent")
         state.mark_route_zone_verified("C", starting_presented=True)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertEqual(state.pending_field(), "business_name")
 
         state.apply_deterministic_answers(
@@ -5620,8 +5127,49 @@ class TestGatedConversationState(unittest.TestCase):
             previous_agent_text="Kya aap ShipKia ke saath aage badhna chahte hain?",
         )
         self.assertEqual(no_state.move_forward_decision, "No")
-        self.assertTrue(no_state.polite_close_due)
+        self.assertTrue(no_state.onboarding_decline_reason_due)
+        self.assertFalse(no_state.polite_close_due)
         self.assertFalse(no_state.onboarding_link_due)
+
+        no_state.apply_deterministic_answers(
+            "Abhi rate budget se zyada hai.",
+            turn_id="no-reason",
+            previous_agent_text="Abhi onboarding na karne ka main reason kya hai?",
+        )
+        self.assertFalse(no_state.onboarding_decline_reason_due)
+        self.assertTrue(no_state.better_plan_close_due)
+        self.assertIn("rate budget se zyada", no_state.guidance())
+
+    def test_v7_no_thank_you_after_rate_followup_advances_to_onboarding_question(self):
+        state = self._v6_ready_for_ending()
+        state.move_forward_question_due = False
+        state.post_rate_followup_active = True
+
+        transitions = state.apply_deterministic_answers(
+            "Nahin. Thank you.",
+            turn_id="followup-done",
+            previous_agent_text="Kya aap kuch aur jaanna chahenge?",
+        )
+
+        self.assertFalse(state.polite_close_due)
+        self.assertTrue(state.move_forward_question_due)
+        self.assertTrue(any(item["event"] == "post_information_completed" for item in transitions))
+        self.assertIn("aage badhna chahte", state.guidance())
+
+    def test_v7_bare_thank_you_after_rate_followup_does_not_speak_early_farewell(self):
+        state = self._v6_ready_for_ending()
+        state.move_forward_question_due = False
+        state.post_rate_followup_active = True
+
+        transitions = state.apply_deterministic_answers(
+            "thank you",
+            turn_id="followup-done",
+            previous_agent_text="Kya aap kisi provider ka rate jaanna chahte hain?",
+        )
+
+        self.assertFalse(state.polite_close_due)
+        self.assertTrue(state.move_forward_question_due)
+        self.assertTrue(any(item["event"] == "post_information_completed" for item in transitions))
 
     def test_v6_positive_rate_comment_never_implies_onboarding(self):
         state = self._v6_ready_for_ending()
@@ -5755,11 +5303,11 @@ class TestGatedConversationState(unittest.TestCase):
         self.assertFalse(state.is_handled("monthly_shipments"))
         self.assertEqual(state.pending_field(), "")
         self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        self.assertIn("lookup_pincode_serviceability", state.guidance())
+        self.assertIn("lookup_shipkia_route_rate", state.guidance())
         self.assertFalse(state.verified_rate_presented())
 
         state.mark_route_zone_verified("C", starting_presented=True)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertTrue(state.verified_rate_presented())
         self.assertEqual(state.pending_field(), "monthly_shipments")
 
@@ -5791,7 +5339,7 @@ class TestGatedConversationState(unittest.TestCase):
             }
         )
         state.mark_route_zone_verified("C", starting_presented=True)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertEqual(state.pending_field(), "monthly_shipments")
 
         state.apply_deterministic_answers(
@@ -5924,7 +5472,7 @@ class TestSemanticAnswerGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("business_name", field_enum)
         self.assertIn("conversation_consent", field_enum)
         self.assertIn("service", field_enum)
-        self.assertNotIn("pickup_pincode", field_enum)
+        self.assertNotIn("zone", field_enum)
         self.assertNotIn("dead_weight", field_enum)
         disposition_enum = (
             SemanticAnswerGuard.RESPONSE_SCHEMA["properties"]["decisions"]["items"]["properties"]

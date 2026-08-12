@@ -32,8 +32,8 @@ try:
     from conversation_state import (
         GatedConversationState,
         OPTIONAL_QUALIFICATION_FIELDS,
-        PINCODE_FIELDS,
         STATE_MANAGED_RATE_FIELDS,
+        SUPPORTED_FIELDS,
         SemanticAnswerGuard,
         V6ConversationState,
         is_anything_else_no_answer,
@@ -43,8 +43,8 @@ except ModuleNotFoundError:  # Package imports used by the unit-test runner.
     from .conversation_state import (
         GatedConversationState,
         OPTIONAL_QUALIFICATION_FIELDS,
-        PINCODE_FIELDS,
         STATE_MANAGED_RATE_FIELDS,
+        SUPPORTED_FIELDS,
         SemanticAnswerGuard,
         V6ConversationState,
         is_anything_else_no_answer,
@@ -71,14 +71,14 @@ ALLOWED_TOOLS = {
     "record_shipkia_call_progress",
     "create_shipkia_followup",
     "finalize_shipkia_call_outcome",
-    "lookup_pincode_serviceability",
+    "lookup_shipkia_route_rate",
     "get_shipkia_starting_rate",
     "get_shipkia_flat_rates",
     "get_shipkia_flat_zonal_rates",
     "calculate_shipkia_rate",
 }
 PRICING_TOOLS = {
-    "lookup_pincode_serviceability",
+    "lookup_shipkia_route_rate",
     "get_shipkia_starting_rate",
     "get_shipkia_flat_rates",
     "get_shipkia_flat_zonal_rates",
@@ -193,36 +193,6 @@ _RATE_CONTROL_PROPERTIES = {
             "This controls only the voice response and is never forwarded to pricing."
         ),
     },
-    "pickup_location_changed": {
-        "type": "boolean",
-        "description": (
-            "Set true when the customer changes the pickup city or location but has not supplied "
-            "its new 6-digit pincode. The voice worker will stop reuse of the old pickup pincode."
-        ),
-    },
-    "delivery_location_changed": {
-        "type": "boolean",
-        "description": (
-            "Set true when the customer changes the delivery city or location but has not supplied "
-            "its new 6-digit pincode. The voice worker will stop reuse of the old delivery pincode."
-        ),
-    },
-    "pickup_pincode_status": {
-        "type": "string",
-        "enum": ["Unavailable"],
-        "description": (
-            "Worker-controlled state used only after the customer was asked for the pickup pincode "
-            "and explicitly said it is unavailable."
-        ),
-    },
-    "delivery_pincode_status": {
-        "type": "string",
-        "enum": ["Unavailable"],
-        "description": (
-            "Worker-controlled state used only after the customer was asked for the delivery "
-            "pincode and explicitly said it is unavailable."
-        ),
-    },
     "monthly_shipment_volume": {
         "type": "number",
         "description": (
@@ -253,8 +223,6 @@ _RATE_REQUEST_ONLY_ARGUMENTS = frozenset(
         "rate_request_type",
         "normal_rates_explicitly_requested",
         "flat_response_scope",
-        "pickup_location_changed",
-        "delivery_location_changed",
         "monthly_shipment_volume",
     }
 )
@@ -278,6 +246,8 @@ _PAYMENT_MODE_SERVICE_ALIASES = {
     "dona",
     "दोनों",
     "दोनो",
+    "à¤¦à¥‹à¤¨à¥‹à¤‚",
+    "à¤¦à¥‹à¤¨à¥‹",
 }
 _PROVIDER_ARRANGEMENTS = {"direct courier", "shipping aggregator"}
 _REFUSAL_VALUES = {
@@ -306,8 +276,6 @@ _RATE_FIELD_LABELS = {
     "current_provider_name": "current courier or aggregator name",
     "current_shipping_rate": "current comparable shipping rate",
     "current_problem": "main problem with the current shipping arrangement",
-    "pickup_pincode": "6-digit pickup pincode",
-    "delivery_pincode": "6-digit delivery pincode",
     "pickup_location": "pickup city or locality",
     "delivery_location": "delivery city or locality",
     "dead_weight": "shipment weight",
@@ -522,7 +490,7 @@ def _verified_pricing_customer_response(
                     f"Rs {float(additional.get('total')):.2f}"
                 )
             return "ShipKia ke E-Kart Express Flat-Zonal rates: " + "; ".join(rendered) + suffix + ". GST included."
-    if tool_name in {"lookup_pincode_serviceability", "get_shipkia_starting_rate"}:
+    if tool_name in {"lookup_shipkia_route_rate", "get_shipkia_starting_rate"}:
         amount = result.get("amount")
         zone = str(result.get("zone") or "").strip()
         options = [item for item in result.get("starting_rate_options", []) if isinstance(item, dict)]
@@ -580,7 +548,7 @@ def _model_led_tool_payload(
     payload = {key: item for key, item in value.items() if key not in _RUNTIME_CONVERSATION_KEYS}
     factual_value = value
     if (
-        tool_name in {"lookup_pincode_serviceability", "get_shipkia_starting_rate"}
+        tool_name in {"lookup_shipkia_route_rate", "get_shipkia_starting_rate"}
         and not str(value.get("zone") or "").strip()
         and conversation_state is not None
         and str(conversation_state.value("zone") or "").strip()
@@ -595,7 +563,43 @@ def _model_led_tool_payload(
     if customer_response:
         payload["customer_response"] = customer_response
         payload["rate_source"] = "knowledge_base_current_call"
+        payload["response_obligation"] = "speak_verified_customer_response_once"
+    if tool_name == "lookup_shipkia_route_rate" and customer_response:
+        return {
+            key: payload[key]
+            for key in (
+                "status",
+                "response_type",
+                "pickup_location",
+                "delivery_location",
+                "zone",
+                "amount",
+                "currency",
+                "gst_inclusive",
+                "customer_response",
+                "rate_source",
+                "response_obligation",
+            )
+            if key in payload
+        }
     return payload
+
+
+_ONE_TIME_OPENING_RE = re.compile(
+    r"\nONE-TIME OPENING — REMOVE AFTER CONSENT\n.*?"
+    r"(?=\nONGOING SALES FLOW — ACTIVE AFTER CONSENT\n)",
+    re.DOTALL,
+)
+
+
+def _prompt_for_call_phase(
+    base_prompt: str,
+    conversation_state: GatedConversationState,
+) -> str:
+    """Remove the one-time opening script after consent is accepted."""
+    if conversation_state.value("conversation_consent") != "Accepted":
+        return base_prompt
+    return _ONE_TIME_OPENING_RE.sub("\n", base_prompt)
 
 
 def _normalized_text(value: object) -> str:
@@ -603,7 +607,7 @@ def _normalized_text(value: object) -> str:
 
 
 _SPOKEN_CURRENCY_AMOUNT_RE = re.compile(
-    r"(?:₹|rs\.?|rupees?|inr)\s*([\d,]+(?:\.\d+)?)",
+    r"(?:â‚¹|rs\.?|rupees?|inr)\s*([\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 
@@ -633,6 +637,11 @@ def _shipkia_rate_claim_amounts(value: object) -> list[float]:
     if not is_shipkia_claim:
         return []
     amounts: list[float] = []
+    for match in re.finditer(r"\u20b9\s*([\d,]+(?:\.\d+)?)", text):
+        try:
+            amounts.append(float(match.group(1).replace(",", "")))
+        except (TypeError, ValueError):
+            continue
     for match in _SPOKEN_CURRENCY_AMOUNT_RE.finditer(text):
         local_context = clean[max(0, match.start() - 35) : match.end() + 20]
         if re.search(r"\b(?:order|cod)\s*(?:value|amount)\b", local_context):
@@ -696,18 +705,13 @@ def _provider_rate_response_complete(
     return True
 
 
-def _assistant_pincode_claims(value: object) -> list[str]:
-    """Return six-digit route claims from an assistant transcript."""
-    return list(dict.fromkeys(re.findall(r"\b\d{6}\b", str(value or ""))))
-
-
 def _assistant_single_zone_claims(value: object) -> list[str]:
     """Return singular Zone A-F claims, excluding Flat-Zonal ranges like A-B."""
     return list(
         dict.fromkeys(
             match.group(1).upper()
             for match in re.finditer(
-                r"\bzone\s*([a-f])\b(?!\s*[-–]\s*[a-f])",
+                r"\bzone\s*([a-f])\b(?!\s*[-â€“]\s*[a-f])",
                 str(value or ""),
                 re.IGNORECASE,
             )
@@ -831,7 +835,7 @@ _OPENING_ACTIONABLE_SHORT_RE = re.compile(
     r"\b(?:hello|hallo|halo|helo|hi|hey|haan|han|yes|yeah|yep|ji|ok|okay|theek|bataiye|bataye|boliye|no|nahi|nahin|"
     r"rate|rates|onboarding|service|services|shipkia|courier|wait|hold|ruko|ruk|busy|"
     r"later|baad|minute|interested|wrong|number)\b|"
-    r"(?:हां|हा|जी|बताइए|बोलिए|ठीक|नहीं|रेट|सर्विस|रुकिए|बाद|मिनट)",
+    r"(?:à¤¹à¤¾à¤‚|à¤¹à¤¾|à¤œà¥€|à¤¬à¤¤à¤¾à¤‡à¤|à¤¬à¥‹à¤²à¤¿à¤|à¤ à¥€à¤•|à¤¨à¤¹à¥€à¤‚|à¤°à¥‡à¤Ÿ|à¤¸à¤°à¥à¤µà¤¿à¤¸|à¤°à¥à¤•à¤¿à¤|à¤¬à¤¾à¤¦|à¤®à¤¿à¤¨à¤Ÿ)",
     re.IGNORECASE,
 )
 _AGENT_OPENING_RE = re.compile(
@@ -856,7 +860,7 @@ _ASR_NOISE_NEGATIVE_RE = re.compile(
 )
 _ASR_ACTIONABLE_RE = re.compile(
     r"\b(?:rate|rates|pricing|onboarding|courier|shipment|shipping|service|services|"
-    r"business|company|brand|pickup|delivery|pincode|weight|cod|prepaid|flat|zone|"
+    r"business|company|brand|pickup|delivery|weight|cod|prepaid|flat|zone|"
     r"problem|issue|manager|support|yes|haan|han|ji|bata|batao|chahiye|want)\b|"
     r"\u0930\u0947\u091f|\u0915\u0942\u0930\u093f\u092f\u0930|\u0936\u093f\u092a\u092e\u0947\u0902\u091f|\u0939\u093e\u0901|\u0939\u093e\u0902|\u091a\u093e\u0939\u093f\u090f",
     re.IGNORECASE,
@@ -907,7 +911,7 @@ def _is_opening_noise_turn(
     """Reject a short non-actionable ASR fragment while consent is pending."""
     if conversation_state.pending_field() != "conversation_consent":
         return False
-    clean = _normalized_text(customer_text).strip(" .,!?।")
+    clean = _normalized_text(customer_text).strip(" .,!?à¥¤")
     if not clean or len(clean.split()) > 2:
         return False
     return not bool(_OPENING_ACTIONABLE_SHORT_RE.search(clean))
@@ -977,14 +981,14 @@ _HANDLED_QUESTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        "pickup_pincode",
+        "pickup_location",
         re.compile(
             r"\b(?:pickup|pick\s*up|origin|kahaan\s+se|kahan\s+se|kaha\s+se|"
             r"shipping\s+kahaan\s+se|shipping\s+kahan\s+se)\b"
         ),
     ),
     (
-        "delivery_pincode",
+        "delivery_location",
         re.compile(
             r"\b(?:delivery|drop|destination|kahaan\s+tak|kahan\s+tak|kaha\s+tak)\b"
         ),
@@ -1058,9 +1062,9 @@ def _assistant_reasked_handled_field(
     def must_not_reask(field: str) -> bool:
         if field == pending:
             return False
-        if field == "pickup_pincode":
+        if field == "pickup_location":
             return conversation_state.route_endpoint_handled("pickup")
-        if field == "delivery_pincode":
+        if field == "delivery_location":
             return conversation_state.route_endpoint_handled("delivery")
         if field in {"business_name", "business_type"} and conversation_state.company_details_ended_by:
             return True
@@ -1129,12 +1133,7 @@ def _flow_violation_requires_correction(
 
 
 def _question_answers_pending(pending: str, asked_fields: list[str]) -> bool:
-    """Treat city/locality and legacy pincode route labels as one endpoint."""
-    equivalent = {
-        "pickup_location": "pickup_pincode",
-        "delivery_location": "delivery_pincode",
-    }
-    return pending in asked_fields or equivalent.get(pending, "") in asked_fields
+    return pending in asked_fields
 
 
 def _flat_zonal_catalog_response_complete(
@@ -1156,8 +1155,8 @@ def _flat_zonal_catalog_response_complete(
     return bool(
         len(expected) == 3
         and expected.issubset(claimed)
-        and re.search(r"\ba\s*[-–]\s*b\b", clean)
-        and re.search(r"\bc\s*[-–]\s*f\b", clean)
+        and re.search(r"\ba\s*[-â€“]\s*b\b", clean)
+        and re.search(r"\bc\s*[-â€“]\s*f\b", clean)
         and re.search(r"\badditional\b|\bextra\b|\badd-on\b", clean)
     )
 
@@ -1562,6 +1561,17 @@ def _authorized_controlled_reply_tools(
     conversation_state: GatedConversationState,
 ) -> list[str]:
     """Return the pricing tool authorized by settled V6 state."""
+    if (
+        conversation_state.model_led_flow
+        and not conversation_state.pan_india_requested
+        and not conversation_state.verified_rate_presented()
+        and not conversation_state.verified_starting_options
+        and not conversation_state.onboarding_link_presented
+        and conversation_state.next_discovery_field()
+    ):
+        # Runtime owns pricing eligibility while Gemini owns the wording. An
+        # early route must not split one discovery flow into competing paths.
+        return []
     if conversation_state.flat_catalog_due():
         return ["get_shipkia_flat_rates"]
     if conversation_state.flat_zonal_catalog_due():
@@ -1569,7 +1579,7 @@ def _authorized_controlled_reply_tools(
     if conversation_state.provider_rate_lookup_due():
         return ["get_shipkia_starting_rate"]
     if conversation_state.pricing_mode() == "route_starting_pending":
-        return ["lookup_pincode_serviceability"]
+        return ["lookup_shipkia_route_rate"]
     if (
         conversation_state.starting_rate_due()
         or conversation_state.shadowfax_surface_rate_due
@@ -1603,19 +1613,11 @@ def _merge_remembered_rate_arguments(
         backend_argument_names | _RATE_LOCAL_ARGUMENTS
     ) - _RATE_REQUEST_ONLY_ARGUMENTS
 
-    for changed_field, pincode_field in (
-        ("pickup_location_changed", "pickup_pincode"),
-        ("delivery_location_changed", "delivery_pincode"),
-    ):
-        if current.get(changed_field) is True and not _has_value(current, pincode_field):
-            remembered.pop(pincode_field, None)
-            remembered.pop("zone", None)
-
     route_changed = any(
         field in current
         and _has_value(current, field)
         and remembered.get(field) != current[field]
-        for field in ("pickup_pincode", "delivery_pincode")
+        for field in ("pickup_location", "delivery_location")
     )
     if route_changed and "zone" not in current:
         remembered.pop("zone", None)
@@ -1807,21 +1809,6 @@ def _prepare_rate_arguments(
             },
         )
 
-    for field in ("pickup_pincode", "delivery_pincode"):
-        unavailable = (
-            _normalized_text(arguments.get(f"{field}_status")) == "unavailable"
-        )
-        if not _has_value(arguments, field) and not unavailable:
-            return (
-                None,
-                {},
-                _rate_gate_response(
-                    "shipment_details_required",
-                    field,
-                    f"The customer's {_RATE_FIELD_LABELS[field]} is not present in local call state.",
-                ),
-            )
-
     if not _has_value(arguments, "dead_weight"):
         return (
             None,
@@ -1833,19 +1820,17 @@ def _prepare_rate_arguments(
             ),
         )
 
-    for field in ("pickup_pincode", "delivery_pincode"):
-        if _has_value(arguments, field) and not re.fullmatch(
-            r"\d{6}", str(arguments[field]).strip()
-        ):
-            return (
-                None,
-                {},
-                _rate_gate_response(
-                    "shipment_details_required",
-                    field,
-                    f"A valid {_RATE_FIELD_LABELS[field]} is required.",
-                ),
-            )
+    zone = str(arguments.get("zone") or "").strip().upper()
+    if zone not in {"A", "B", "C", "D", "E", "F"}:
+        return (
+            None,
+            {},
+            _rate_gate_response(
+                "shipment_details_required",
+                "zone",
+                "A verified route zone is required before an exact calculation.",
+            ),
+        )
 
     try:
         if float(arguments["dead_weight"]) <= 0:
@@ -1947,9 +1932,6 @@ def _prepare_rate_arguments(
         for key, value in arguments.items()
         if key in backend_argument_names
     }
-    for field in ("pickup_pincode", "delivery_pincode"):
-        if _normalized_text(arguments.get(f"{field}_status")) == "unavailable":
-            forwarded.pop(field, None)
     payment_basis_reason = ""
     if payment_defaulted:
         payment_basis_reason = "payment_type_refused"
@@ -2167,8 +2149,8 @@ def _route_basis(arguments: dict[str, object]) -> dict[str, object]:
     return {
         key: copy.deepcopy(arguments[key])
         for key in (
-            "pickup_pincode",
-            "delivery_pincode",
+            "pickup_location",
+            "delivery_location",
             "dead_weight",
             "weight_unit",
             "payment_type",
@@ -2178,9 +2160,9 @@ def _route_basis(arguments: dict[str, object]) -> dict[str, object]:
 
 
 def _route_key(arguments: dict[str, object]) -> tuple[str, str] | None:
-    pickup = str(arguments.get("pickup_pincode") or "").strip()
-    delivery = str(arguments.get("delivery_pincode") or "").strip()
-    if not re.fullmatch(r"\d{6}", pickup) or not re.fullmatch(r"\d{6}", delivery):
+    pickup = str(arguments.get("pickup_location") or "").strip()
+    delivery = str(arguments.get("delivery_location") or "").strip()
+    if not pickup or not delivery:
         return None
     return pickup, delivery
 
@@ -2278,7 +2260,7 @@ def _voice_safe_customer_zone_result(
     return safe_result
 
 
-def _voice_safe_pincode_serviceability_result(
+def _voice_safe_route_rate_result(
     result: dict[str, Any],
     *,
     ask_monthly_shipment_quantity: bool = True,
@@ -2312,10 +2294,10 @@ def _voice_safe_pincode_serviceability_result(
         amount = float(starting_rate["amount"])
         pan_india = result.get("resolution_basis") == "pan_india_zone_a_starting_policy"
         pickup_label = str(
-            result.get("pickup_location") or result.get("pickup_pincode") or ""
+            result.get("pickup_location") or ""
         ).strip()
         delivery_label = str(
-            result.get("delivery_location") or result.get("delivery_pincode") or ""
+            result.get("delivery_location") or ""
         ).strip()
         route_label = (
             "Pan-India Zone A starting basis"
@@ -2359,8 +2341,6 @@ def _voice_safe_pincode_serviceability_result(
             "rate_card": starting_rate.get("rate_card"),
             "rate_scope": "starting_only",
             "resolution_basis": result.get("resolution_basis"),
-            "pickup_pincode": result.get("pickup_pincode"),
-            "delivery_pincode": result.get("delivery_pincode"),
             "pickup_location": result.get("pickup_location"),
             "delivery_location": result.get("delivery_location"),
             "spoken_response_instruction": (
@@ -2477,8 +2457,7 @@ def _voice_safe_unknown_zone_result(
     safe_result.update(
         {
             "verified_starting_rate_available": bool(sortable_rates),
-            "pincodes_already_supplied": route_complete,
-            "pincode_unavailable_fallback": not route_complete,
+            "route_locations_supplied": route_complete,
             "eligible_rates_are_starting_only": True,
             "exact_route_rate_available": False,
             "route_basis": copy.deepcopy(route_basis or {}),
@@ -2500,7 +2479,7 @@ def _voice_safe_unknown_zone_result(
         if cheapest["starting_rate_breakdown"].get("amount_basis") == "gst_inclusive_total":
             if route_complete:
                 safe_result["message"] = (
-                    "Reply politely and directly in one short sentence. State the supplied pincode "
+                    "Reply politely and directly in one short sentence. State the supplied route, "
                     "route, weight/payment basis, exact service and only verified_starting_rate as a "
                     "GST-inclusive 'starting from' amount. Do not explain zones or route validation, "
                     "list alternatives, recap, or ask a follow-up question."
@@ -2509,8 +2488,8 @@ def _voice_safe_unknown_zone_result(
                 safe_result["message"] = (
                     "Reply politely and directly with only the single lowest verified GST-inclusive "
                     "starting rate for the confirmed weight/payment basis. Clearly say the exact "
-                    "rate depends on the pickup/delivery pincode and approved zone. Do not imply a "
-                    "pincode was supplied, list alternatives, or estimate another amount."
+                    "rate depends on the confirmed route and approved zone. Do not list alternatives "
+                    "or estimate another amount."
                 )
         else:
             safe_result["message"] = (
@@ -2523,13 +2502,12 @@ def _voice_safe_unknown_zone_result(
     else:
         safe_result["message"] = (
             "No verified GST-inclusive starting total is available. Do not quote or estimate an "
-            "amount. Do not ask again for a pincode that the customer explicitly marked "
-            "unavailable."
+            "amount. Ask only for a missing city/location when the route is incomplete."
             if not route_complete
             else (
                 "No verified GST-inclusive starting total is available for this route result. "
-                "Do not quote or estimate an amount. Refer to the supplied pincode route without "
-                "mentioning zones or mapping, and do not ask for either pincode again."
+                "Do not quote or estimate an amount. Refer to the supplied route without "
+                "mentioning internal zone mapping."
             )
         )
 
@@ -3245,7 +3223,7 @@ def make_mcp_forwarder(
             )
 
         if (
-            tool_name == "lookup_pincode_serviceability"
+            tool_name == "lookup_shipkia_route_rate"
             and conversation_state is not None
         ):
             pending = conversation_state.pending_field()
@@ -3311,7 +3289,7 @@ def make_mcp_forwarder(
                 # authoritative active route for both controlled and model-led flows,
                 # including later rate follow-ups after its first lookup was resolved.
                 # This also prevents a later model tool call from dropping the
-                # route or replacing it with guessed pincodes.
+                # route or replacing it with guessed locations.
                 arguments = dict(trusted_route)
                 arguments.setdefault("pan_india", conversation_state.pan_india_requested)
             else:
@@ -3533,8 +3511,8 @@ def make_mcp_forwarder(
                                 "route_retained": bool(trusted_route),
                                 "route": trusted_route,
                                 "spoken_response_instruction": (
-                                    "Do not ask for weight, payment mode, pincode, or permission. "
-                                    "Call lookup_pincode_serviceability now with the retained city "
+                                    "Do not ask for weight, payment mode, or permission. "
+                                    "Call lookup_shipkia_route_rate now with the retained city "
                                     "route and speak its verified 500 g Forward starting result."
                                 ),
                             }
@@ -3579,7 +3557,7 @@ def make_mcp_forwarder(
                                 if pricing_mode == "zone_starting"
                                 else (
                                     "Briefly acknowledge the customer's rate request, then ask only "
-                                    f"for their {pending_label} again. Do not ask for a pincode, "
+                                    f"for their {pending_label} again. Do not ask for another route detail, "
                                     "weight, payment, service, or any later field. Do not claim a "
                                     "price was calculated."
                                 )
@@ -3732,7 +3710,7 @@ def make_mcp_forwarder(
         now = time.monotonic()
         cached = _TOOL_CACHE.get(key)
         if (
-            tool_name != "lookup_pincode_serviceability"
+            tool_name != "lookup_shipkia_route_rate"
             and cached
             and now - cached[0] < 15
         ):
@@ -3779,10 +3757,10 @@ def make_mcp_forwarder(
                     else:
                         result = parsed.get("result", {})
                     if (
-                        tool_name == "lookup_pincode_serviceability"
+                        tool_name == "lookup_shipkia_route_rate"
                         and isinstance(result, dict)
                     ):
-                        result = _voice_safe_pincode_serviceability_result(
+                        result = _voice_safe_route_rate_result(
                             result,
                             ask_monthly_shipment_quantity=(
                                 conversation_state is None
@@ -3814,7 +3792,7 @@ def make_mcp_forwarder(
                                     result["spoken_response_instruction"] = (
                                         f"{result.get('spoken_response_instruction', '')} The customer requested "
                                         f"{remaining_routes} more route rate in the same turn. After speaking this "
-                                        "route's amount, call lookup_pincode_serviceability again immediately for "
+                                        "route's amount, call lookup_shipkia_route_rate again immediately for "
                                         "the next queued route. Do not ask for locations again and do not say that "
                                         "rates are unavailable."
                                     ).strip()
@@ -4058,7 +4036,7 @@ def make_mcp_forwarder(
                     if (
                         conversation_state is not None
                         and tool_name in {
-                            "lookup_pincode_serviceability",
+                            "lookup_shipkia_route_rate",
                             "calculate_shipkia_rate",
                             "get_shipkia_flat_rates",
                             "get_shipkia_flat_zonal_rates",
@@ -4086,7 +4064,7 @@ def make_mcp_forwarder(
                         conversation_state is not None
                         and tool_name
                         in {
-                            "lookup_pincode_serviceability",
+                            "lookup_shipkia_route_rate",
                             "calculate_shipkia_rate",
                             "get_shipkia_flat_rates",
                             "get_shipkia_flat_zonal_rates",
@@ -4115,7 +4093,7 @@ def make_mcp_forwarder(
                         summary = ""
                         if isinstance(result, dict):
                             if tool_name in {
-                                "lookup_pincode_serviceability",
+                                "lookup_shipkia_route_rate",
                                 "get_shipkia_starting_rate",
                             }:
                                 summary = compact_json(
@@ -4131,8 +4109,6 @@ def make_mcp_forwarder(
                                         "gst_inclusive": result.get("gst_inclusive"),
                                         "pickup_location": result.get("pickup_location"),
                                         "delivery_location": result.get("delivery_location"),
-                                        "pickup_pincode": result.get("pickup_pincode"),
-                                        "delivery_pincode": result.get("delivery_pincode"),
                                         "rate_card_version": (
                                             result.get("rate_card") or {}
                                         ).get("version")
@@ -4230,7 +4206,7 @@ async def fetch_tools(
             ),
         }
         backend_argument_names = frozenset()
-        if tool_name == "lookup_pincode_serviceability":
+        if tool_name == "lookup_shipkia_route_rate":
             lookup_parameters = copy.deepcopy(raw_schema["parameters"])
             lookup_parameters.setdefault("type", "object")
             lookup_parameters.setdefault("properties", {})
@@ -4250,11 +4226,6 @@ async def fetch_tools(
                     },
                 }
             )
-            if conversation_state is not None:
-                # V6 resolves its starting-rate zone from customer-stated
-                # locations and never exposes speculative pincode inputs.
-                lookup_parameters["properties"].pop("pickup_pincode", None)
-                lookup_parameters["properties"].pop("delivery_pincode", None)
             lookup_parameters["required"] = []
             raw_schema["parameters"] = lookup_parameters
             if conversation_state is not None:
@@ -4266,16 +4237,6 @@ async def fetch_tools(
             raw_schema["parameters"], backend_argument_names = _augment_rate_tool_schema(
                 raw_schema["parameters"]
             )
-            if conversation_state is not None:
-                properties = raw_schema["parameters"].setdefault("properties", {})
-                properties.pop("pickup_pincode", None)
-                properties.pop("delivery_pincode", None)
-                required = raw_schema["parameters"].get("required", [])
-                raw_schema["parameters"]["required"] = [
-                    field
-                    for field in required
-                    if field not in {"pickup_pincode", "delivery_pincode"}
-                ]
             if conversation_state is not None:
                 raw_schema["description"] = (
                     "Calculate a shipment-specific verified rate from customer-confirmed details. "
@@ -4343,6 +4304,9 @@ def _v6_runtime_state_context(
     customer facts plus pricing and close authorizations.
     """
     full_snapshot = conversation_state.snapshot()
+    handled_fields = sorted(
+        field for field in SUPPORTED_FIELDS if conversation_state.is_handled(field)
+    )
     always_present = {
         "pricing_mode",
         "requested_rate_type",
@@ -4359,6 +4323,17 @@ def _v6_runtime_state_context(
         if key not in conversation_control_keys
         and (key in always_present or value not in (None, "", False, 0, [], {}))
     }
+    snapshot["handled_fields"] = handled_fields
+    snapshot["do_not_ask_fields"] = handled_fields
+    snapshot["verified_rate_presented"] = conversation_state.verified_rate_presented()
+    snapshot["call_phase"] = (
+        "opening"
+        if conversation_state.value("conversation_consent") != "Accepted"
+        else "ongoing"
+    )
+    snapshot["opening_allowed"] = (
+        conversation_state.value("conversation_consent") != "Accepted"
+    )
     language = "English" if response_language == "English" else "Hinglish (Latin script)"
     return (
         "\n\n## Live call state (worker-owned data; replaces the previous snapshot)\n"
@@ -4414,7 +4389,9 @@ class ShipKiaAssistant(Agent):
         self._tools_by_name = dict(zip(available_tool_names, tools, strict=True))
         initial_tools = self._active_tools()
         self._last_active_tool_names = self._active_tool_names()
-        initial_instructions = instructions + _v6_runtime_state_context(
+        initial_instructions = _prompt_for_call_phase(
+            instructions, conversation_state
+        ) + _v6_runtime_state_context(
             conversation_state,
             self._response_language,
         )
@@ -4437,7 +4414,9 @@ class ShipKiaAssistant(Agent):
             self._conversation_state,
             self._response_language,
         )
-        refreshed_instructions = self._base_instructions + state_context
+        refreshed_instructions = _prompt_for_call_phase(
+            self._base_instructions, self._conversation_state
+        ) + state_context
         if refreshed_instructions != self._last_synced_instructions:
             await self.update_instructions(refreshed_instructions)
             self._last_synced_instructions = refreshed_instructions
@@ -4880,22 +4859,6 @@ async def entrypoint(ctx: JobContext) -> None:
                     for amount in claimed_amounts
                 )
             )
-            claimed_pincodes = _assistant_pincode_claims(agent_text)
-            confirmed_pincodes = {
-                str(conversation_state.value(field) or "")
-                for field in PINCODE_FIELDS
-                if conversation_state.is_confirmed(field)
-            }
-            customer_spoken_pincodes = {
-                pincode
-                for turn in runtime.turns
-                if turn.get("role") == "CUSTOMER"
-                for pincode in re.findall(r"\b\d{6}\b", str(turn.get("text") or ""))
-            }
-            authorized_pincodes = confirmed_pincodes | customer_spoken_pincodes
-            unverified_pincodes = [
-                value for value in claimed_pincodes if value not in authorized_pincodes
-            ]
             claimed_zones = _assistant_single_zone_claims(agent_text)
             confirmed_zone = (
                 str(conversation_state.value("zone") or "").upper()
@@ -4909,7 +4872,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 owed_rate_presented
                 and not flow_violation
                 and not unverified_amounts
-                and not unverified_pincodes
                 and not unverified_zones
             ):
                 conversation_state.mark_owed_rate_presented()
@@ -4917,16 +4879,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.provider_rates_answer_due
                 and not flow_violation
                 and not unverified_amounts
-                and not unverified_pincodes
                 and not unverified_zones
                 and _provider_rate_response_complete(agent_text, conversation_state)
             ):
                 conversation_state.mark_provider_rates_presented()
-            if unverified_amounts or unverified_pincodes or unverified_zones:
+            if unverified_amounts or unverified_zones:
                 logger.error(
-                    "Blocked unverified ShipKia output amounts=%s pincodes=%s zones=%s text=%s",
+                    "Blocked unverified ShipKia output amounts=%s zones=%s text=%s",
                     claimed_amounts,
-                    unverified_pincodes,
                     unverified_zones,
                     agent_text[:300],
                 )
@@ -4948,8 +4908,6 @@ async def entrypoint(ctx: JobContext) -> None:
                             "unverified_pricing_output_blocked",
                             status="blocked",
                             claimed_amounts=claimed_amounts,
-                            claimed_pincodes=claimed_pincodes,
-                            unverified_pincodes=unverified_pincodes,
                             claimed_zones=claimed_zones,
                             unverified_zones=unverified_zones,
                             agent_text=agent_text[:500],
@@ -4984,14 +4942,6 @@ async def entrypoint(ctx: JobContext) -> None:
                                 "Say the verified rate will be shared after the required details "
                                 "are checked; do not add another amount."
                             )
-                        if unverified_pincodes:
-                            route_correction = (
-                                "Immediately correct the previous route in one short sentence. "
-                                f"The only customer-confirmed pincodes are {sorted(authorized_pincodes)}; "
-                                "do not repeat any other pincode. "
-                            )
-                        else:
-                            route_correction = ""
                         amount_correction = (
                             "Present only the exact worker-verified provider options supplied "
                             "in the next instruction. "
@@ -5015,8 +4965,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         )
                         session.generate_reply(
                             instructions=(
-                                route_correction
-                                + zone_correction
+                                zone_correction
                                 + amount_correction
                                 + next_step
                             )
@@ -5030,7 +4979,7 @@ async def entrypoint(ctx: JobContext) -> None:
             if (
                 flow_violation
                 and not correction_active
-                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and not (unverified_amounts or unverified_zones)
                 and (
                     response_turn_epoch not in controlled_information_reply_epochs
                     or flow_violation.startswith(
@@ -5239,7 +5188,7 @@ async def entrypoint(ctx: JobContext) -> None:
                         elif flow_violation == "contradicted_verified_route":
                             correction_direction = (
                                 "The route and zone are already worker-verified. Do not say they "
-                                "are unverified, call a pricing tool, or ask for a city or pincode "
+                                "are unverified, call a pricing tool, or ask for a city "
                                 "again. Follow only this current authoritative action: "
                                 + conversation_state.guidance()
                             )
@@ -5307,13 +5256,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.mark_qualification_bridge_presented()
             if (
                 not flow_violation
-                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and not (unverified_amounts or unverified_zones)
                 and _AGENT_ANYTHING_ELSE_RE.search(normalized_agent_text)
             ):
                 conversation_state.mark_anything_else_question_presented()
             if (
                 not flow_violation
-                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and not (unverified_amounts or unverified_zones)
                 and (
                     "auth dot shipkia dot com slash signup" in normalized_agent_text
                     or "auth.shipkia.com/signup" in normalized_agent_text
@@ -5333,16 +5282,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 conversation_state.mark_polite_close_presented()
             if (
                 not flow_violation
-                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and not (unverified_amounts or unverified_zones)
                 and "better plan" in normalized_agent_text
                 and "team" in normalized_agent_text
-                and "discuss" in normalized_agent_text
-                and "thank you for calling shipkia" in normalized_agent_text
+                and ("discuss" in normalized_agent_text or "review" in normalized_agent_text)
+                and _AGENT_POLITE_FAREWELL_RE.search(normalized_agent_text)
             ):
                 conversation_state.mark_better_plan_close_presented()
             if (
                 not flow_violation
-                and not (unverified_amounts or unverified_pincodes or unverified_zones)
+                and not (unverified_amounts or unverified_zones)
                 and conversation_state.unsatisfied_resolution_due
                 and "team" in normalized_agent_text
                 and "discuss" in normalized_agent_text

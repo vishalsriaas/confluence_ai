@@ -16,7 +16,6 @@ SHIPKIA_CRM_FIELDS = {
     "shipkia_business_type",
     "shipkia_business_platform",
     "shipkia_monthly_shipments",
-    "shipkia_pickup_pincode",
     "shipkia_delivery_zones",
     "shipkia_cod_required",
     "shipkia_current_provider_type",
@@ -283,7 +282,7 @@ def finalize_shipkia_call_outcome(
     return result
 
 
-def lookup_pincode_serviceability(
+def lookup_shipkia_route_rate(
     arguments: dict, *, task_id: str | None = None, agent: str | None = None
 ) -> dict:
     from confluence_ai.services.shipkia_rates import get_starting_rate
@@ -302,7 +301,7 @@ def lookup_pincode_serviceability(
                     "message": "The route resolved, but its verified starting rate is unavailable.",
                 }
             )
-    _record("lookup_pincode_serviceability", arguments, result, task_id=task_id, agent=agent)
+    _record("lookup_shipkia_route_rate", arguments, result, task_id=task_id, agent=agent)
     return result
 
 
@@ -391,7 +390,7 @@ def execute_shipkia_tool(
         "record_shipkia_call_progress": record_shipkia_call_progress,
         "create_shipkia_followup": create_shipkia_followup,
         "finalize_shipkia_call_outcome": finalize_shipkia_call_outcome,
-        "lookup_pincode_serviceability": lookup_pincode_serviceability,
+        "lookup_shipkia_route_rate": lookup_shipkia_route_rate,
         "get_shipkia_starting_rate": get_shipkia_starting_rate,
         "get_shipkia_flat_rates": get_shipkia_flat_rates,
         "get_shipkia_flat_zonal_rates": get_shipkia_flat_zonal_rates,

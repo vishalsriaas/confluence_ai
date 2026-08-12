@@ -19,11 +19,12 @@ from livekit_agent.agent import (
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
+    _prompt_for_call_phase,
     _rate_gate_response,
     _response_language_for_turn,
-    _assistant_pincode_claims,
     _assistant_single_zone_claims,
     _shipkia_rate_claim_amounts,
+    _v6_runtime_state_context,
     _shipkia_flow_response_violation,
     _voice_flat_catalog_result,
     _voice_flat_zonal_catalog_result,
@@ -31,7 +32,7 @@ from livekit_agent.agent import (
     _flat_zonal_catalog_response_complete,
     _flow_violation_requires_correction,
     _voice_selected_flat_service_result,
-    _voice_safe_pincode_serviceability_result,
+    _voice_safe_route_rate_result,
     _voice_safe_unknown_zone_result,
     load_local_console_prompt,
     make_mcp_forwarder,
@@ -63,6 +64,95 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
+
+    def test_v7_one_time_opening_is_removed_after_consent(self):
+        prompt = (
+            "Core rules\n\nONE-TIME OPENING — REMOVE AFTER CONSENT\n"
+            "Namaste, main Harsh ShipKia se bol raha hoon.\n\n"
+            "ONGOING SALES FLOW — ACTIVE AFTER CONSENT\nContinue the active enquiry."
+        )
+        state = V6ConversationState()
+
+        self.assertIn("Namaste", _prompt_for_call_phase(prompt, state))
+
+        state.apply_decision(
+            field="conversation_consent",
+            disposition="answered",
+            value="Accepted",
+            evidence="bilkul",
+            confidence=1.0,
+            customer_text="bilkul",
+            turn_id="consent",
+        )
+        ongoing = _prompt_for_call_phase(prompt, state)
+
+        self.assertNotIn("Namaste", ongoing)
+        self.assertNotIn("ONE-TIME OPENING", ongoing)
+        self.assertIn("Continue the active enquiry", ongoing)
+
+    def test_v7_live_state_closes_opening_phase_after_consent(self):
+        state = V6ConversationState()
+        state.apply_decision(
+            field="conversation_consent",
+            disposition="answered",
+            value="Accepted",
+            evidence="bilkul",
+            confidence=1.0,
+            customer_text="bilkul",
+            turn_id="consent",
+        )
+
+        context = _v6_runtime_state_context(state, "Hinglish")
+
+        self.assertIn('"call_phase": "ongoing"', context)
+        self.assertIn('"opening_allowed": false', context)
+
+    def test_v7_early_route_cannot_authorize_price_before_short_discovery(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("Ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers(
+            "Delhi se Hyderabad ka rate batao", turn_id="route"
+        )
+
+        self.assertEqual(state.pricing_mode(), "pending")
+        self.assertEqual(state.pending_field(), "business_name")
+        self.assertEqual(_authorized_controlled_reply_tools(state), [])
+
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "Direct to customer",
+                "current_shipping_arrangement": "Own Arrangement",
+            }
+        )
+
+        self.assertEqual(state.pending_field(), "")
+        self.assertEqual(state.pricing_mode(), "route_starting_pending")
+        self.assertEqual(
+            _authorized_controlled_reply_tools(state),
+            ["lookup_shipkia_route_rate"],
+        )
+
+    def test_v7_live_state_marks_handled_topics_as_do_not_ask(self):
+        state = V6ConversationState()
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "monthly_shipments": 2000,
+            }
+        )
+
+        context = _v6_runtime_state_context(state, "Hinglish")
+
+        self.assertIn('"handled_fields": ["business_name", "monthly_shipments"]', context)
+        self.assertIn('"do_not_ask_fields": ["business_name", "monthly_shipments"]', context)
+        self.assertIn('"verified_rate_presented": false', context)
+
+    def test_actual_rupee_symbol_rate_claim_is_guarded(self):
+        self.assertEqual(
+            _shipkia_rate_claim_amounts("ShipKia ka rate ₹31 se shuru hota hai"),
+            [31.0],
+        )
 
     def test_business_model_question_must_use_plain_language(self):
         state = V6ConversationState()
@@ -1198,8 +1288,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             "current_shipping_arrangement": "Aap abhi kaunsa courier provider use karte hain?",
             "current_shipping_rate": "Aapka current shipping rate kitna hai?",
             "current_problem": "Shiprocket ke saath kya problem aa rahi hai?",
-            "pickup_pincode": "Aap shipping kahaan se karna chahte hain?",
-            "delivery_pincode": "Delivery ya drop location kahaan hai?",
+            "pickup_location": "Aap shipping kahaan se karna chahte hain?",
+            "delivery_location": "Delivery ya drop location kahaan hai?",
             "dead_weight": "Package ka weight kitna hai?",
             "payment_type": "Shipment Prepaid hai ya COD?",
             "monthly_shipments": "Aapki monthly shipments kitni hain?",
@@ -1366,7 +1456,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             ),
             [],
         )
-        self.assertEqual(_assistant_pincode_claims("Noida se 530001 ka rate"), ["530001"])
         self.assertEqual(_assistant_single_zone_claims("Ye Zone D route hai"), ["D"])
         self.assertEqual(_assistant_single_zone_claims("Zones A-B aur C-F"), [])
 
@@ -1378,7 +1467,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         runtime = Mock()
         runtime.expect_realtime_tool_reply = Mock()
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "authorization-test",
             runtime=runtime,
             conversation_state=state,
@@ -1405,7 +1494,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.seed_context({"business_name": "Acme"})
         state.apply_deterministic_answers("delivery Pan India hoti hai", turn_id="pan-india")
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "v6-pan-india-zone-a-test",
             conversation_state=state,
         )
@@ -1419,6 +1508,11 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["rate_source"], "knowledge_base_current_call")
         self.assertIn("Zone A", result["customer_response"])
         self.assertIn("Rs 22.07", result["customer_response"])
+        self.assertEqual(
+            result["response_obligation"],
+            "speak_verified_customer_response_once",
+        )
+        self.assertNotIn("starting_rate_options", result)
         self.assertNotIn("starting rates:", result["customer_response"])
         self.assertNotIn("Knowledge base", result["customer_response"])
         self.assertNotIn("post_rate_instruction", result)
@@ -1537,7 +1631,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.apply_deterministic_answers("Noida se Bangalore", turn_id="route")
         processor = type("Processor", (), {"wait_latest": AsyncMock()})()
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "v6-discovery-boundary",
             conversation_state=state,
             turn_processor=processor,
@@ -1573,7 +1667,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.apply_deterministic_answers("rates chahiye", turn_id="intent")
         state.authorize_rate_result({"status": "success", "amount": 31.15})
         state.mark_route_zone_verified("C", starting_presented=True)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         self.assertEqual(state.pending_field(), "business_name")
 
         self.assertEqual(
@@ -1772,7 +1866,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         state.apply_deterministic_answers("haan ji", turn_id="consent")
         state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         state.seed_context(
             {
                 "business_name": "Harsh Enterprises",
@@ -1806,7 +1900,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         state.apply_deterministic_answers("haan ji", turn_id="consent")
         state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
         state.seed_context({"business_name": "Harsh Enterprises", "business_type": "D2C"})
 
         violation = _shipkia_flow_response_violation(
@@ -1973,7 +2067,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
         self.assertEqual(state.value("current_provider_name"), "Shiprocket")
-        self.assertEqual(state.pending_field(), "pickup_location")
+        self.assertEqual(state.pending_field(), "current_problem")
 
     async def test_v6_generic_starting_rate_cannot_replace_retained_city_route(self):
         state = GatedConversationState(
@@ -2015,7 +2109,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("spoken_response_instruction", result)
         self.assertIsNone(_StartingFakeClientSession.captured_payload)
 
-    async def test_v6_route_lookup_reuses_saved_cities_without_pincodes(self):
+    async def test_v6_route_lookup_reuses_saved_cities(self):
         state = V6ConversationState()
         state.apply_deterministic_answers("haan ji", turn_id="consent")
         state.apply_deterministic_answers("rates chahiye", turn_id="intent")
@@ -2033,7 +2127,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             }
         )
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "v6-retained-city-route",
             conversation_state=state,
         )
@@ -2055,8 +2149,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         arguments = _RouteFakeClientSession.captured_payloads[0]["params"]["arguments"]
         self.assertEqual(arguments["pickup_location"], "Delhi")
         self.assertEqual(arguments["delivery_location"], "Bengaluru")
-        self.assertNotIn("pickup_pincode", arguments)
-        self.assertNotIn("delivery_pincode", arguments)
         self.assertEqual(repeated["status"], "duplicate_suppressed")
         self.assertEqual(len(_RouteFakeClientSession.captured_payloads), 1)
 
@@ -2080,7 +2172,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_unresolved_zone_never_returns_a_generic_amount(self):
-        result = _voice_safe_pincode_serviceability_result(
+        result = _voice_safe_route_rate_result(
             {
                 "status": "configuration_required",
                 "zone": "C",
@@ -2103,10 +2195,10 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not invent or estimate", result["spoken_response_instruction"])
 
     async def test_route_details_required_never_becomes_configuration_failure(self):
-        result = _voice_safe_pincode_serviceability_result(
+        result = _voice_safe_route_rate_result(
             {
                 "status": "route_details_required",
-                "missing_fields": ["delivery_pincode_or_location"],
+                "missing_fields": ["delivery_location"],
             }
         )
 
@@ -2116,7 +2208,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("temporarily unavailable", result["spoken_response_instruction"])
 
     async def test_verified_route_returns_zone_starting_rate_immediately(self):
-        result = _voice_safe_pincode_serviceability_result(
+        result = _voice_safe_route_rate_result(
             {
                 "status": "success",
                 "zone": "A",
@@ -2149,7 +2241,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         state.mark_starting_rate_presented()
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "call-1675-duplicate-route",
             conversation_state=state,
         )
@@ -2168,7 +2260,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.move_forward_question_due = True
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "call-1675-close-lock",
             conversation_state=state,
         )
@@ -2268,7 +2360,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.authorize_rate_result(
             {"status": "success", "response_type": "zone_starting", "zone": "C", "amount": 31.15}
         )
-        state.mark_pricing_verified("lookup_pincode_serviceability")
+        state.mark_pricing_verified("lookup_shipkia_route_rate")
 
         violation = _shipkia_flow_response_violation(
             agent_text="ShipKia mein multiple courier options hain. Kya aap kuch aur jaanna chahenge?",
@@ -2377,7 +2469,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.mark_route_zone_verified("D", starting_presented=True)
 
         violation = _shipkia_flow_response_violation(
-            agent_text="Zone verify nahi hua, Bareilly ka pincode bataiye.",
+            agent_text="Zone verify nahi hua, Bareilly ka route dobara bataiye.",
             customer_text="Nahi.",
             previous_agent_text="Kya aap ShipKia ke saath aage badhna chahenge?",
             conversation_state=state,
@@ -2386,7 +2478,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(violation, "contradicted_verified_route")
 
     def test_route_result_preserves_verified_provider_starting_options(self):
-        result = _voice_safe_pincode_serviceability_result(
+        result = _voice_safe_route_rate_result(
             {
                 "status": "success",
                 "zone": "D",
@@ -2448,7 +2540,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             {"pickup_location": "Noida", "delivery_location": "Delhi"}
         )
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "multi-route-test",
             conversation_state=state,
         )
@@ -2477,7 +2569,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.apply_deterministic_answers("shipping rate", turn_id="intent")
         state.apply_deterministic_answers("Par India ki", turn_id="pan-india")
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "pan-india-asr-test",
             conversation_state=state,
         )
@@ -2507,7 +2599,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state.apply_deterministic_answers("shipping rate", turn_id="intent")
         state.apply_deterministic_answers("Delhi to Noida", turn_id="route")
         forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
+            "lookup_shipkia_route_rate",
             "problem-boundary-test",
             conversation_state=state,
         )
@@ -3071,7 +3163,14 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state = V6ConversationState()
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("rates batao", turn_id="intent")
-        state.seed_context({"zone": "D"})
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "Direct to customer",
+                "current_shipping_arrangement": "Own Arrangement",
+                "zone": "D",
+            }
+        )
         state.onboarding_link_presented = True
         state.apply_deterministic_answers(
             "Blue Dart ka rate bata do",
@@ -3112,7 +3211,14 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state = V6ConversationState()
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("rates batao", turn_id="intent")
-        state.seed_context({"zone": "D"})
+        state.seed_context(
+            {
+                "business_name": "Harsh Enterprises",
+                "business_type": "Direct to customer",
+                "current_shipping_arrangement": "Own Arrangement",
+                "zone": "D",
+            }
+        )
         state.verified_starting_options = [
             {"courier": "Bluedart", "service": "Surface", "amount": 101.67}
         ]
@@ -3408,7 +3514,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.pending_field(), "")
         self.assertEqual(
             _authorized_controlled_reply_tools(state),
-            ["lookup_pincode_serviceability"],
+            ["lookup_shipkia_route_rate"],
         )
 
     async def test_rate_tool_waits_for_latest_native_turn_guard(self):
@@ -3438,7 +3544,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             "console",
             conversation_state=state,
             backend_argument_names=frozenset(
-                {"pickup_pincode", "delivery_pincode", "dead_weight", "payment_type"}
+                {"zone", "dead_weight", "payment_type"}
             ),
         )
 
@@ -3450,8 +3556,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                     "current_shipping_arrangement": "Own Arrangement",
                     "current_shipping_rate": 50,
                     "current_problem": "Rates",
-                    "pickup_pincode": "110001",
-                    "delivery_pincode": "400001",
+                    "zone": "C",
                     "dead_weight": 0.5,
                     "payment_type": "Prepaid",
                 }
@@ -3468,7 +3573,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         state = GatedConversationState()
         state.apply_deterministic_answers("business pata nahi", turn_id="optional")
         state.apply_deterministic_answers(
-            "pickup pincode nahi pata",
+            "pickup city nahi pata",
             turn_id="pickup",
         )
         runtime = _Runtime()
@@ -3519,29 +3624,30 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "starting_rate_not_authorized")
         self.assertEqual(result["pricing_mode"], "pending")
-        self.assertEqual(result["required_next_question"], "6-digit delivery pincode")
+        self.assertEqual(result["required_next_question"], "pickup city or locality")
         self.assertFalse(result["pricing_backend_called"])
 
     async def test_authoritative_rate_arguments_ignore_invented_weight_alias(self):
         merged, ignored = _authoritative_rate_request_arguments(
             {
                 "shipment_weight_g": 500,
-                "pickup_pincode": "invented",
+                "zone": "F",
                 "rate_request_type": "Flat",
             },
             {
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
+                "pickup_location": "Noida",
+                "delivery_location": "Delhi",
+                "zone": "A",
                 "dead_weight": 0.5,
                 "payment_type": "Prepaid",
             },
             frozenset(
-                {"pickup_pincode", "delivery_pincode", "dead_weight", "payment_type"}
+                {"zone", "dead_weight", "payment_type"}
             ),
         )
 
         self.assertEqual(merged["dead_weight"], 0.5)
-        self.assertEqual(merged["pickup_pincode"], "201305")
+        self.assertEqual(merged["zone"], "A")
         self.assertEqual(merged["rate_request_type"], "Flat")
         self.assertNotIn("shipment_weight_g", merged)
         self.assertEqual(ignored, ["shipment_weight_g"])
@@ -3566,13 +3672,14 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 "current_shipping_arrangement": "Own Arrangement",
                 "current_shipping_rate": 40,
                 "current_problem": "No Problem",
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
+                "pickup_location": "Noida",
+                "delivery_location": "Delhi",
                 "dead_weight": 0.5,
                 "payment_type": "COD",
                 "order_value": 5000,
             }
         )
+        state.mark_route_zone_verified("A")
         self.assertTrue(state.pricing_ready())
         forwarder = make_mcp_forwarder(
             "calculate_shipkia_rate",
@@ -3580,8 +3687,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             conversation_state=state,
             backend_argument_names=frozenset(
                 {
-                    "pickup_pincode",
-                    "delivery_pincode",
+                    "zone",
                     "dead_weight",
                     "payment_type",
                     "order_value",
@@ -3611,12 +3717,11 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("shipment_weight_g", forwarded)
 
     async def test_prepare_allows_explicit_unavailable_pin_but_not_missing_weight(self):
-        backend_fields = frozenset({"delivery_pincode", "dead_weight", "payment_type"})
+        backend_fields = frozenset({"zone", "dead_weight", "payment_type"})
         prepared, _metadata, error = _prepare_rate_arguments(
             {
                 "qualification_refused_field": "business_name",
-                "pickup_pincode_status": "Unavailable",
-                "delivery_pincode": "400001",
+                "zone": "C",
                 "dead_weight": 1,
                 "payment_type": "Prepaid",
             },
@@ -3624,20 +3729,19 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(error)
         self.assertEqual(prepared["dead_weight"], 1)
-        self.assertNotIn("pickup_pincode", prepared)
+        self.assertEqual(prepared["zone"], "C")
 
         _prepared, _metadata, error = _prepare_rate_arguments(
             {
                 "qualification_refused_field": "business_name",
-                "pickup_pincode_status": "Unavailable",
-                "delivery_pincode": "400001",
+                "zone": "C",
                 "payment_type": "Prepaid",
             },
             backend_fields,
         )
         self.assertEqual(error["next_missing_field"], "dead_weight")
 
-    async def test_no_pin_starting_rate_requires_exact_rate_caveat(self):
+    async def test_missing_route_starting_rate_requires_exact_rate_caveat(self):
         result = _voice_safe_unknown_zone_result(
             {
                 "status": "success",
@@ -3659,8 +3763,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result["verified_starting_rate_available"])
-        self.assertTrue(result["pincode_unavailable_fallback"])
-        self.assertFalse(result["pincodes_already_supplied"])
+        self.assertFalse(result["route_locations_supplied"])
         self.assertIn("exact rate depends", result["message"])
         self.assertEqual(len(result["eligible_rates"]), 1)
 
@@ -3723,8 +3826,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 ],
             },
             route_basis={
-                "pickup_pincode": "110001",
-                "delivery_pincode": "560001",
+                "pickup_location": "Delhi",
+                "delivery_location": "Bengaluru",
                 "dead_weight": 0.5,
                 "payment_type": "Prepaid",
             },

@@ -26,7 +26,7 @@ from confluence_ai.services.shipkia_voice import (
     get_shipkia_flat_rates,
     get_shipkia_flat_zonal_rates,
     get_shipkia_starting_rate,
-    lookup_pincode_serviceability,
+    lookup_shipkia_route_rate,
     lookup_shipkia_crm_lead,
     normalize_phone,
 )
@@ -51,7 +51,7 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("Understand meaning, not exact phrases", prompt)
         self.assertIn("Namaste, main Harsh ShipKia se bol raha hoon", prompt)
         self.assertIn("shipping ya operations handle karne wale person", compact)
-        self.assertIn("Kya abhi baat karna convenient hai?", compact)
+        self.assertIn("kya abhi around do minute baat karna convenient hai?", compact)
         self.assertIn("sell directly to customers, supply other businesses", compact)
         self.assertIn("Do not ask with acronyms", compact)
         self.assertIn("ask how they currently ship", compact)
@@ -61,7 +61,7 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertIn("anything-else checkpoint before asking whether", compact)
         self.assertIn("Unsuitable rates are an objection, not a no", compact)
         self.assertIn("Satisfaction alone never means onboarding", compact)
-        self.assertIn("lookup_pincode_serviceability", prompt)
+        self.assertIn("lookup_shipkia_route_rate", prompt)
         self.assertIn("get_shipkia_starting_rate", prompt)
         self.assertIn("get_shipkia_flat_rates", prompt)
         self.assertIn("get_shipkia_flat_zonal_rates", prompt)
@@ -119,7 +119,7 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertTrue(_successful_pricing_outcome(audit))
         route_audit = {
             "tool_outcomes": [
-                {"tool_name": "lookup_pincode_serviceability", "status": "success"}
+                {"tool_name": "lookup_shipkia_route_rate", "status": "success"}
             ]
         }
         self.assertTrue(_successful_pricing_outcome(route_audit))
@@ -459,14 +459,12 @@ class TestShipKiaVoice(FrappeTestCase):
 
 
     def test_rate_card_calculates_prepaid_zone_rate(self):
-        serviceability = lookup_pincode_serviceability(
-            {"pickup_pincode": "110001", "delivery_pincode": "400001"},
+        serviceability = lookup_shipkia_route_rate(
+            {"pickup_location": "Delhi", "delivery_location": "Mumbai"},
             agent="agent-445",
         )
         rate = calculate_shipkia_rate(
             {
-                "pickup_pincode": "110001",
-                "delivery_pincode": "400001",
                 "dead_weight": 0.5,
                 "payment_type": "Prepaid",
                 "zone": "A",
@@ -486,11 +484,11 @@ class TestShipKiaVoice(FrappeTestCase):
         self.assertEqual(rate["eligible_rates"][0]["total"], 22.07)
 
     def test_v5_route_resolver_supports_ncr_locations_and_pan_india(self):
-        ncr = lookup_pincode_serviceability(
+        ncr = lookup_shipkia_route_rate(
             {"pickup_location": "Delhi", "delivery_location": "Noida"},
             agent="agent-445",
         )
-        pan_india = lookup_pincode_serviceability(
+        pan_india = lookup_shipkia_route_rate(
             {"pan_india": True},
             agent="agent-445",
         )
@@ -504,7 +502,7 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         self.assertEqual(pan_india["starting_rate"]["amount"], 22.07)
 
-        bareilly_to_delhi = lookup_pincode_serviceability(
+        bareilly_to_delhi = lookup_shipkia_route_rate(
             {"pickup_location": "Bareilly", "delivery_location": "Delhi"},
             agent="agent-445",
         )
@@ -514,8 +512,6 @@ class TestShipKiaVoice(FrappeTestCase):
     def test_rate_card_returns_zone_matrix_when_zone_is_unknown(self):
         rate = calculate_shipkia_rate(
             {
-                "pickup_pincode": "110001",
-                "delivery_pincode": "400001",
                 "dead_weight": 0.5,
                 "payment_type": "Prepaid",
                 "courier": "Delhivery Surface",
@@ -613,8 +609,6 @@ class TestShipKiaVoice(FrappeTestCase):
     def test_call_1411_returns_distinct_cod_rate_and_verified_flat_option(self):
         prepaid = calculate_shipkia_rate(
             {
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
                 "dead_weight": 0.5,
                 "payment_type": "Prepaid",
                 "courier": "Delhivery Surface",
@@ -623,8 +617,6 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         cod = calculate_shipkia_rate(
             {
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
                 "dead_weight": 0.5,
                 "payment_type": "COD",
                 "order_value": 5000,
@@ -634,8 +626,6 @@ class TestShipKiaVoice(FrappeTestCase):
         )
         flat = calculate_shipkia_rate(
             {
-                "pickup_pincode": "201305",
-                "delivery_pincode": "110001",
                 "dead_weight": 0.5,
                 "payment_type": "COD",
                 "order_value": 5000,
@@ -701,8 +691,6 @@ class TestShipKiaVoice(FrappeTestCase):
     def test_rate_card_uses_volumetric_weight_and_additional_slabs(self):
         rate = calculate_shipkia_rate(
             {
-                "pickup_pincode": "110001",
-                "delivery_pincode": "400001",
                 "dead_weight": 0.5,
                 "length": 50,
                 "width": 40,
@@ -721,8 +709,6 @@ class TestShipKiaVoice(FrappeTestCase):
     def test_rate_card_calculates_cod_minimum_percentage_and_gst(self):
         rate = calculate_shipkia_rate(
             {
-                "pickup_pincode": "110001",
-                "delivery_pincode": "400001",
                 "dead_weight": 0.5,
                 "payment_type": "COD",
                 "order_value": 2000,

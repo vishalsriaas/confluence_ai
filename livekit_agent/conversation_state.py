@@ -22,9 +22,8 @@ OPTIONAL_QUALIFICATION_FIELDS = (
     "current_problem",
 )
 COMPANY_DETAIL_FIELDS = ("business_name", "business_type", "business_platform")
-PINCODE_FIELDS = ("pickup_pincode", "delivery_pincode")
 LOCATION_FIELDS = ("pickup_location", "delivery_location")
-ROUTE_FIELDS = (*PINCODE_FIELDS, *LOCATION_FIELDS)
+ROUTE_FIELDS = LOCATION_FIELDS
 RATE_IMPACTING_FIELDS = (*ROUTE_FIELDS, "dead_weight", "payment_type", "order_value")
 STATE_MANAGED_RATE_FIELDS = frozenset(
     {
@@ -38,8 +37,6 @@ STATE_MANAGED_RATE_FIELDS = frozenset(
         "order_value",
         "order_value_status",
         "qualification_refused_field",
-        "pickup_pincode_status",
-        "delivery_pincode_status",
         "zone",
     }
 )
@@ -553,6 +550,14 @@ def _valid_business_name_candidate(value: object) -> bool:
     clean = normalize_text(original)
     if not clean or "%" in original or re.search(r"\b(?:percent|percentage)\b", clean):
         return False
+    if re.search(
+        r"\b(?:i\s+am|i['’]m|you\s+are|he\s+is|she\s+is|"
+        r"(?:ka|ki)\s+(?:name|naam)\s+(?:is|hai))\b",
+        clean,
+        re.IGNORECASE,
+    ):
+        # A sentence fragment or mixed ASR hypothesis is not a durable name.
+        return False
     stopwords = {
         "a",
         "an",
@@ -1058,7 +1063,7 @@ def _current_provider_evidence(
         or question_is_pending
         and (
             re.search(
-                r"\b(?:pickup|delivery|drop|destination|weight|pincode|pin\s*code|"
+                r"\b(?:pickup|delivery|drop|destination|weight|"
                 r"prepaid|cod|cash\s+on\s+delivery|order\s+value)\b",
                 clean,
                 re.IGNORECASE,
@@ -1273,20 +1278,6 @@ def _requested_zone(text: object) -> str:
     }[hindi_zone_match.group(1)]
 
 
-def _pincode_question_target(previous_agent_text: object) -> str:
-    """Return the last pincode endpoint mentioned in the agent's actual question."""
-    previous = normalize_text(previous_agent_text)
-    if "pincode" not in previous and "pin code" not in previous:
-        return ""
-    matches: list[tuple[int, str]] = []
-    for field, pattern in (
-        ("pickup_pincode", r"\b(?:pickup|pick[\s-]?up|origin)\b"),
-        ("delivery_pincode", r"\b(?:delivery|drop|destination)\b"),
-    ):
-        matches.extend((match.start(), field) for match in re.finditer(pattern, previous))
-    return max(matches)[1] if matches else ""
-
-
 def _current_arrangement_none_evidence(
     customer_text: object,
     previous_agent_text: object = "",
@@ -1441,6 +1432,7 @@ class GatedConversationState:
         self.rate_sentiment = ""
         self.rate_sentiment_clarification_due = False
         self.move_forward_clarification_due = False
+        self.onboarding_decline_reason_due = False
         self.deferred_close_due = False
         self.pricing_review_decision = ""
         self.unsatisfied_problem_due = False
@@ -1478,8 +1470,6 @@ class GatedConversationState:
             ),
             "current_rate_basis": ("current_rate_basis", "shipkia_current_rate_basis"),
             "current_problem": ("current_problem", "shipkia_main_pain_point"),
-            "pickup_pincode": ("pickup_pincode", "shipkia_pickup_pincode"),
-            "delivery_pincode": ("delivery_pincode",),
             "pickup_location": ("pickup_location", "shipkia_pickup_location"),
             "delivery_location": ("delivery_location", "shipkia_delivery_location"),
             "dead_weight": ("dead_weight", "dead_weight_kg"),
@@ -1513,10 +1503,10 @@ class GatedConversationState:
         if self.model_led_flow:
             # Keep V6 concise, but collect the minimum operational context a
             # sales consultant needs before comparing a rate: who the customer
-            # is, how they sell, their current shipping setup/provider, and the
-            # provider. Problems, competitor price, and platform remain useful
-            # optional facts that are saved when volunteered but never delay a
-            # requested route rate.
+            # is, how they sell, and their current shipping setup. When they
+            # use a provider, learn both its name and the actual problem once
+            # so the consultant can give a relevant ShipKia solution. Their
+            # competitor price and platform remain optional.
             sequence = [
                 "business_name",
                 "business_type",
@@ -1525,6 +1515,7 @@ class GatedConversationState:
             arrangement = normalize_text(self.value("current_shipping_arrangement"))
             if arrangement in PROVIDER_ARRANGEMENTS:
                 sequence.append("current_provider_name")
+                sequence.append("current_problem")
             return tuple(sequence)
         sequence = ["business_name", "business_type"]
         if self.direct_onboarding_flow:
@@ -1668,11 +1659,7 @@ class GatedConversationState:
         if needs_route and not self.pan_india_requested:
             for endpoint in ("pickup", "delivery"):
                 if not self.route_endpoint_handled(endpoint):
-                    return (
-                        f"{endpoint}_location"
-                        if self.v5_company_pair_flow
-                        else f"{endpoint}_pincode"
-                    )
+                    return f"{endpoint}_location"
         if self.v5_company_pair_flow and needs_route:
             if self.route_zone_lookup_status in {"verified_starting", "unavailable"}:
                 return ""
@@ -1717,14 +1704,11 @@ class GatedConversationState:
         )
 
     def route_endpoint_handled(self, endpoint: str) -> bool:
-        return self.is_handled(f"{endpoint}_pincode") or self.is_confirmed(
-            f"{endpoint}_location"
-        )
+        return self.is_confirmed(f"{endpoint}_location")
 
     def route_ready_for_lookup(self) -> bool:
         return self.pan_india_requested or bool(self.next_route_for_lookup()) or all(
-            self.is_confirmed(f"{endpoint}_pincode")
-            or self.is_confirmed(f"{endpoint}_location")
+            self.is_confirmed(f"{endpoint}_location")
             for endpoint in ("pickup", "delivery")
         )
 
@@ -1732,16 +1716,11 @@ class GatedConversationState:
         """Return the customer's latest confirmed route, even after it was resolved."""
         current: dict[str, object] = {}
         for endpoint in ("pickup", "delivery"):
-            pincode_field = f"{endpoint}_pincode"
             location_field = f"{endpoint}_location"
-            if self.is_confirmed(pincode_field):
-                current[pincode_field] = self.value(pincode_field)
-            elif self.is_confirmed(location_field):
+            if self.is_confirmed(location_field):
                 current[location_field] = self.value(location_field)
-        has_pickup = bool(current.get("pickup_pincode") or current.get("pickup_location"))
-        has_delivery = bool(
-            current.get("delivery_pincode") or current.get("delivery_location")
-        )
+        has_pickup = bool(current.get("pickup_location"))
+        has_delivery = bool(current.get("delivery_location"))
         return current if has_pickup and has_delivery else {}
 
     @staticmethod
@@ -1758,10 +1737,8 @@ class GatedConversationState:
             for field in ROUTE_FIELDS
             if str(route.get(field) or "").strip()
         }
-        has_pickup = bool(normalized.get("pickup_pincode") or normalized.get("pickup_location"))
-        has_delivery = bool(
-            normalized.get("delivery_pincode") or normalized.get("delivery_location")
-        )
+        has_pickup = bool(normalized.get("pickup_location"))
+        has_delivery = bool(normalized.get("delivery_location"))
         if not has_pickup or not has_delivery:
             return False
         key = self._route_request_key(normalized)
@@ -1769,8 +1746,13 @@ class GatedConversationState:
             return False
         self.requested_routes.append(normalized)
         self.authorized_rate_amounts.clear()
+        self.primary_rate_amount = None
         self.verified_starting_options = []
         self.available_courier_partners = []
+        self.verified_pricing_path = ""
+        self.verified_pricing_tool = ""
+        self.verified_payment_basis = ""
+        self.rate_answer_owed = False
         self.pan_india_requested = False
         self.route_zone_lookup_status = ""
         self._append_transition(
@@ -1834,6 +1816,7 @@ class GatedConversationState:
         self.move_forward_question_due = False
         self.move_forward_clarification_due = False
         self.move_forward_decision = ""
+        self.onboarding_decline_reason_due = False
         self.onboarding_link_due = False
         self.onboarding_link_presented = False
         self.better_plan_close_due = False
@@ -1924,11 +1907,8 @@ class GatedConversationState:
 
     def route_input_unavailable(self) -> bool:
         return any(
-            any(
-                self.fields.get(field)
-                and self.fields[field].status in {"refused", "unavailable"}
-                for field in (f"{endpoint}_pincode", f"{endpoint}_location")
-            )
+            self.fields.get(f"{endpoint}_location")
+            and self.fields[f"{endpoint}_location"].status in {"refused", "unavailable"}
             and not self.route_endpoint_handled(endpoint)
             for endpoint in ("pickup", "delivery")
         )
@@ -2210,10 +2190,21 @@ class GatedConversationState:
             or explicit_zone_rate_request
             or _requested_provider_rate_name(clean)
         )
+        post_rate_followup_finished = bool(
+            self.model_led_flow
+            and self.sales_close_ready()
+            and self.post_rate_followup_active
+            and (
+                _POST_INFORMATION_DONE_PATTERN.fullmatch(clean)
+                or is_anything_else_no_answer(clean)
+                or _EXPLICIT_POLITE_END_PATTERN.fullmatch(clean)
+            )
+        )
         if (
             self.model_led_flow
             and self.value("conversation_consent") == "Accepted"
             and _EXPLICIT_POLITE_END_PATTERN.fullmatch(clean)
+            and not post_rate_followup_finished
         ):
             self.polite_close_due = True
             self.move_forward_question_due = False
@@ -2376,9 +2367,11 @@ class GatedConversationState:
                 re.IGNORECASE,
             )
         )
+        awaiting_onboarding_decline_reason = self.onboarding_decline_reason_due
         rate_dissatisfied = bool(
             self.v5_company_pair_flow
             and self.verified_rate_presented()
+            and not awaiting_onboarding_decline_reason
             and (
                 _DISSATISFIED_PATTERN.search(clean)
                 or _UNEXPLAINED_PRICING_PATTERN.search(clean)
@@ -2466,6 +2459,23 @@ class GatedConversationState:
             }
             self._append_transition(transition)
             applied.append(transition)
+
+        if awaiting_onboarding_decline_reason:
+            reason = str(customer_text or "").strip(" \t\r\n.,!?;")[:240]
+            if reason and not _NON_ANSWER_CHATTER_PATTERN.fullmatch(clean):
+                self.onboarding_decline_reason_due = False
+                self.unsatisfied_concern = reason
+                self.callback_close_concern = reason
+                self.better_plan_close_due = True
+                transition = {
+                    "event": "onboarding_decline_reason_captured",
+                    "evidence": reason,
+                    "turn_id": turn_id,
+                    "source": "deterministic",
+                    "created_at": time.time(),
+                }
+                self._append_transition(transition)
+                applied.append(transition)
 
         awaiting_unsatisfied_problem = self.unsatisfied_problem_due
         self.last_customer_dissatisfied = bool(
@@ -2712,6 +2722,20 @@ class GatedConversationState:
                 }
                 self._append_transition(transition)
                 applied.append(transition)
+                if self.model_led_flow:
+                    consent_transition = self.apply_decision(
+                        field="conversation_consent",
+                        disposition="answered",
+                        value="Accepted",
+                        evidence=clean,
+                        confidence=1.0,
+                        customer_text=customer_text,
+                        turn_id=turn_id,
+                    )
+                    if consent_transition:
+                        consent_transition["source"] = "deterministic"
+                        applied.append(consent_transition)
+                    pending = self.pending_field()
             elif consent:
                 transition = self.apply_decision(
                     field=pending,
@@ -3074,7 +3098,10 @@ class GatedConversationState:
             and not self.anything_else_detail_due
             and not self.move_forward_question_due
             and not ending_objection_active
-            and _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
+            and (
+                _POST_INFORMATION_DONE_PATTERN.fullmatch(move_forward_answer)
+                or post_rate_followup_finished
+            )
         ):
             # After answering one or more requested follow-ups, a simple
             # acknowledgement or "I forgot" should advance to the one
@@ -3150,6 +3177,7 @@ class GatedConversationState:
             self.move_forward_question_due = False
             self.move_forward_clarification_due = False
             self.move_forward_decision = "Yes"
+            self.onboarding_decline_reason_due = False
             self.onboarding_link_due = True
             self.better_plan_close_due = False
             self.unsatisfied_problem_due = False
@@ -3177,7 +3205,10 @@ class GatedConversationState:
             self.deferred_close_due = is_deferred
             self.onboarding_link_due = False
             self.better_plan_close_due = not self.model_led_flow
-            self.polite_close_due = self.model_led_flow
+            self.polite_close_due = bool(self.model_led_flow and is_deferred)
+            self.onboarding_decline_reason_due = bool(
+                self.model_led_flow and not is_deferred
+            )
             self.unsatisfied_problem_due = False
             self.unsatisfied_resolution_due = False
             transition = {
@@ -3191,10 +3222,8 @@ class GatedConversationState:
             self._append_transition(transition)
             applied.append(transition)
 
-        pincode_answer_context = bool(_pincode_question_target(previous_agent_text))
         quantity_context = bool(
-            not pincode_answer_context
-            and re.search(
+            re.search(
                 r"\b(?:monthly|month|per month|shipment quantity|shipment volume|"
                 r"shipments|orders)\b|मंथली|महीने|शिपमेंट",
                 normalize_text(previous_agent_text),
@@ -3217,8 +3246,7 @@ class GatedConversationState:
                 )
             )
             quantity_context = bool(
-                not pincode_answer_context
-                and (
+                (
                     self.monthly_quantity_due
                     or pending == "monthly_shipments"
                     or previous_quantity_question
@@ -3248,15 +3276,13 @@ class GatedConversationState:
             )
         )
         if (
-            not pincode_answer_context
-            and not explicit_weight_answer
+            not explicit_weight_answer
             and (quantity_context or self.monthly_quantity_due)
             and quantity_match
         ):
             quantity_text = quantity_match.group(1)
         elif (
-            not pincode_answer_context
-            and self.monthly_quantity_due
+            self.monthly_quantity_due
             and quantity_context
             and re.fullmatch(
                 r"(?:pytant|pie\s*tant|five\s*tant|five\s*thousand)\s*[.!?]*",
@@ -3276,9 +3302,9 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
-        elif not pincode_answer_context and volunteered_quantity:
+        elif volunteered_quantity:
             quantity_text = volunteered_quantity.group(1) or volunteered_quantity.group(2)
-        elif not pincode_answer_context and self.monthly_quantity_due and re.search(
+        elif self.monthly_quantity_due and re.search(
             r"\b(?:monthly|month|shipments?|orders?)\b|मंथली|महीने|शिपमेंट|ऑर्डर",
             clean,
             re.IGNORECASE,
@@ -3360,7 +3386,7 @@ class GatedConversationState:
                 and len(candidate) <= 80
                 and _valid_business_name_candidate(candidate)
                 and not _contains_phrase(candidate_clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
-                and not re.search(r"\b(?:rate|rates|onboarding|pincode|zone)\b", candidate_clean)
+                and not re.search(r"\b(?:rate|rates|onboarding|zone)\b", candidate_clean)
                 and not _RATE_REQUEST_PATTERN.search(candidate_clean)
                 and not re.search(r"\b\d{6}\b", candidate_clean)
                 and _mentioned_business_type(customer_text) is None
@@ -3647,7 +3673,7 @@ class GatedConversationState:
             and pending
             in {
                 *OPTIONAL_QUALIFICATION_FIELDS,
-                *PINCODE_FIELDS,
+                *LOCATION_FIELDS,
                 "dead_weight",
                 "payment_type",
                 "order_value",
@@ -3752,46 +3778,6 @@ class GatedConversationState:
             self._append_transition(transition)
             applied.append(transition)
 
-        labelled_pins: dict[str, str] = {}
-        for field, label in (
-            ("pickup_pincode", r"(?:pickup|pick[\s-]?up|origin)"),
-            ("delivery_pincode", r"(?:delivery|drop|destination)"),
-        ):
-            match = re.search(rf"\b{label}\b[^\d]{{0,25}}(\d{{6}})\b", clean)
-            if match:
-                labelled_pins[field] = match.group(1)
-
-        pin_values = list(dict.fromkeys(re.findall(r"\b\d{6}\b", clean)))
-        assignments = dict(labelled_pins)
-        unused = [pin for pin in pin_values if pin not in assignments.values()]
-        previous = normalize_text(previous_agent_text)
-        if len(pin_values) == 1 and not assignments:
-            question_target = _pincode_question_target(previous_agent_text)
-            if question_target and not self.is_confirmed(question_target):
-                assignments[question_target] = pin_values[0]
-            elif pending in PINCODE_FIELDS and not self.is_confirmed(pending):
-                assignments[pending] = pin_values[0]
-            unused = [pin for pin in unused if pin not in assignments.values()]
-        if pending in PINCODE_FIELDS or len(pin_values) >= 2:
-            for field in PINCODE_FIELDS:
-                if field in assignments or not unused:
-                    continue
-                if not self.is_confirmed(field):
-                    assignments[field] = unused.pop(0)
-        for field, value in assignments.items():
-            transition = self.apply_decision(
-                field=field,
-                disposition="answered",
-                value=value,
-                evidence=value,
-                confidence=1.0,
-                customer_text=customer_text,
-                turn_id=turn_id,
-            )
-            if transition:
-                transition["source"] = "deterministic"
-                applied.append(transition)
-
         location_routes = list(re.finditer(
             rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)\s+(?:to|se|टू|से)\s+"
             rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)",
@@ -3818,6 +3804,12 @@ class GatedConversationState:
         if location_routes:
             if self.value("assistance_intent") == "Rates":
                 self.explicit_pricing_request_this_turn = True
+            if not requested_provider_rate_name:
+                # A route stated without a courier name starts a fresh generic
+                # route lookup instead of inheriting an older provider filter.
+                self.provider_rates_answer_due = False
+                self.provider_rate_scope = ""
+                self.requested_provider_rate_name = ""
             if current_rate_question_context:
                 rate_basis = "; ".join(match.group(0) for match in location_routes)
                 transition = self.apply_decision(
@@ -3849,7 +3841,7 @@ class GatedConversationState:
                     "pickup_location": _LOCATION_ALIASES[location_route.group(1).casefold()],
                     "delivery_location": _LOCATION_ALIASES[location_route.group(2).casefold()],
                 }
-        elif pending in {*PINCODE_FIELDS, *LOCATION_FIELDS}:
+        elif pending in LOCATION_FIELDS:
             whole_location = _LOCATION_ALIASES.get(clean)
             if whole_location:
                 endpoint = "pickup" if pending.startswith("pickup_") else "delivery"
@@ -3857,7 +3849,6 @@ class GatedConversationState:
         if (
             not location_assignments
             and not current_rate_question_context
-            and (self.model_led_flow or pending not in PINCODE_FIELDS)
         ):
             # A one-sided route change keeps the other confirmed endpoint.
             # This lets callers say "ab Mumbai ke liye rate" or "Noida se"
@@ -3904,14 +3895,6 @@ class GatedConversationState:
         active_route = self.active_route()
         if location_assignments and active_route:
             self.register_requested_route(active_route)
-
-        if len(pin_values) >= 2:
-            self.register_requested_route(
-                {
-                    "pickup_pincode": assignments.get("pickup_pincode", ""),
-                    "delivery_pincode": assignments.get("delivery_pincode", ""),
-                }
-            )
 
         weight_match = _EXPLICIT_WEIGHT_PATTERN.search(clean)
         if weight_match:
@@ -4127,7 +4110,7 @@ class GatedConversationState:
                     if field in COMPANY_DETAIL_FIELDS
                     else "No Current Arrangement"
                 )
-            elif field in {*PINCODE_FIELDS, "dead_weight"}:
+            elif field == "dead_weight":
                 status = "unavailable"
                 normalized = "Unavailable"
             else:
@@ -4172,24 +4155,6 @@ class GatedConversationState:
                 # it or turn it into Unknown/Not Shared. Multiple explicit
                 # problem statements are merged above instead of overwritten.
                 return None
-        if (
-            field in PINCODE_FIELDS
-            and previous
-            and previous.status == "confirmed"
-            and previous.value != normalized
-        ):
-            clean_customer = normalize_text(customer_text)
-            label = (
-                r"\b(?:pickup|pick[\s-]?up|origin)\b"
-                if field == "pickup_pincode"
-                else r"\b(?:delivery|drop|destination)\b"
-            )
-            correction_marked = bool(
-                re.search(label, clean_customer)
-                or re.search(r"\b(?:change|changed|correct|correction|new|instead|actually)\b", clean_customer)
-            )
-            if not correction_marked:
-                return None
         if field in LOCATION_FIELDS:
             endpoint = "pickup" if field == "pickup_location" else "delivery"
             if (
@@ -4228,29 +4193,6 @@ class GatedConversationState:
                 ):
                     # A city mentioned as background context is not permission
                     # to silently replace the active pricing route.
-                    return None
-            confirmed_pin = self.fields.get(f"{endpoint}_pincode")
-            if confirmed_pin and confirmed_pin.status == "confirmed":
-                location_correction_marked = bool(
-                    re.search(
-                        r"\b(?:change|changed|correct|correction|new|instead|actually)\b",
-                        normalize_text(customer_text),
-                    )
-                )
-                explicit_complete_city_route = bool(
-                    re.search(
-                        rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)\s+(?:to|se)\s+"
-                        rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)",
-                        normalize_text(customer_text),
-                        re.IGNORECASE,
-                    )
-                )
-                if (
-                    not explicit_complete_city_route
-                    and (confirmed_pin.turn_id == turn_id or not location_correction_marked)
-                ):
-                    # A pincode is the stronger endpoint. Do not let the
-                    # semantic location decision from the same utterance erase it.
                     return None
         if (
             previous
@@ -4347,8 +4289,6 @@ class GatedConversationState:
             return str(value) if value in {"Accepted", "Declined"} else None
         if field == "assistance_intent":
             return str(value) if value in {"Rates", "Onboarding", "Information"} else None
-        if field in PINCODE_FIELDS:
-            return str(value).strip() if re.fullmatch(r"\d{6}", str(value).strip()) else None
         if field == "dead_weight":
             return _weight_kg(value, evidence)
         if field in {"current_shipping_rate", "order_value"}:
@@ -4394,16 +4334,8 @@ class GatedConversationState:
                 # question. It is never a descriptive answer such as a name,
                 # platform, provider, problem, route, or service.
                 return None
-            if field in LOCATION_FIELDS and clean in {
-                "pin",
-                "pina",
-                "pin code",
-                "pincode",
-            }:
-                return None
             if field in LOCATION_FIELDS and re.fullmatch(r"\d+", clean):
-                # Numeric route answers belong to the deterministic pincode
-                # fields and must never overwrite them as a free-text city.
+                # A numeric answer is not a usable city or locality.
                 return None
             if field == "current_problem" and not any(char.isalpha() for char in rendered):
                 return None
@@ -4445,16 +4377,8 @@ class GatedConversationState:
         pending_before: str = "",
     ) -> dict[str, Any]:
         previous = self.fields.get(field)
-        endpoint = "pickup" if field.startswith("pickup_") else "delivery"
-        alternative_field = ""
-        if field in PINCODE_FIELDS:
-            alternative_field = f"{endpoint}_location"
-        elif field in LOCATION_FIELDS:
-            alternative_field = f"{endpoint}_pincode"
-        alternative = self.fields.get(alternative_field) if alternative_field else None
         route_changed = field in ROUTE_FIELDS and (
             (previous and (previous.status != status or previous.value != value))
-            or (status == "confirmed" and alternative is not None)
         )
         if route_changed:
             self.route_zone_lookup_status = ""
@@ -4468,8 +4392,6 @@ class GatedConversationState:
             resolved_zone = self.fields.get("zone")
             if resolved_zone and resolved_zone.evidence == "[verified route resolver]":
                 self.fields.pop("zone", None)
-        if field in ROUTE_FIELDS and status == "confirmed" and alternative_field:
-            self.fields.pop(alternative_field, None)
         state = FieldState(
             field=field,
             status=status,
@@ -4513,7 +4435,6 @@ class GatedConversationState:
             "current_provider_name",
             "current_problem",
             "current_rate_basis",
-            *PINCODE_FIELDS,
             *LOCATION_FIELDS,
             "dead_weight",
             "payment_type",
@@ -4529,9 +4450,6 @@ class GatedConversationState:
             arguments["current_shipping_rate"] = self.value("current_shipping_rate")
         if self.optional_ended_by:
             arguments["qualification_refused_field"] = self.optional_ended_by
-        for field in PINCODE_FIELDS:
-            if self.fields.get(field) and self.fields[field].status == "unavailable":
-                arguments[f"{field}_status"] = "Unavailable"
         if self.fields.get("payment_type") and self.fields["payment_type"].status == "refused":
             arguments["payment_type"] = "Not Shared"
         if self.fields.get("order_value") and self.fields["order_value"].status == "refused":
@@ -4926,7 +4844,7 @@ class GatedConversationState:
             required_fields = (
                 ("dead_weight", "payment_type")
                 if self.requested_rate_type in {"Flat", "Flat Zonal"}
-                else (*PINCODE_FIELDS, "dead_weight", "payment_type")
+                else ("zone", "dead_weight", "payment_type")
             )
             if normalize_text(self.value("payment_type")) == "cod":
                 required_fields = (*required_fields, "order_value")
@@ -4935,7 +4853,7 @@ class GatedConversationState:
                 and normalize_text(self.value("payment_type")) == "both"
                 and self.is_confirmed("dead_weight")
                 and self.pending_field() not in self.optional_sequence()
-                and not all(self.is_confirmed(field) for field in PINCODE_FIELDS)
+                and not self.is_confirmed("zone")
             ):
                 return "pending"
             if self.pending_field() or any(
@@ -4943,7 +4861,9 @@ class GatedConversationState:
             ):
                 return "pending"
             return "exact"
-        if self.is_confirmed("zone"):
+        if self.is_confirmed("zone") and not (
+            self.is_confirmed("dead_weight") and self.is_confirmed("payment_type")
+        ):
             return "zone_starting"
         if self.general_rate_requested:
             return "pending"
@@ -5204,9 +5124,9 @@ class GatedConversationState:
                 if self.route_ready_for_lookup() or self.active_route():
                     return (
                         "The customer correctly said their requested rate was not answered. Call "
-                        "lookup_pincode_serviceability now with the retained active route and "
+                        "lookup_shipkia_route_rate now with the retained active route and "
                         "speak its verified starting rate immediately. Do not ask for weight, "
-                        "payment mode, pincode, discovery, or permission first."
+                        "payment mode, discovery, or permission first."
                     )
                 return (
                     "The customer correctly said their requested rate was not answered. Briefly "
@@ -5225,17 +5145,28 @@ class GatedConversationState:
                 if not self.model_led_flow or self.pricing_review_decision != "Yes":
                     return (
                         "The customer explicitly declined moving forward or rejected the current "
-                        "offer. Say exactly once: 'Theek hai, main aapke liye ek better plan team ke "
-                        "saath discuss karke aapko batata hoon. Thank you for calling ShipKia.' Then "
-                        "end politely. Do not ask another question, send an onboarding link, quote a "
+                        "offer and shared this reason: "
+                        f"{self.unsatisfied_concern or self.callback_close_concern}. Briefly acknowledge "
+                        "that reason, then say: 'Main aapke liye better plan team ke saath discuss "
+                        "karke review karwaunga.' End warmly in the customer's language with the equivalent of "
+                        "'ShipKia se baat karne ke liye thank you. Aapka din shubh ho' or 'Thank you "
+                        "for calling ShipKia. Have a good day.' Do not ask "
+                        "another question, send an onboarding link, quote a "
                         "new rate, or promise a specific discount."
                     )
                 return (
                     "The customer explicitly accepted a pricing-team review for their stated "
                     f"concern: {self.unsatisfied_concern or self.callback_close_concern}. Say once: "
                     "'Theek hai, main aapka pricing concern team ke saath discuss karke better plan "
-                    "review karwaunga. Thank you for calling ShipKia.' Then end. Do not ask another "
+                    "review karwaunga.' Then thank the customer warmly and wish them a good day in "
+                    "their current language. Do not ask another "
                     "question, send onboarding, quote a new rate, or promise a discount or outcome."
+                )
+            if self.onboarding_decline_reason_due:
+                return (
+                    "The customer clearly declined onboarding. Ask once, neutrally, what is "
+                    "stopping them from onboarding right now. Do not suggest a reason, defend the "
+                    "offer, repeat a rate, ask another question, or close before their answer."
                 )
             if self.onboarding_link_presented or self.better_plan_close_presented:
                 return (
@@ -5635,14 +5566,12 @@ class GatedConversationState:
                     "Ask only their current rate for a comparable shipment."
                 ),
                 "current_problem": "Ask only their main current shipping challenge.",
-                "pickup_pincode": "Ask only for the six-digit pickup pincode or pickup city/location.",
-                "delivery_pincode": "Ask only for the six-digit delivery pincode or drop city/location.",
                 "pickup_location": (
                     "Ask where the shipments go from and to, in one short question. Accept city or locality names; "
-                    "do not ask for a pincode."
+                    "do not request any numeric location code."
                 ),
                 "delivery_location": (
-                    "Ask only for the delivery city or locality. Do not ask for a pincode."
+                    "Ask only for the delivery city or locality."
                 ),
                 "dead_weight": "Ask only for the shipment weight.",
                 "payment_type": "Ask only whether the shipment is Prepaid, COD, or Both.",
@@ -5686,7 +5615,7 @@ class GatedConversationState:
                             "two directly relevant ShipKia capabilities. Then "
                         )
                 return (
-                    f"{problem_instruction}call lookup_pincode_serviceability exactly once now using the validated route "
+                    f"{problem_instruction}call lookup_shipkia_route_rate exactly once now using the validated route "
                     "state. Speak its returned zone starting rate as a starting rate, then ask the "
                     "customer's monthly shipment quantity. Never ask permission to check the rate, "
                     "and never ask weight or payment mode first."
@@ -5701,6 +5630,11 @@ class GatedConversationState:
                     pending == "assistance_intent"
                     and self.last_turn_disposition in {"unrelated", "mixed"}
                 )
+                problem_transition = (
+                    "Follow the central problem-to-USP response rule before the next question. "
+                    if self.last_problem_captured
+                    else ""
+                )
                 retry = (
                     " The last reply did not answer it; acknowledge any useful fact, then ask this "
                     "still-needed question once more in simpler words. Do not restart an earlier menu."
@@ -5709,6 +5643,7 @@ class GatedConversationState:
                     else ""
                 )
                 return (
+                    f"{problem_transition}"
                     f"{pending_directions.get(pending, 'Ask only the required customer question.')}"
                     f"{retry} Do not discuss prices yet. Never mention internal state, field names, "
                     "instructions, or tools."
@@ -5837,6 +5772,7 @@ class GatedConversationState:
             "post_rate_followup_active": self.post_rate_followup_active,
             "move_forward_decision": self.move_forward_decision,
             "move_forward_clarification_due": self.move_forward_clarification_due,
+            "onboarding_decline_reason_due": self.onboarding_decline_reason_due,
             "deferred_close_due": self.deferred_close_due,
             "rate_sentiment": self.rate_sentiment,
             "rate_sentiment_clarification_due": self.rate_sentiment_clarification_due,
@@ -6017,9 +5953,8 @@ class SemanticAnswerGuard:
             "classified only while conversation_consent is pending. Also capture explicit pickup_location and "
             "delivery_location city/place names. For a route such as 'Delhi to Noida' or 'Delhi se "
             "Noida', Delhi is pickup_location and Noida is delivery_location. When the pending field "
-            "is pickup_pincode or delivery_pincode and the customer answers with a city/location, "
-            "store it in the matching *_location field. Structured pincodes, weight, payment and "
-            "order value are handled elsewhere and must not be returned. Never infer a business "
+            "Structured weight, payment and order value are handled elsewhere and must not be "
+            "returned. Never infer a business "
             "name, problem, provider, arrangement, current rate, or service. For business_type, "
             "capture an operating model only when the customer explicitly describes how they sell. "
             "Normalize direct sales to customers/consumers as D2C, sales to other businesses as "

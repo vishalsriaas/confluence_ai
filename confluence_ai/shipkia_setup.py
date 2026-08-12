@@ -37,7 +37,6 @@ TOOL_SPECS = {
             ("shipkia_business_type", "string", False, "How the customer sells: directly to customers, to businesses, through marketplaces, or another model."),
             ("shipkia_business_platform", "string", False, "Confirmed order platform such as Shopify, WooCommerce, marketplace, own website or offline."),
             ("shipkia_monthly_shipments", "number", False, "Approximate monthly shipment count."),
-            ("shipkia_pickup_pincode", "string", False, "Primary pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Customer delivery regions or zones."),
             ("shipkia_cod_required", "boolean", False, "Whether COD shipping is required."),
             ("shipkia_current_provider_type", "string", False, "Direct Courier, Shipping Aggregator, Own Arrangement, Other or Not Shared."),
@@ -66,7 +65,6 @@ TOOL_SPECS = {
             ("shipkia_business_type", "string", False, "Confirmed business type."),
             ("shipkia_business_platform", "string", False, "Confirmed order platform or sales channel."),
             ("shipkia_monthly_shipments", "number", False, "Confirmed approximate monthly shipment count."),
-            ("shipkia_pickup_pincode", "string", False, "Confirmed pickup pincode."),
             ("shipkia_delivery_zones", "string", False, "Confirmed delivery regions."),
             ("shipkia_cod_required", "boolean", False, "Confirmed COD requirement."),
             ("shipkia_current_provider_type", "string", False, "Confirmed provider arrangement type."),
@@ -102,20 +100,18 @@ TOOL_SPECS = {
             ("next_action", "string", False, "Confirmed next action."),
         ],
     },
-    "lookup_pincode_serviceability": {
+    "lookup_shipkia_route_rate": {
         "description": (
             "Resolve a ShipKia route zone and return that zone's verified starting rate from the "
-            "active rate card. Supports pincodes, city/location pairs, and Pan-India starting enquiries."
+            "active rate card using a customer-confirmed city/location pair or a Pan-India enquiry."
         ),
         "condition": (
             "Call once per customer-requested route after both endpoints are collected, or for a "
             "Pan-India/All-India starting-rate enquiry."
         ),
         "parameters": [
-            ("pickup_pincode", "string", False, "Six-digit pickup pincode when supplied."),
-            ("delivery_pincode", "string", False, "Six-digit delivery pincode when supplied."),
-            ("pickup_location", "string", False, "Customer-confirmed pickup city/location."),
-            ("delivery_location", "string", False, "Customer-confirmed delivery city/location."),
+            ("pickup_location", "string", False, "Customer-confirmed pickup city or locality."),
+            ("delivery_location", "string", False, "Customer-confirmed delivery city or locality."),
             (
                 "pan_india",
                 "boolean",
@@ -133,7 +129,7 @@ TOOL_SPECS = {
         "condition": (
             "Call once for an explicit approved Zone A-F, or for a named-courier follow-up after "
             "the customer's route has resolved to a trusted zone. Route and Pan-India requests "
-            "use lookup_pincode_serviceability first."
+            "use lookup_shipkia_route_rate first."
         ),
         "parameters": [
             (
@@ -196,8 +192,6 @@ TOOL_SPECS = {
             "required shipment input are confirmed, with no starting-rate escape active."
         ),
         "parameters": [
-            ("pickup_pincode", "string", False, "Confirmed 6-digit pickup pincode; omit only when explicitly unavailable."),
-            ("delivery_pincode", "string", False, "Confirmed 6-digit delivery pincode; omit only when explicitly unavailable."),
             ("dead_weight", "number", True, "Actual package weight in kilograms."),
             ("weight_unit", "string", False, "kg by default; use g only when dead_weight is supplied in grams."),
             ("length", "number", False, "Package length in centimetres."),
@@ -241,6 +235,7 @@ def configure_shipkia_voice(
         frappe.throw("ShipKia local voice configuration is allowed only in developer mode.")
 
     _validate_core_records()
+    _disable_obsolete_route_tools()
     tool_names = _ensure_tools()
     token_value = _ensure_access_token()
     _configure_agent(tool_names)
@@ -263,6 +258,17 @@ def configure_shipkia_voice(
         "env_file": secret_paths["env_file"],
         "google_credentials": secret_paths["google_credentials"],
     }
+
+
+def _disable_obsolete_route_tools() -> None:
+    """Keep retired customer-input tools unavailable after an in-place upgrade."""
+    obsolete_name = "lookup_" + "pincode_serviceability"
+    for docname in frappe.get_all(
+        "AI MCP Tool",
+        filters={"tool_name": obsolete_name},
+        pluck="name",
+    ):
+        frappe.db.set_value("AI MCP Tool", docname, "enabled", 0, update_modified=False)
 
 
 def _validate_core_records() -> None:

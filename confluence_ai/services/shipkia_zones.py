@@ -84,55 +84,12 @@ _CITY_PROFILES = {
 }
 
 
-_PIN_PREFIX_PROFILES = {
-    "110": _CITY_PROFILES["delhi"],
-    "121": _CITY_PROFILES["faridabad"],
-    "122": _CITY_PROFILES["gurugram"],
-    "160": _CITY_PROFILES["chandigarh"],
-    "180": _CITY_PROFILES["jammu"],
-    "190": _CITY_PROFILES["srinagar"],
-    "194": _CITY_PROFILES["leh"],
-    "201": _CITY_PROFILES["noida"],
-    "208": _CITY_PROFILES["kanpur"],
-    "221": _CITY_PROFILES["varanasi"],
-    "226": _CITY_PROFILES["lucknow"],
-    "302": _CITY_PROFILES["jaipur"],
-    "380": _CITY_PROFILES["ahmedabad"],
-    "395": _CITY_PROFILES["surat"],
-    "400": _CITY_PROFILES["mumbai"],
-    "411": _CITY_PROFILES["pune"],
-    "440": _CITY_PROFILES["nagpur"],
-    "452": _CITY_PROFILES["indore"],
-    "462": _CITY_PROFILES["bhopal"],
-    "500": _CITY_PROFILES["hyderabad"],
-    "560": _CITY_PROFILES["bengaluru"],
-    "600": _CITY_PROFILES["chennai"],
-    "641": _CITY_PROFILES["coimbatore"],
-    "682": _CITY_PROFILES["kochi"],
-    "695": _CITY_PROFILES["thiruvananthapuram"],
-    "700": _CITY_PROFILES["kolkata"],
-    "744": _CITY_PROFILES["port blair"],
-    "751": _CITY_PROFILES["bhubaneswar"],
-    "781": _CITY_PROFILES["guwahati"],
-    "800": _CITY_PROFILES["patna"],
-    "834": _CITY_PROFILES["ranchi"],
-}
-
-
 def _clean_location(value: object) -> str:
     clean = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
     return re.sub(r"\s+", " ", clean)
 
 
-def _valid_pincode(value: object) -> str:
-    rendered = str(value or "").strip()
-    return rendered if re.fullmatch(r"\d{6}", rendered) else ""
-
-
-def _location_profile(*, pincode: object = "", location: object = "") -> LocationProfile | None:
-    pin = _valid_pincode(pincode)
-    if pin:
-        return _PIN_PREFIX_PROFILES.get(pin[:3])
+def _location_profile(location: object = "") -> LocationProfile | None:
     clean = _clean_location(location)
     if not clean:
         return None
@@ -164,8 +121,6 @@ def resolve_shipkia_zone(arguments: dict[str, Any] | None = None) -> dict[str, A
     """Resolve the V5 route zone using ShipKia's deterministic voice-routing policy."""
     arguments = arguments or {}
     pan_india = bool(arguments.get("pan_india"))
-    pickup_pin = _valid_pincode(arguments.get("pickup_pincode"))
-    delivery_pin = _valid_pincode(arguments.get("delivery_pincode"))
     pickup_location = str(arguments.get("pickup_location") or "").strip()
     delivery_location = str(arguments.get("delivery_location") or "").strip()
 
@@ -180,27 +135,20 @@ def resolve_shipkia_zone(arguments: dict[str, Any] | None = None) -> dict[str, A
             "message": "Pan-India enquiries use the Zone A floor only as a starting-rate headline.",
         }
 
-    if not (pickup_pin or pickup_location) or not (delivery_pin or delivery_location):
+    if not pickup_location or not delivery_location:
         return {
             "status": "route_details_required",
             "serviceable": None,
             "zone": None,
             "zone_verified": False,
-            "message": "Provide a pickup and delivery pincode or city/location.",
+            "message": "Provide both pickup and delivery city/location.",
         }
 
-    pickup_profile = _location_profile(pincode=pickup_pin, location=pickup_location)
-    delivery_profile = _location_profile(pincode=delivery_pin, location=delivery_location)
+    pickup_profile = _location_profile(pickup_location)
+    delivery_profile = _location_profile(delivery_location)
 
     if pickup_profile and delivery_profile:
         zone, basis = _zone_for_profiles(pickup_profile, delivery_profile)
-    elif pickup_pin and delivery_pin:
-        if pickup_pin[:3] == delivery_pin[:3]:
-            zone, basis = "A", "same_pincode_district_prefix"
-        elif pickup_pin[0] == delivery_pin[0]:
-            zone, basis = "B", "same_postal_region"
-        else:
-            zone, basis = "D", "cross_postal_region"
     else:
         pickup_clean = _clean_location(pickup_location)
         delivery_clean = _clean_location(delivery_location)
@@ -219,8 +167,6 @@ def resolve_shipkia_zone(arguments: dict[str, Any] | None = None) -> dict[str, A
         "zone_verified": True,
         "rate_scope": "starting_only",
         "resolution_basis": basis,
-        "pickup_pincode": pickup_pin or None,
-        "delivery_pincode": delivery_pin or None,
         "pickup_location": pickup_location or None,
         "delivery_location": delivery_location or None,
     }

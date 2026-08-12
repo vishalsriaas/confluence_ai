@@ -212,7 +212,7 @@ def calculate_rate(arguments: dict[str, Any]) -> dict[str, Any]:
         )
     elif zone is None:
         response["message"] = (
-            "The rate card does not map pincodes to zones. Give only a qualified starting price "
+            "No approved route zone was supplied. Give only a qualified starting price "
             "from the returned Zone A-F amounts and say the exact price depends on the approved "
             "zone. Do not ask the customer to identify an internal zone and do not invent one."
         )
@@ -367,7 +367,7 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
         "starting_rate_options_note": (
             "These are every configured courier partner's lowest verified 500 g Forward "
             f"starting options for Zone {zone}, including GST. They are rate-card options, not a "
-            "guarantee of pincode-level serviceability or delivery time."
+            "guarantee of route-level serviceability or delivery time."
         ),
         "rate_card": rate_card_metadata(),
         "message": (

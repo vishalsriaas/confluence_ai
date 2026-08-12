@@ -599,7 +599,7 @@ def _callback_failed(payload: dict, event_type_lower: str) -> bool:
 
 
 _PRICING_TOOL_NAMES = {
-    "lookup_pincode_serviceability",
+    "lookup_shipkia_route_rate",
     "calculate_shipkia_rate",
     "get_shipkia_flat_rates",
     "get_shipkia_flat_zonal_rates",
