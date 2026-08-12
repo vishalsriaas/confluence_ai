@@ -157,12 +157,66 @@ APPROVED_ZONES = frozenset({"A", "B", "C", "D", "E", "F"})
 _BUSINESS_TYPE_LETTERS = {
     "b": "B",
     "bee": "B",
+    "c": "C",
+    "see": "C",
+    "sea": "C",
     "d": "D",
     "day": "D",
     "dee": "D",
     "g": "G",
     "gee": "G",
 }
+BUSINESS_MODEL_QUESTION = (
+    "Ask only, in plain language, whether they sell directly to customers, supply other "
+    "businesses, sell through marketplaces, or operate in another way. Do not use B2C, B2B, "
+    "or D2C acronyms in the question."
+)
+
+
+def _canonical_business_model(value: object) -> str | None:
+    """Map an explicit model label to the stable value used by CRM/rate payloads."""
+    clean = normalize_text(value).strip(" .!?")
+    compact = re.sub(r"\s+", "", clean).upper()
+    if re.fullmatch(r"[BCDG]2[BC]", compact):
+        return compact
+    aliases = {
+        "direct to customer": "D2C",
+        "direct to consumer": "D2C",
+        "direct to end customer": "D2C",
+        "direct to end consumer": "D2C",
+        "business to customer": "B2C",
+        "business to consumer": "B2C",
+        "business to business": "B2B",
+        "customer to customer": "C2C",
+        "consumer to consumer": "C2C",
+        "marketplace": "Marketplace-led",
+        "marketplace led": "Marketplace-led",
+        "marketplace-led": "Marketplace-led",
+        "marketplace seller": "Marketplace-led",
+        "other": "Other",
+    }
+    return aliases.get(clean)
+
+
+def _business_model_evidence_present(value: object) -> bool:
+    """Require the quoted evidence to describe a customer-selling relationship."""
+    if _spoken_business_type(value) or _mentioned_business_type(value):
+        return True
+    clean = normalize_text(value)
+    # Do not let the semantic classifier silently repair an unrecognized ASR
+    # acronym (for example, "P2C") into a real operating model. Ask again in
+    # plain language instead.
+    if re.search(r"\b[a-z]\s*(?:2|to)\s*[bc]\b", clean, re.IGNORECASE):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:direct(?:ly)?|sell(?:ing)?|supply|customer|consumer|business|"
+            r"marketplace|bech(?:ta|te|ti)?|grahak|vyapar)\b|"
+            r"(?:सीध[ेा]|डायरेक्ट|बेच|ग्राहक|कस्टमर|व्यवसाय|बिजनेस|मार्केटप्लेस)",
+            clean,
+            re.IGNORECASE,
+        )
+    )
 _PAN_INDIA_PATTERN = re.compile(
     r"(?:\bp(?:an|en|ar)[\s-]*india\b|\ball\s+(?:over\s+)?india\b|"
     r"(?:\u092a\u093e\u0928|\u092a\u0948\u0928|\u092a\u0947\u0928|\u092a\u0930)[\s-]*(?:india|\u0907\u0902\u0921\u093f\u092f\u093e)|"
@@ -180,6 +234,7 @@ _LOCATION_ALIASES = {
     "faridabad": "Faridabad",
     "mumbai": "Mumbai",
     "bombay": "Mumbai",
+    "bareilly": "Bareilly",
     "pune": "Pune",
     "bengaluru": "Bengaluru",
     "bangalore": "Bengaluru",
@@ -213,6 +268,7 @@ _LOCATION_ALIASES = {
     "गुड़गांव": "Gurugram",
     "मुंबई": "Mumbai",
     "बॉम्बे": "Mumbai",
+    "बरेली": "Bareilly",
     "पुणे": "Pune",
     "बेंगलुरु": "Bengaluru",
     "बैंगलोर": "Bengaluru",
@@ -312,13 +368,16 @@ _PROVIDER_RATE_ASR_PATTERN = re.compile(
 _FLAT_ZONAL_RATE_REQUEST_PATTERN = re.compile(
     r"(?:\br[\s-]*flat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
     r"\bflat[\s-]*zonal\s*(?:rate|rates|pricing|charge|charges)?\b|"
-    r"\b(?:flat|flatt|flood)[\s,.-]*(?:zone|zonal)\s*(?:rate|rates|pricing|available)?\b|"
+    r"\b(?:flat|flatt|flait|flite|flight|flood|plate)[\s,.-]*"
+    r"(?:zone|zonal|floral)\s*(?:rate|rates|pricing|available)?\b|"
     r"\bflat[\s,.-]*(?:2|two|to)?\s*(?:night|nite|nait|tonight)\s*"
     r"(?:rate|rates|pricing|available)\b|"
     r"\bflat\s+(?:channel|chainal|journal)\b|"
     r"\b(?:square|squire)\s+(?:channel|chainal|zonal)\s*(?:rate|rates|pricing)?\b|"
     # Latest telephony ASR rendered spoken "flat zonal" as "slad zonal".
     r"\bslad[\s-]*(?:zone|zonal)\s*(?:rate|rates|pricing|charge|charges)?\b|"
+    # Observed native-audio ASR: "flat-zonal rate" -> "flame zona red".
+    r"\b(?:flame|frame)[\s-]*(?:zona|zonal|zone)[\s-]*(?:red|rate|rates)\b|"
     r"\u0938\u094d\u0932\u093e\u0921[\s-]*\u091c\u093c?\u094b\u0928\u0932"
     r"(?:[\s-]*\u0930\u0947\u091f(?:\u094d\u0938)?)?|"
     r"\u0938\u094d\u0915\u094d\u0935\u093e\u092f\u0930\s+\u091a\u0948\u0928\u0932\s*\u0930\u0947\u091f|"
@@ -349,6 +408,11 @@ _ZONAL_RATE_REQUEST_PATTERN = re.compile(
 )
 _FLAT_RATE_REQUEST_PATTERN = re.compile(
     r"(?:\b(?:flat|flatt|flait|flite|flight|fly|plate|letter|slide|blood|blud)\s*(?:rate|rates|to|two|pricing|charge|charges)\b|"
+    # Native telephony ASR rendered a customer's spoken "flat rate" as
+    # "site rate" in the latest call. Keep this alias tied to a pricing noun.
+    r"\b(?:site|sight)\s+(?:rate|rates|pricing|charge|charges)\b|"
+    r"\u0938\u093e\u0907\u091f\s*\u0930\u0947\u091f(?:\u094d\u0938)?|"
+    r"\bplater\b(?:\s+(?:available|pricing|charge|charges))?|"
     # Realtime ASR has rendered "flat rate" as "play it rate" in an actual call.
     # Keep the alias tied to the following pricing noun so ordinary "play it" is safe.
     r"\bplay\s+it\s+(?:rate|rates|pricing|charge|charges)\b|"
@@ -447,21 +511,70 @@ _COD_RATE_REQUEST_PATTERN = re.compile(
 )
 
 
-def _requested_provider_rate_name(text: object) -> str:
+def _provider_name_in_text(text: object) -> str:
     clean = normalize_text(text)
-    if not _EXPLICIT_RATE_INTENT_PATTERN.search(clean):
-        return ""
     aliases = (
         (r"\b(?:bluedart|blue\s+dart)\b", "Blue Dart"),
         (r"\bdelhivery\b", "Delhivery"),
         (r"\bamazon\b", "Amazon"),
-        (r"\bxpressbees\b", "Xpressbees"),
+        (
+            r"\b(?:xpressbees|xpress\s+bees|x\s*(?:15|fifteen)\s*(?:20|twenty))\b",
+            "Xpressbees",
+        ),
         (r"\bshree\s+maruti\b", "Shree Maruti"),
     )
     for pattern, canonical in aliases:
         if re.search(pattern, clean, re.IGNORECASE):
             return canonical
     return ""
+
+
+def _requested_provider_rate_name(
+    text: object,
+    previous_agent_text: object = "",
+) -> str:
+    clean = normalize_text(text)
+    explicit = _provider_name_in_text(clean)
+    if explicit and _EXPLICIT_RATE_INTENT_PATTERN.search(clean):
+        return explicit
+    previous = normalize_text(previous_agent_text)
+    contextual_rate_followup = bool(
+        re.search(r"\b(?:rate|rates|starting)\b", previous, re.IGNORECASE)
+        and re.match(r"^(?:aur|or|and|what\s+about)\b", clean, re.IGNORECASE)
+    )
+    if contextual_rate_followup and explicit:
+        return explicit
+    return ""
+
+
+def _valid_business_name_candidate(value: object) -> bool:
+    """Reject speech noise and numeric answers without narrowing valid brand names."""
+    original = str(value or "").strip()
+    clean = normalize_text(original)
+    if not clean or "%" in original or re.search(r"\b(?:percent|percentage)\b", clean):
+        return False
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "business",
+        "brand",
+        "company",
+        "hai",
+        "hain",
+        "is",
+        "it",
+        "ji",
+        "my",
+        "naam",
+        "name",
+        "the",
+        "yes",
+    }
+    return any(
+        token not in stopwords
+        for token in re.findall(r"[^\W\d_]+", clean, re.UNICODE)
+    )
 _RATE_SUITABLE_PATTERN = re.compile(
     r"\b(?:(?:mujhe )?rates? (?:mujhe )?pasand (?:hai|hain|aaye|aye)|"
     r"rates? (?:theek|thik|fine|good|suitable)|"
@@ -595,6 +708,10 @@ _BARE_NEGATIONS = {
     "नही",
 }
 _CURRENT_ARRANGEMENT_NONE_PATTERNS = (
+    re.compile(
+        r"\b(?:abhi|just|recently|haal\s+hi\s+mein)\b.{0,35}"
+        r"\b(?:launch|launched|start|started|shuru)\b"
+    ),
     re.compile(r"\b(?:abhi|currently|right now)?\s*(?:main|mein|hum)?\s*kuchh?(?:\s+bhi|\s+hi)?\s+use\s+n(?:a|ah)i(?:n)?\s+kar"),
     re.compile(r"\b(?:abhi|currently|right now)?\s*(?:main|mein|hum)?\s*koi(?:\s+\w+){0,4}\s+use\s+n(?:a|ah)i(?:n)?\s+kar"),
     re.compile(r"\babhi\s+tak\s+koi(?:\s+\w+){0,4}\s+select\s+n(?:a|ah)i(?:n)?\s+ki"),
@@ -714,13 +831,14 @@ def is_anything_else_no_answer(value: object) -> bool:
 
 
 def _spoken_business_type(text: object) -> tuple[str, str] | None:
-    """Recognize short business-type acronyms despite common realtime ASR spacing."""
+    """Normalize an explicit operating model stated as natural language or an acronym."""
     clean = normalize_text(text).rstrip(".!?")
     natural_type_patterns = (
         (
             "D2C",
-            r"(?:(?:mera|mere|my)\s+(?:business\s+)?(?:hai|is)\s+)?"
-            r"(?:direct\s*(?:to|2)\s*(?:customer|consumer)|direct[- ]to[- ]consumer)",
+            r"(?:(?:mera|mere|my|our|hamara|humara)\s+(?:business\s+)?(?:hai|is)\s+)?"
+            r"(?:(?:we|hum)\s+)?(?:sell\s+)?direct(?:ly)?\s*(?:to|2)?\s*"
+            r"(?:end\s+)?(?:customer|consumer)s?",
         ),
         (
             "B2C",
@@ -731,6 +849,16 @@ def _spoken_business_type(text: object) -> tuple[str, str] | None:
             "B2B",
             r"(?:(?:mera|mere|my)\s+(?:business\s+)?(?:hai|is)\s+)?"
             r"business\s*(?:to|2)\s*business",
+        ),
+        (
+            "C2C",
+            r"(?:(?:mera|mere|my|our|hamara|humara)\s+(?:business\s+)?(?:hai|is)\s+)?"
+            r"(?:customer|consumer)\s*(?:to|2)\s*(?:customer|consumer)",
+        ),
+        (
+            "Marketplace-led",
+            r"(?:(?:we|hum)\s+)?(?:sell|selling|bechte|operate|business)\s+"
+            r"(?:mainly\s+|primarily\s+)?(?:through|via|on|se)\s+(?:a\s+)?marketplaces?",
         ),
     )
     for business_type, pattern in natural_type_patterns:
@@ -748,7 +876,7 @@ def _spoken_business_type(text: object) -> tuple[str, str] | None:
     match = re.fullmatch(
         r"(?:(?:sorry|actually|correction)\s+)?"
         r"(?:my|mera|mere)?\s*(?:business(?:\s+type)?\s*(?:is|hai)?\s*)?"
-        r"(b|bee|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])",
+        r"(b|bee|c|see|sea|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])",
         clean,
     )
     if not match:
@@ -760,9 +888,12 @@ def _mentioned_business_type(text: object) -> tuple[str, str] | None:
     """Extract an explicit acronym volunteered inside a longer multi-fact reply."""
     clean = normalize_text(text).rstrip(".!?")
     natural_match = re.search(
-        r"\b(direct\s*(?:to|2)\s*(?:customer|consumer)|"
+        r"\b(direct(?:ly)?\s*(?:to|2)?\s*(?:end\s+)?(?:customer|consumer)s?|"
         r"business\s*(?:to|2)\s*(?:customer|consumer)|"
-        r"business\s*(?:to|2)\s*business)\b",
+        r"business\s*(?:to|2)\s*business|"
+        r"(?:customer|consumer)\s*(?:to|2)\s*(?:customer|consumer)|"
+        r"(?:sell|selling|bechte|operate|business)\s+(?:mainly\s+|primarily\s+)?"
+        r"(?:through|via|on|se)\s+(?:a\s+)?marketplaces?)\b",
         clean,
         re.IGNORECASE,
     )
@@ -770,10 +901,17 @@ def _mentioned_business_type(text: object) -> tuple[str, str] | None:
         phrase = natural_match.group(0)
         if phrase.startswith("direct"):
             return "D2C", phrase
+        if "marketplace" in phrase:
+            return "Marketplace-led", phrase
+        if phrase.startswith(("customer", "consumer")):
+            return "C2C", phrase
         if phrase.endswith("business"):
             return "B2B", phrase
         return "B2C", phrase
-    match = re.search(r"\b(b|bee|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])\b", clean)
+    match = re.search(
+        r"\b(b|bee|c|see|sea|d|day|dee|g|gee)\s*(?:2|to)\s*([bc])\b",
+        clean,
+    )
     if not match:
         return None
     return f"{_BUSINESS_TYPE_LETTERS[match.group(1)]}2{match.group(2).upper()}", match.group(0)
@@ -888,7 +1026,7 @@ def _conversation_consent(text: object) -> str:
     )
     available_to_talk = bool(
         re.search(
-            r"\b(?:free|available|baat\s+kar\s+sakte|boliye|bataiye)\b|"
+            r"\b(?:free|available|baat\s+kar\s+sakte|boliye|bataiye|handle|main\s+hi)\b|"
             r"(?:फ्री|बात\s+कर\s+सकते|बोलिए|बताइए)",
             clean,
             re.IGNORECASE,
@@ -926,6 +1064,11 @@ def _current_provider_evidence(
                 re.IGNORECASE,
             )
             or re.search(r"\b\d{6}\b", clean)
+            or re.search(
+                rf"(?<!\w)(?:{_LOCATION_ALTERNATION})(?!\w)",
+                clean,
+                re.IGNORECASE,
+            )
         )
     ):
         return ""
@@ -938,7 +1081,30 @@ def _current_provider_evidence(
         clean,
         flags=re.IGNORECASE,
     ).strip()
+    candidate = re.sub(
+        r"\s+(?:ka\s+)?(?:use|using|used)\s*(?:kar\s+raha\s+h(?:u|oo)n|"
+        r"kar\s+rahi\s+h(?:u|oo)n|karta\s+h(?:u|oo)n|karte\s+hain|hai)?$",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    ).strip()
     if not candidate or len(candidate) > 80:
+        return ""
+    if re.search(
+        r"\b(?:stock\s+market|share\s+market|trading|investment|investing|"
+        r"mutual\s+fund|crypto|banking)\b",
+        candidate,
+        re.IGNORECASE,
+    ):
+        return ""
+    words = re.findall(r"[a-z][a-z'-]*", candidate, re.IGNORECASE)
+    if (
+        not words
+        or len(words) > 6
+        or re.search(r"[^\w\s&'.-]", candidate, re.UNICODE)
+        or any(char.isdigit() for char in candidate)
+        or any(len(word) == 1 for word in words)
+    ):
         return ""
     generic = {
         "courier",
@@ -957,6 +1123,23 @@ def _assistance_intent(text: object, previous_agent_text: object = "") -> str:
     previous = normalize_text(previous_agent_text)
     if _ONBOARDING_REQUEST_PATTERN.search(clean):
         return "Onboarding"
+    affirmative_followup = bool(
+        _conversation_consent(clean) == "Accepted"
+        or re.search(r"\b(?:karva|karwa|karo|check\s+kar|start\s+kar)\w*\b", clean)
+    )
+    previous_offered_rates_only = bool(
+        re.search(r"\brates?\b", previous)
+        and not re.search(r"\bonboarding\b", previous)
+    )
+    if affirmative_followup and previous_offered_rates_only:
+        return "Rates"
+    if (
+        re.search(r"\brates?\s+check\b", previous)
+        and re.search(r"\b(?:business|brand|company)\b.{0,25}\b(?:name|naam)\b", previous)
+    ):
+        # An explicit rate-discovery question is authoritative even if async
+        # intent extraction has not yet settled the preceding affirmative.
+        return "Rates"
     # A benefits/features side-question is not consent to enter the pricing
     # qualification flow. Answer it and keep the rates/onboarding choice open.
     if (
@@ -1191,6 +1374,10 @@ class GatedConversationState:
         self.direct_onboarding_flow = direct_onboarding_flow
         self.model_led_flow = model_led_flow
         self.fields: dict[str, FieldState] = {}
+        self.correct_person_confirmed = False
+        self.correct_person_turn_id = ""
+        self.pending_retry_counts: dict[str, int] = {}
+        self.skipped_after_retry_fields: set[str] = set()
         self.optional_ended_by = ""
         self.company_details_ended_by = ""
         self.transitions: list[dict[str, Any]] = []
@@ -1265,6 +1452,7 @@ class GatedConversationState:
         self.last_provider_options_query = False
         self.last_provider_rates_query = False
         self.provider_rates_answer_due = False
+        self.provider_rate_scope = ""
         self.requested_provider_rate_name = ""
         self.last_problem_captured = False
         self.shadowfax_surface_rate_due = False
@@ -1322,6 +1510,22 @@ class GatedConversationState:
             )
 
     def optional_sequence(self) -> tuple[str, ...]:
+        if self.model_led_flow:
+            # Keep V6 concise, but collect the minimum operational context a
+            # sales consultant needs before comparing a rate: who the customer
+            # is, how they sell, their current shipping setup/provider, and the
+            # provider. Problems, competitor price, and platform remain useful
+            # optional facts that are saved when volunteered but never delay a
+            # requested route rate.
+            sequence = [
+                "business_name",
+                "business_type",
+                "current_shipping_arrangement",
+            ]
+            arrangement = normalize_text(self.value("current_shipping_arrangement"))
+            if arrangement in PROVIDER_ARRANGEMENTS:
+                sequence.append("current_provider_name")
+            return tuple(sequence)
         sequence = ["business_name", "business_type"]
         if self.direct_onboarding_flow:
             sequence.append("business_platform")
@@ -1384,9 +1588,40 @@ class GatedConversationState:
         ):
             if not self.verified_rate_presented():
                 return ""
+            discovery_pending = self.next_discovery_field()
+            if discovery_pending:
+                return discovery_pending
             if not self.is_handled("monthly_shipments"):
                 return "monthly_shipments"
             return ""
+
+        if self.model_led_flow and self.value("assistance_intent") == "Rates":
+            # A volunteered city/locality route is already sufficient input for
+            # the knowledge-base resolver. Complete a partial route immediately
+            # and, once both endpoints exist, stop optional discovery so the
+            # verified zone/rate lookup owns the next response.
+            route_started = any(
+                self.route_endpoint_handled(endpoint)
+                for endpoint in ("pickup", "delivery")
+            )
+            if route_started:
+                route_complete = all(
+                    self.route_endpoint_handled(endpoint)
+                    for endpoint in ("pickup", "delivery")
+                )
+                if route_complete:
+                    discovery_pending = self.next_discovery_field()
+                    if discovery_pending:
+                        return discovery_pending
+                    if self.next_route_for_lookup():
+                        return ""
+                    if not self.is_handled("monthly_shipments"):
+                        return "monthly_shipments"
+                    return ""
+                if all(self.is_handled(field) for field in ("business_name", "business_type")):
+                    for endpoint in ("pickup", "delivery"):
+                        if not self.route_endpoint_handled(endpoint):
+                            return f"{endpoint}_location"
 
         discovery_pending = self.next_discovery_field()
         if discovery_pending:
@@ -1473,6 +1708,8 @@ class GatedConversationState:
         )
 
     def is_handled(self, field: str) -> bool:
+        if field in self.skipped_after_retry_fields:
+            return True
         state = self.fields.get(field)
         return bool(
             state
@@ -1591,10 +1828,91 @@ class GatedConversationState:
             or self.provider_rates_answer_due
         )
 
+    def _reopen_for_pricing_request(self) -> None:
+        """Let a new customer-led pricing question supersede every close state."""
+        self.explicit_pricing_request_this_turn = True
+        self.move_forward_question_due = False
+        self.move_forward_clarification_due = False
+        self.move_forward_decision = ""
+        self.onboarding_link_due = False
+        self.onboarding_link_presented = False
+        self.better_plan_close_due = False
+        self.better_plan_close_presented = False
+        self.unsatisfied_problem_due = False
+        self.unsatisfied_resolution_due = False
+        self.unsatisfied_resolution_presented = False
+        self.rate_sentiment_clarification_due = False
+        self.deferred_close_due = False
+        self.polite_close_due = False
+        self.polite_close_presented = False
+        self.pricing_review_decision = ""
+
+    def begin_provider_rate_request(self, requested_name: str = "") -> None:
+        """Open one authoritative named/all-courier KB lookup."""
+        self._reopen_for_pricing_request()
+        self.provider_rate_scope = "Named" if requested_name else "All"
+        self.requested_provider_rate_name = str(requested_name or "").strip()
+        self.provider_rates_answer_due = True
+        self.last_provider_rates_query = True
+        self.last_provider_options_query = True
+        self.requested_rate_type = "Zonal"
+        self.pending_catalogs.clear()
+        # A previous generic, named, or truncated result must never answer a
+        # new request with stale amounts. The next KB response owns speech.
+        self.authorized_rate_amounts.clear()
+        self.primary_rate_amount = None
+        self.verified_starting_options = []
+        self.available_courier_partners = []
+
+    def _provider_options_cover_requested_scope(self) -> bool:
+        if not self.verified_starting_options:
+            return False
+        returned = {
+            re.sub(r"\W+", "", normalize_text(option.get("courier")))
+            for option in self.verified_starting_options
+            if isinstance(option, dict) and option.get("courier")
+        }
+        if self.provider_rate_scope == "Named":
+            requested = re.sub(
+                r"\W+", "", normalize_text(self.requested_provider_rate_name)
+            )
+            return bool(requested and requested in returned)
+        if self.provider_rate_scope == "All":
+            available = {
+                re.sub(r"\W+", "", normalize_text(partner))
+                for partner in self.available_courier_partners
+                if str(partner or "").strip()
+            }
+            return bool(available and available.issubset(returned))
+        return False
+
+    def named_courier_rate_due(self) -> bool:
+        return bool(
+            self.provider_rates_answer_due
+            and self.provider_rate_scope == "Named"
+            and self.requested_provider_rate_name
+            and self.is_confirmed("zone")
+            and not self.shadowfax_surface_rate_due
+            and not self._provider_options_cover_requested_scope()
+        )
+
+    def all_courier_rates_due(self) -> bool:
+        return bool(
+            self.provider_rates_answer_due
+            and self.provider_rate_scope == "All"
+            and self.is_confirmed("zone")
+            and not self._provider_options_cover_requested_scope()
+        )
+
+    def provider_rate_lookup_due(self) -> bool:
+        return self.named_courier_rate_due() or self.all_courier_rates_due()
+
     def mark_provider_rates_presented(self) -> None:
         if not self.provider_rates_answer_due:
             return
         self.provider_rates_answer_due = False
+        self.provider_rate_scope = ""
+        self.requested_provider_rate_name = ""
         self.last_provider_rates_query = False
         self.last_provider_options_query = False
         self._append_transition(
@@ -1630,6 +1948,7 @@ class GatedConversationState:
         customer_text: str,
         turn_id: str,
         pending_field_at_turn_start: str | None = None,
+        pending_question_was_asked: bool = True,
     ) -> list[dict[str, Any]]:
         decisions = result.get("decisions")
         if not isinstance(decisions, list):
@@ -1683,19 +2002,22 @@ class GatedConversationState:
                 # permission question. Never let semantic spillover rewrite it
                 # from a later rates, quantity, or qualification answer.
                 continue
+            if (
+                field == "conversation_consent"
+                and self.correct_person_turn_id == turn_id
+            ):
+                # The first affirmative opening answer confirms only that the
+                # customer handles shipping. Permission is a separate turn.
+                continue
             if field == "business_type" and disposition == "answered":
-                evidence = str(raw.get("evidence") or "")
-                spoken_business_type = _spoken_business_type(evidence)
-                proposed_business_type = re.sub(
-                    r"\s+", "", str(raw.get("value") or "")
-                ).upper()
-                if (
-                    spoken_business_type is None
-                    or spoken_business_type[0] != proposed_business_type
+                proposed_business_type = _canonical_business_model(raw.get("value"))
+                if proposed_business_type is None or not _business_model_evidence_present(
+                    raw.get("evidence")
                 ):
-                    # Semantic normalization is allowed only when the acronym
-                    # is actually present in the customer's evidence.
                     continue
+                # Natural-language meaning belongs to the semantic model.
+                # apply_decision still requires confidence and exact evidence.
+                raw = {**raw, "value": proposed_business_type}
             if (
                 field == "service"
                 and disposition == "answered"
@@ -1831,6 +2153,34 @@ class GatedConversationState:
             )
             if transition:
                 applied.append(transition)
+        pending_answered = any(
+            transition.get("field") == pending_field_at_turn_start
+            for transition in applied
+        )
+        if pending_field_at_turn_start and (
+            pending_answered or self.pending_field() != pending_field_at_turn_start
+        ):
+            self.pending_retry_counts.pop(pending_field_at_turn_start, None)
+            self.skipped_after_retry_fields.discard(pending_field_at_turn_start)
+        elif (
+            pending_field_at_turn_start
+            and self.model_led_flow
+            and pending_question_was_asked
+        ):
+            retry_count = self.pending_retry_counts.get(pending_field_at_turn_start, 0) + 1
+            self.pending_retry_counts[pending_field_at_turn_start] = retry_count
+            if retry_count >= 2 and pending_field_at_turn_start in OPTIONAL_QUALIFICATION_FIELDS:
+                self.skipped_after_retry_fields.add(pending_field_at_turn_start)
+                transition = {
+                    "event": "noncritical_field_skipped_after_retry",
+                    "field": pending_field_at_turn_start,
+                    "turn_id": turn_id,
+                    "created_at": time.time(),
+                }
+                self._append_transition(transition)
+                applied.append(transition)
+            elif applied:
+                self.last_turn_disposition = "mixed"
         if applied and self.last_turn_disposition == "unrelated":
             self.last_turn_disposition = "answered"
         if not applied and self.last_turn_disposition not in {"unrelated", "mixed"}:
@@ -1858,6 +2208,7 @@ class GatedConversationState:
         self.explicit_pricing_request_this_turn = bool(
             _requested_rate_type(clean) in {"Flat", "Flat Zonal"}
             or explicit_zone_rate_request
+            or _requested_provider_rate_name(clean)
         )
         if (
             self.model_led_flow
@@ -1940,8 +2291,13 @@ class GatedConversationState:
             and not generic_services_query
             and _PROVIDER_OPTIONS_QUERY_PATTERN.search(clean)
         )
-        detected_provider_rates_query = bool(
+        requested_provider_rate_name = _requested_provider_rate_name(
+            clean,
+            previous_clean,
+        )
+        direct_all_provider_rates_query = bool(
             self.v5_company_pair_flow
+            and not requested_provider_rate_name
             and (
                 self.last_provider_options_query
                 and re.search(
@@ -1949,35 +2305,30 @@ class GatedConversationState:
                     clean,
                     re.IGNORECASE,
                 )
-                or self.verified_starting_options
-                and _PROVIDER_RATE_ASR_PATTERN.search(clean)
-                or _requested_provider_rate_name(clean)
+                or _PROVIDER_RATE_ASR_PATTERN.search(clean)
             )
         )
-        requested_provider_rate_name = _requested_provider_rate_name(clean)
-        if requested_provider_rate_name:
-            self.requested_provider_rate_name = requested_provider_rate_name
-            # A concrete retained-rate follow-up reopens the active call from
-            # a stale objection/farewell state without erasing discovery.
-            self.move_forward_question_due = False
-            self.move_forward_clarification_due = False
-            self.move_forward_decision = ""
-            self.onboarding_link_due = False
-            self.better_plan_close_due = False
-            self.better_plan_close_presented = False
-            self.unsatisfied_problem_due = False
-            self.unsatisfied_resolution_due = False
-            self.unsatisfied_resolution_presented = False
-            self.rate_sentiment_clarification_due = False
-            self.deferred_close_due = False
-            self.polite_close_due = False
-            self.polite_close_presented = False
-            self.pricing_review_decision = ""
-        if detected_provider_rates_query:
-            self.provider_rates_answer_due = True
-        self.last_provider_rates_query = bool(
-            detected_provider_rates_query or self.provider_rates_answer_due
+        contextual_all_provider_rates_query = bool(
+            self.v5_company_pair_flow
+            and not requested_provider_rate_name
+            and re.search(
+                r"\b(?:jo\s+jo|sab|sabhi|saare|sare|all)\b.{0,40}"
+                r"\b(?:available|rates?|bata|list)\b|"
+                r"\b(?:available|rates?)\b.{0,40}\b(?:sab|sabhi|saare|sare|all)\b",
+                clean,
+                re.IGNORECASE,
+            )
+            and re.search(
+                r"\b(?:courier|provider|rate|rates)\b",
+                previous_clean,
+                re.IGNORECASE,
+            )
         )
+        if requested_provider_rate_name:
+            self.begin_provider_rate_request(requested_provider_rate_name)
+        elif direct_all_provider_rates_query or contextual_all_provider_rates_query:
+            self.begin_provider_rate_request()
+        self.last_provider_rates_query = bool(self.provider_rates_answer_due)
         if self.provider_rates_answer_due:
             self.last_provider_options_query = True
         informational_followup = bool(
@@ -2243,11 +2594,29 @@ class GatedConversationState:
                 or re.search(r"\b(?:aur\s+kuch|anything\s+else|kuch\s+aur)\b", previous_clean)
             )
         )
+        contextual_whatsapp_status_flat_asr = bool(
+            self.v5_company_pair_flow
+            and self.verified_rate_presented()
+            and re.fullmatch(
+                r"whats[\s-]*app\s+status\s+available(?:\s+hai(?:n)?)?"
+                r"(?:\s+aap\s+ke\s+pass)?[.!?]*",
+                clean,
+            )
+        )
         contextual_flat_jo_zonal_asr = bool(
             self.v5_company_pair_flow
             and self.flat_catalog_presented
             and re.fullmatch(
                 r"flat\s+jo\s+(?:rate|rates|pricing)(?:\s+kya\s+hai)?[.!?]*",
+                clean,
+            )
+        )
+        contextual_two_thousand_zonal_asr = bool(
+            self.v5_company_pair_flow
+            and self.flat_catalog_presented
+            and re.fullmatch(
+                r"(?:aur\s+)?(?:2\s*,?\s*000|two\s+thousand)\s+"
+                r"(?:rate|rates|red)(?:\s+mein)?[.!?]*",
                 clean,
             )
         )
@@ -2274,10 +2643,10 @@ class GatedConversationState:
             and (
                 pending == "current_shipping_rate"
                 or re.search(
-                    r"\b(?:aapka|aapko|current|abhi|mil|chal)\b.{0,80}"
+                    r"\b(?:current|abhi|mil|chal)\b.{0,80}"
                     r"\b(?:rate|rates|price|pricing|charge|charges)\b|"
                     r"\b(?:rate|rates|price|pricing|charge|charges)\b.{0,80}"
-                    r"\b(?:aapka|aapko|current|abhi|mil|chal)\b",
+                    r"\b(?:current|abhi|mil|chal)\b",
                     previous_clean,
                 )
             )
@@ -2326,7 +2695,24 @@ class GatedConversationState:
                 or _requested_rate_type(clean)
             ):
                 consent = "Accepted"
-            if consent:
+            correct_person_question = bool(
+                not self.correct_person_confirmed
+                and re.search(r"\b(?:shipping|operations?)\b", previous_clean)
+                and re.search(r"\b(?:handle|handles|handler|person|baat)\b", previous_clean)
+            )
+            if consent == "Accepted" and correct_person_question:
+                self.correct_person_confirmed = True
+                self.correct_person_turn_id = turn_id
+                transition = {
+                    "event": "correct_person_confirmed",
+                    "evidence": str(customer_text or "").strip(),
+                    "turn_id": turn_id,
+                    "source": "deterministic",
+                    "created_at": time.time(),
+                }
+                self._append_transition(transition)
+                applied.append(transition)
+            elif consent:
                 transition = self.apply_decision(
                     field=pending,
                     disposition="answered",
@@ -2424,9 +2810,22 @@ class GatedConversationState:
         if self.v4_strict_flow and self.value("conversation_consent") == "Accepted":
             explicit_rate_type = (
                 _requested_rate_type(clean)
-                or ("Flat Zonal" if contextual_flat_jo_zonal_asr else "")
-                or ("Flat" if contextual_call_1627_flat_asr else "")
+                or (
+                    "Flat Zonal"
+                    if contextual_flat_jo_zonal_asr or contextual_two_thousand_zonal_asr
+                    else ""
+                )
+                or (
+                    "Flat"
+                    if contextual_call_1627_flat_asr
+                    or contextual_whatsapp_status_flat_asr
+                    else ""
+                )
             )
+            if _DISSATISFIED_PATTERN.search(clean):
+                # "Flat rate mehenga hai" is a price objection to resolve,
+                # not a request to switch catalogs and erase objection state.
+                explicit_rate_type = ""
             same_presented_catalog = bool(
                 explicit_rate_type == self.requested_rate_type
                 and not explicit_cod_rate_request
@@ -2435,6 +2834,8 @@ class GatedConversationState:
                     or explicit_rate_type == "Flat Zonal" and self.flat_zonal_catalog_presented
                 )
             )
+            if explicit_rate_type and not same_presented_catalog:
+                self._reopen_for_pricing_request()
             if (explicit_rate_type and not same_presented_catalog) or explicit_zone_rate_request:
                 # A new explicit pricing request supersedes the post-answer
                 # checkpoint. Otherwise guidance can keep asking "anything
@@ -2839,8 +3240,16 @@ class GatedConversationState:
         )
         quantity_text = ""
         quantity_alias_value: int | None = None
+        explicit_weight_answer = bool(
+            re.search(
+                r"\b\d+(?:\.\d+)?\s*(?:kg|kgs|kilograms?|g|gm|gms|grams?)\b",
+                clean,
+                re.IGNORECASE,
+            )
+        )
         if (
             not pincode_answer_context
+            and not explicit_weight_answer
             and (quantity_context or self.monthly_quantity_due)
             and quantity_match
         ):
@@ -2877,6 +3286,10 @@ class GatedConversationState:
             quantity_numbers = re.findall(r"\d[\d,]*", clean)
             if quantity_numbers:
                 quantity_text = quantity_numbers[-1]
+        if explicit_weight_answer:
+            # A weight unit is decisive even when the assistant's preceding
+            # question or stale pending state still mentions monthly volume.
+            quantity_text = ""
         if self.model_led_flow and not self.verified_rate_presented():
             # Enforce the sales order in state, even if a draft asks early:
             # verified KB rate first, monthly shipments second.
@@ -2926,18 +3339,29 @@ class GatedConversationState:
         if business_name_question_context and not self.is_handled("business_name"):
             original_candidate = str(customer_text or "").strip(" \t\r\n.,!?;")
             candidate = re.sub(
-                r"^(?:(?:my|mere|mera|prime)\s+)?(?:business|brand|company)\s+"
-                r"(?:name\s+)?(?:is|hai)\s+",
+                r"^(?:(?:haan|han|yes|ji)\W+)?(?:(?:my|mere|mera)\s+)?"
+                r"(?:business|brand|company)\s+"
+                r"(?:(?:ka\s+)?(?:name|naam)\s+)?(?:is|hai)\s+",
                 "",
                 original_candidate,
+                flags=re.IGNORECASE,
+            ).strip(" \t\r\n.,!?;")
+            candidate = re.sub(
+                r"^(?:(?:हां|हाँ|जी)\s*[,،]?\s*)?(?:मेरे|मेरा)\s+"
+                r"(?:बिजनेस|बिज़नेस|बिज़नेस|व्यवसाय|ब्रांड|कंपनी)\s+का\s+नाम\s+"
+                r"(?:है|हैं)\s+",
+                "",
+                candidate,
                 flags=re.IGNORECASE,
             ).strip(" \t\r\n.,!?;")
             candidate_clean = normalize_text(candidate)
             if (
                 candidate
                 and len(candidate) <= 80
+                and _valid_business_name_candidate(candidate)
                 and not _contains_phrase(candidate_clean, UNKNOWN_PHRASES | REFUSAL_PHRASES)
                 and not re.search(r"\b(?:rate|rates|onboarding|pincode|zone)\b", candidate_clean)
+                and not _RATE_REQUEST_PATTERN.search(candidate_clean)
                 and not re.search(r"\b\d{6}\b", candidate_clean)
                 and _mentioned_business_type(customer_text) is None
             ):
@@ -2997,6 +3421,16 @@ class GatedConversationState:
 
         platform_question_context = bool(
             pending == "business_platform"
+            or (
+                self.model_led_flow
+                and re.search(
+                    r"\b(?:shopify|woo\s*commerce|woocommerce|marketplace|website|web\s*site|"
+                    r"offline|own\s+site|custom\s+site|apni\s+website|khud\s+ki\s+website)\b|"
+                    r"\u0935\u0947\u092c\u0938\u093e\u0907\u091f|\u092e\u093e\u0930\u094d\u0915\u0947\u091f\u092a\u094d\u0932\u0947\u0938|\u0911\u092b\u0932\u093e\u0907\u0928",
+                    clean,
+                    re.IGNORECASE,
+                )
+            )
             or re.search(
                 r"\b(?:shopify|woo\s*commerce|website|marketplace|platform)\b.{0,80}"
                 r"\b(?:operate|sell|business|orders?)\b|"
@@ -3040,7 +3474,8 @@ class GatedConversationState:
                     applied.append(transition)
 
         provider_match = re.search(
-            r"\b(?:ship\s*rocket|shipping\s*rocket|show\s+a\s+rocket|shirocket|"
+            r"\b(?:ship\s*rocket|shipping\s*rocket|chip\s*rocket|shippy\s*rocket|"
+            r"ship\s*pocket|shippocket|show\s+a\s+rocket|shirocket|"
             r"shiprakat|shriprakat|shiv\s*rakesh|ship\s*rakesh|shiv\s*rocket)\b|"
             r"\u0ab8\u0ac0\u0aaa\u0acd\u0ab0\u0acb\u0a95\u0ac7\u0a9f|"
             r"\u0ab6\u0abf\u0aaa\u0ab0\u0acb\u0a95\u0ac7\u0a9f",
@@ -3291,9 +3726,7 @@ class GatedConversationState:
             self._presented_starting_rates.discard("zone:A")
             transition = {
                 "event": "pricing_mode_updated",
-                "pricing_mode": (
-                    "pan_india_zone_a_starting" if self.v5_company_pair_flow else "general_starting"
-                ),
+                "pricing_mode": "pan_india_zone_a_starting",
                 "trigger_field": "pan_india",
                 "evidence": self.general_rate_evidence,
                 "turn_id": turn_id,
@@ -3383,6 +3816,8 @@ class GatedConversationState:
         location_assignments: dict[str, str] = {}
         location_route = None
         if location_routes:
+            if self.value("assistance_intent") == "Rates":
+                self.explicit_pricing_request_this_turn = True
             if current_rate_question_context:
                 rate_basis = "; ".join(match.group(0) for match in location_routes)
                 transition = self.apply_decision(
@@ -3419,14 +3854,18 @@ class GatedConversationState:
             if whole_location:
                 endpoint = "pickup" if pending.startswith("pickup_") else "delivery"
                 location_assignments[f"{endpoint}_location"] = whole_location
-        elif not current_rate_question_context:
+        if (
+            not location_assignments
+            and not current_rate_question_context
+            and (self.model_led_flow or pending not in PINCODE_FIELDS)
+        ):
             # A one-sided route change keeps the other confirmed endpoint.
             # This lets callers say "ab Mumbai ke liye rate" or "Noida se"
             # without being asked to repeat the whole route.
             pickup_match = re.search(
                 rf"(?:(?:\bfrom\b|\bpick[\s-]?up(?:\s+(?:city|location))?\b|\borigin\b)"
                 rf"(?:\s+\w+){{0,6}}?\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
-                rf"(?<!\w)(?P<suffix>{_LOCATION_ALTERNATION})(?!\w)\s+(?:se|from)\b)",
+                rf"(?<!\w)(?P<suffix>{_LOCATION_ALTERNATION})(?!\w)\s+(?:se|from|से)(?:\b|(?=\s|$)))",
                 clean,
                 re.IGNORECASE,
             )
@@ -3434,7 +3873,7 @@ class GatedConversationState:
                 rf"(?:(?:\bto\b|\bdeliver(?:y|ed|\s+hote)?(?:\s+(?:city|location))?\b|\bdrop\b|\bdestination\b)"
                 rf"(?:\s+\w+){{0,6}}?\s*(?P<prefix>{_LOCATION_ALTERNATION})(?!\w)|"
                 rf"(?<!\w)(?P<suffix>{_LOCATION_ALTERNATION})(?!\w)\s+"
-                rf"(?:tak|ke\s+liye|ka\s+rate|ke\s+rates?)\b)",
+                rf"(?:tak|ke\s+liye|ka\s+rate|ke\s+rates?|तक|के\s+लिए)(?:\b|(?=\s|$)))",
                 clean,
                 re.IGNORECASE,
             )
@@ -3574,6 +4013,20 @@ class GatedConversationState:
             or not _evidence_present(evidence, customer_text)
         ):
             return None
+
+        if field == "business_name" and disposition == "answered":
+            if not _valid_business_name_candidate(value):
+                return None
+            proposed_name = normalize_text(value)
+            spoken_evidence = normalize_text(evidence)
+            proposed_tokens = [
+                token
+                for token in re.findall(r"[a-z0-9]+", proposed_name)
+                if token not in {"business", "brand", "company", "name", "naam"}
+            ]
+            if proposed_tokens and not all(token in spoken_evidence for token in proposed_tokens):
+                # Proper names must stay grounded in the customer's words.
+                return None
 
         if (
             field == "current_shipping_rate"
@@ -3747,7 +4200,7 @@ class GatedConversationState:
                 clean_customer = normalize_text(customer_text)
                 explicit_complete_route = bool(
                     re.search(
-                        rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)\s+(?:to|se)\s+"
+                        rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)\s+(?:to|se|टू|से)\s+"
                         rf"(?<!\w)({_LOCATION_ALTERNATION})(?!\w)",
                         clean_customer,
                         re.IGNORECASE,
@@ -3755,11 +4208,11 @@ class GatedConversationState:
                 )
                 endpoint_marker = (
                     r"\b(?:from|pickup|pick[\s-]?up|origin)\b|"
-                    r"(?<!\w)(?:" + _LOCATION_ALTERNATION + r")(?!\w)\s+(?:se|from)\b"
+                    r"(?<!\w)(?:" + _LOCATION_ALTERNATION + r")(?!\w)\s+(?:se|from|से)(?:\b|(?=\s|$))"
                     if endpoint == "pickup"
                     else r"\b(?:to|delivery|drop|destination)\b|"
                     r"(?<!\w)(?:" + _LOCATION_ALTERNATION + r")(?!\w)\s+"
-                    r"(?:tak|ke\s+liye|ka\s+rate|ke\s+rates?)\b"
+                    r"(?:tak|ke\s+liye|ka\s+rate|ke\s+rates?|तक|के\s+लिए)(?:\b|(?=\s|$))"
                 )
                 correction_marked = bool(
                     re.search(
@@ -3911,8 +4364,7 @@ class GatedConversationState:
         if field == "current_shipping_arrangement":
             return ARRANGEMENT_ALIASES.get(clean)
         if field == "business_type":
-            canonical = re.sub(r"\s+", "", str(value or "")).upper()
-            return canonical if re.fullmatch(r"[BDG]2[BC]", canonical) else None
+            return _canonical_business_model(value)
         if field in {
             "business_name",
             "business_platform",
@@ -3927,6 +4379,7 @@ class GatedConversationState:
                 return None
             if field == "business_name" and (
                 not any(char.isalpha() for char in rendered)
+                or clean in {"hello", "hi", "hey", "namaste", "namaskar"}
                 or re.fullmatch(r"[bdg]\s*2\s*[bc]", clean, re.IGNORECASE)
                 or re.fullmatch(
                     r"(?:around|about|approx(?:imately)?|lagbhag)?\s*"
@@ -4275,7 +4728,6 @@ class GatedConversationState:
         self.available_courier_partners = []
         if isinstance(payload, dict) and str(payload.get("response_type") or "") in {
             "zone_starting",
-            "general_starting",
         }:
             amount = _number(payload.get("amount"))
             if amount is not None and amount > 0:
@@ -4284,7 +4736,7 @@ class GatedConversationState:
                 self.primary_rate_amount = normalized_amount
             raw_options = payload.get("starting_rate_options")
             if isinstance(raw_options, list) and raw_options:
-                for raw_option in raw_options[:5]:
+                for raw_option in raw_options:
                     if not isinstance(raw_option, dict):
                         continue
                     option_amount = _number(raw_option.get("amount"))
@@ -4413,7 +4865,29 @@ class GatedConversationState:
                 return "onboarding"
             if self.value("assistance_intent") == "Information":
                 return "information"
-            if self.model_led_flow and self.pending_field():
+            if (
+                self.model_led_flow
+                and self.pending_field()
+                and not self.discovery_complete()
+                and self.next_route_for_lookup()
+                and not self.flat_catalog_due()
+                and not self.flat_zonal_catalog_due()
+                and not self.explicit_zone_requested()
+                and not self.pan_india_requested
+            ):
+                # Customer-led pricing remains remembered, but the short
+                # business/setup discovery owns the next turn. This keeps an
+                # early volunteered route from triggering a tool response in
+                # the middle of consent or qualification.
+                return "pending"
+            if (
+                self.model_led_flow
+                and self.pending_field()
+                and not self.flat_catalog_due()
+                and not self.flat_zonal_catalog_due()
+                and not self.explicit_zone_requested()
+                and not self.next_route_for_lookup()
+            ):
                 return "pending"
             # The customer's latest requested pricing structure owns routing.
             # A remembered explicit zone from an earlier Zonal answer must not
@@ -4438,17 +4912,17 @@ class GatedConversationState:
             if self.v5_company_pair_flow and self.explicit_zone_requested():
                 return "zone_starting"
             if self.v5_company_pair_flow and self.route_zone_lookup_status == "unavailable":
-                return "general_starting"
+                return "pending"
             if self.v5_company_pair_flow and self.route_zone_lookup_status == "verified_starting":
                 return "zone_starting"
             if (
                 self.v5_company_pair_flow
-                and self.route_ready_for_lookup()
-                and not self.pending_field()
+                and self.next_route_for_lookup()
+                and (self.model_led_flow or not self.pending_field())
             ):
                 return "route_starting_pending"
             if self.v5_company_pair_flow and self.route_input_unavailable():
-                return "general_starting"
+                return "pending"
             required_fields = (
                 ("dead_weight", "payment_type")
                 if self.requested_rate_type in {"Flat", "Flat Zonal"}
@@ -4463,7 +4937,7 @@ class GatedConversationState:
                 and self.pending_field() not in self.optional_sequence()
                 and not all(self.is_confirmed(field) for field in PINCODE_FIELDS)
             ):
-                return "general_starting"
+                return "pending"
             if self.pending_field() or any(
                 not self.is_confirmed(field) for field in required_fields
             ):
@@ -4472,14 +4946,14 @@ class GatedConversationState:
         if self.is_confirmed("zone"):
             return "zone_starting"
         if self.general_rate_requested:
-            return "general_starting"
+            return "pending"
         for field in RATE_IMPACTING_FIELDS:
             state = self.fields.get(field)
             if not state or state.status not in {"refused", "unavailable"}:
                 continue
             if field == "order_value" and normalize_text(self.value("payment_type")) != "cod":
                 continue
-            return "general_starting"
+            return "pending"
         return "exact" if not self.pending_field() else "pending"
 
     def pricing_trigger_field(self) -> str:
@@ -4488,24 +4962,12 @@ class GatedConversationState:
             return "zone"
         if self.general_rate_requested:
             return "pan_india"
-        if mode == "general_starting":
-            if (
-                self.v4_strict_flow
-                and normalize_text(self.value("payment_type")) == "both"
-            ):
-                return "payment_type_both"
-            for field in RATE_IMPACTING_FIELDS:
-                state = self.fields.get(field)
-                if state and state.status in {"refused", "unavailable"}:
-                    return field
         return "complete" if mode == "exact" else self.pending_field()
 
     def starting_rate_key(self) -> str:
         mode = self.pricing_mode()
         if mode == "zone_starting":
             return f"zone:{self.value('zone')}"
-        if mode == "general_starting":
-            return "general"
         return ""
 
     def starting_rate_due(self) -> bool:
@@ -4670,9 +5132,19 @@ class GatedConversationState:
     def guidance(self) -> str:
         pending = self.pending_field()
         pricing_mode = self.pricing_mode()
+        opening_resume = (
+            "Then ask only whether now is a convenient time for an approximately two-minute "
+            "conversation."
+            if self.correct_person_confirmed
+            else (
+                "Then identify yourself as Harsh from ShipKia and ask only whether this person "
+                "handles the business's shipping or operations."
+            )
+        )
         early_side_query_resume = (
-            "After answering, continue naturally with the one useful unfinished sales step. "
-            "Do not offer rates versus onboarding again."
+            "After answering, return to the unresolved assistance goal once in simpler words. "
+            "Do not begin business discovery until Rates, Onboarding, or Information is confirmed, "
+            "and do not loop an earlier menu."
             if self.model_led_flow
             else (
                 "Then end by asking exactly once: 'Aap kuch aur jaanna chahenge, ya main aapko "
@@ -4681,6 +5153,20 @@ class GatedConversationState:
             )
         )
         if self.v4_strict_flow:
+            if self.provider_rate_lookup_due():
+                if self.provider_rate_scope == "Named":
+                    return (
+                        "Call get_shipkia_starting_rate exactly once now using the retained verified "
+                        "zone and requested_provider_rate_name. Speak only the returned named-courier "
+                        "500-gram Forward GST-inclusive starting rate. Do not use an earlier generic "
+                        "zone amount, list other couriers, or ask for the route again."
+                    )
+                return (
+                    "Call get_shipkia_starting_rate exactly once now using the retained verified "
+                    "zone and no courier filter. List every returned courier/service 500-gram "
+                    "Forward GST-inclusive starting option. Do not reuse a previous filtered result, "
+                    "truncate the current result, or ask for the route again."
+                )
             if self.rate_sentiment_clarification_due:
                 return (
                     "The latest answer may have lost a critical rate-sentiment negation. Ask only: "
@@ -4885,12 +5371,10 @@ class GatedConversationState:
                     provider_resume = "Then ask exactly: 'Kya aap kuch aur jaanna chahenge?'"
                 else:
                     provider_resume = {
-                        "conversation_consent": (
-                            "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
-                        ),
+                        "conversation_consent": opening_resume,
                         "assistance_intent": early_side_query_resume,
                         "business_name": "Then resume by asking only for their business or brand name.",
-                        "business_type": "Then resume by asking only whether their business is B2C or D2C.",
+                        "business_type": "Then resume with this action: " + BUSINESS_MODEL_QUESTION,
                         "current_shipping_arrangement": (
                             "Then resume by asking only whether they currently use a courier or "
                             "shipping aggregator."
@@ -4918,12 +5402,10 @@ class GatedConversationState:
                     "in this response."
                     if self.anything_else_checkpoint_consumed
                     else {
-                        "conversation_consent": (
-                            "Then ask exactly: 'Kya abhi hum do minute baat kar sakte hain?'"
-                        ),
+                        "conversation_consent": opening_resume,
                         "assistance_intent": early_side_query_resume,
                         "business_name": "Then resume by asking only for their business or brand name.",
-                        "business_type": "Then resume by asking only whether their business is B2C or D2C.",
+                        "business_type": "Then resume with this action: " + BUSINESS_MODEL_QUESTION,
                         "current_shipping_arrangement": "Then resume by asking only which courier or shipping provider they use.",
                         "current_provider_name": "Then resume by asking only which courier or aggregator they use.",
                         "current_shipping_rate": "Then resume by asking only their current comparable shipping rate.",
@@ -5118,7 +5600,7 @@ class GatedConversationState:
                     "Never describe this private direction."
                 )
             pending_directions = {
-                "conversation_consent": "Ask only whether this is a convenient time to talk.",
+                "conversation_consent": opening_resume,
                 "assistance_intent": (
                     early_side_query_resume
                     if self.last_turn_disposition in {"unrelated", "mixed"}
@@ -5140,7 +5622,7 @@ class GatedConversationState:
                     if self.qualification_bridge_due()
                     else "Ask only for their business or brand name."
                 ),
-                "business_type": "Ask only whether their business is B2C, B2B, D2C, marketplace-led, or another model.",
+                "business_type": BUSINESS_MODEL_QUESTION,
                 "business_platform": (
                     "Ask only: 'Aap apna business kaise operate karte hain—Shopify, "
                     "WooCommerce, marketplace, apni website, ya kisi aur platform se?'"
@@ -5220,8 +5702,8 @@ class GatedConversationState:
                     and self.last_turn_disposition in {"unrelated", "mixed"}
                 )
                 retry = (
-                    " The last reply did not answer it; acknowledge what they did say and clarify "
-                    "briefly without repeating the same sentence."
+                    " The last reply did not answer it; acknowledge any useful fact, then ask this "
+                    "still-needed question once more in simpler words. Do not restart an earlier menu."
                     if self.last_turn_disposition in {"unrelated", "mixed", "guard_failed"}
                     and not using_early_side_query_resume
                     else ""
@@ -5237,7 +5719,6 @@ class GatedConversationState:
                     "then wait. Do not quote a price or describe this private direction."
                 )
             if pricing_mode in {
-                "general_starting",
                 "zone_starting",
                 "flat_catalog_presented",
                 "flat_zonal_catalog_presented",
@@ -5257,9 +5738,16 @@ class GatedConversationState:
                 "and do not ask another question or use any tool."
             )
         if pending == "conversation_consent":
+            if self.correct_person_confirmed:
+                return (
+                    "The correct shipping/operations person is confirmed. Ask only whether now is "
+                    "a convenient time for an approximately two-minute conversation. Do not ask "
+                    "about rates, onboarding, business details, or shipment details yet."
+                )
             return (
-                "Authoritative V4 introduction stage: ask only whether this is a convenient time to "
-                "talk. Do not ask about rates, onboarding, business details, or shipment details yet."
+                "Authoritative introduction stage: identify yourself as Harsh from ShipKia and ask "
+                "only whether you are speaking with the person who handles business shipping or "
+                "operations. Do not ask about rates, onboarding, or shipment details yet."
             )
         if pending == "assistance_intent":
             return (
@@ -5296,7 +5784,7 @@ class GatedConversationState:
                 "rate and do not substitute a default. Briefly explain that a verified rate needs "
                 "the missing shipment basis, then wait without repeating a refused question."
             )
-        if pricing_mode in {"general_starting", "zone_starting"}:
+        if pricing_mode == "zone_starting":
             return (
                 f"Authoritative pricing mode: {pricing_mode}. The starting-rate response was "
                 "already presented. Do not repeat it and do not call calculate_shipkia_rate. "
@@ -5316,6 +5804,9 @@ class GatedConversationState:
     def snapshot(self) -> dict[str, Any]:
         return {
             "pending_field": self.pending_field(),
+            "correct_person_confirmed": self.correct_person_confirmed,
+            "pending_retry_counts": dict(self.pending_retry_counts),
+            "skipped_after_retry_fields": sorted(self.skipped_after_retry_fields),
             "pricing_ready": self.pricing_ready(),
             "pricing_mode": self.pricing_mode(),
             "pricing_trigger_field": self.pricing_trigger_field(),
@@ -5381,6 +5872,7 @@ class GatedConversationState:
             "last_provider_rates_query": self.last_provider_rates_query,
             "last_flat_structure_query": self.last_flat_structure_query,
             "provider_rates_answer_due": self.provider_rates_answer_due,
+            "provider_rate_scope": self.provider_rate_scope,
             "requested_provider_rate_name": self.requested_provider_rate_name,
             "last_detailed_usp_query": self.last_detailed_usp_query,
             "approved_zone": self.value("zone") if self.is_confirmed("zone") else None,
@@ -5402,6 +5894,33 @@ class GatedConversationState:
                 for name, state in self.fields.items()
             },
         }
+
+
+class V6ConversationState(GatedConversationState):
+    """Production-only ShipKia V6 state with no legacy mode selection."""
+
+    _FIXED_FLOW_FLAGS = frozenset(
+        {
+            "v4_strict_flow",
+            "v5_company_pair_flow",
+            "direct_onboarding_flow",
+            "model_led_flow",
+        }
+    )
+
+    def __init__(self, *, minimum_confidence: float = 0.78) -> None:
+        super().__init__(
+            minimum_confidence=minimum_confidence,
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._FIXED_FLOW_FLAGS and value is not True:
+            raise ValueError(f"{name} is fixed for the V6-only production flow")
+        super().__setattr__(name, value)
 
 
 class SemanticAnswerGuard:
@@ -5501,9 +6020,14 @@ class SemanticAnswerGuard:
             "is pickup_pincode or delivery_pincode and the customer answers with a city/location, "
             "store it in the matching *_location field. Structured pincodes, weight, payment and "
             "order value are handled elsewhere and must not be returned. Never infer a business "
-            "name/type, problem, provider, arrangement, current rate, or service. Business type "
-            "is valid only as a clear standard acronym such as B2C, D2C, or B2B; never return an "
-            "unclear phrase such as A-to-Z as business_type. An unrelated request does not answer "
+            "name, problem, provider, arrangement, current rate, or service. For business_type, "
+            "capture an operating model only when the customer explicitly describes how they sell. "
+            "Normalize direct sales to customers/consumers as D2C, sales to other businesses as "
+            "B2B, business-to-consumer as B2C, customer-to-customer as C2C, and selling through "
+            "marketplaces as Marketplace-led. The evidence may be natural language and need not "
+            "contain an acronym. Never derive the operating model merely from a website/platform, "
+            "product, company name, number, or unclear audio, and never rewrite C2C as D2C. An "
+            "unrelated request does not answer "
             "the pending field. Quote exact evidence from the customer text "
             "for every decision. Map an unknown/refusal only to its explicitly named field, or to "
             "the pending field when that pending field is one of the allowed free-text fields. "
@@ -5522,7 +6046,7 @@ class SemanticAnswerGuard:
             "Extract multiple fields only when each is explicit.\n"
             "The pending field and state snapshot are frozen from the start of this customer turn. "
             "Never treat an answer to that field as unknown/refusal/not-applicable for a later field "
-            "that would become pending after this answer. For example, B2C/D2C cannot refuse the "
+            "that would become pending after this answer. For example, an operating-model answer cannot refuse the "
             "courier-arrangement question.\n"
             f"Pending field: {pending_field or '[none]'}\n"
             f"Previous agent question: {previous_agent_text or '[none]'}\n"

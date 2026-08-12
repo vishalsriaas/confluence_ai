@@ -31,6 +31,13 @@ class TestShipkiaZoneResolver(unittest.TestCase):
         )
         self.assertEqual(result["zone"], "C")
 
+    def test_bareilly_to_delhi_is_domestic_interstate_zone_d(self):
+        result = resolve_shipkia_zone(
+            {"pickup_location": "Bareilly", "delivery_location": "Delhi"}
+        )
+        self.assertEqual(result["zone"], "D")
+        self.assertEqual(result["resolution_basis"], "domestic_interstate")
+
     def test_unknown_valid_pincodes_still_resolve_by_postal_prefix_policy(self):
         same_region = resolve_shipkia_zone(
             {"pickup_pincode": "123456", "delivery_pincode": "129999"}

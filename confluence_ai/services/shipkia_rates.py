@@ -20,7 +20,6 @@ GST_RATE = Decimal("18")
 VOLUMETRIC_DIVISOR = Decimal("5000")
 ZONES = ("A", "B", "C", "D", "E", "F")
 STARTING_RATE_WEIGHT_G = Decimal("500")
-GENERAL_STARTING_RATE = Decimal("22")
 FLAT_RATE_COURIER = "E-Kart"
 FLAT_RATE_SERVICE = "E-Kart SURFACE"
 SHADOWFAX_FLAT_COURIER = "Shadowfax"
@@ -268,17 +267,18 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
 
     if not zone:
         return {
-            "status": "success",
-            "response_type": "general_starting",
+            "status": "zone_required",
+            "response_type": "zone_required",
             "zone": None,
-            "amount": _money(GENERAL_STARTING_RATE),
+            "amount": None,
             "currency": "INR",
-            "gst_inclusive": False,
-            "marketing_headline": True,
+            "gst_inclusive": True,
+            "marketing_headline": False,
             "rate_card": rate_card_metadata(),
             "message": (
-                "ShipKia shipping rates start from Rs 22. The exact rate depends on the route, "
-                "weight and service."
+                "A verified Zone A-F is required. Resolve the customer-stated pickup and delivery "
+                "locations first, use Zone A only for an explicit Pan-India request, or use an "
+                "explicit customer-requested zone. Do not quote a generic fallback amount."
             ),
         }
 
@@ -323,7 +323,7 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
     for row in sorted(
         best_row_by_courier.values(),
         key=lambda item: (item.zone_prices[zone], item.courier_partner.casefold()),
-    )[:5]:
+    ):
         option_base = row.zone_prices[zone]
         option_gst = option_base * GST_RATE / Decimal("100")
         starting_rate_options.append(
@@ -365,7 +365,7 @@ def get_starting_rate(arguments: dict[str, Any] | None = None) -> dict[str, Any]
         ),
         "starting_rate_options": starting_rate_options,
         "starting_rate_options_note": (
-            "These are up to five distinct courier partners' lowest verified 500 g Forward "
+            "These are every configured courier partner's lowest verified 500 g Forward "
             f"starting options for Zone {zone}, including GST. They are rate-card options, not a "
             "guarantee of pincode-level serviceability or delivery time."
         ),
@@ -1131,8 +1131,13 @@ def _zone(arguments: dict[str, Any]) -> str | None:
 
 
 def _matches_courier(row: RateRow, requested: str) -> bool:
-    needle = _normal_text(requested)
-    return needle in _normal_text(row.courier_partner) or needle in _normal_text(row.service)
+    # Customer speech and the rate card may differ only in punctuation or
+    # spacing (for example "Blue Dart" versus "Bluedart"). Compare compact
+    # normalized labels so a named-courier lookup still reaches the KB row.
+    needle = re.sub(r"[^a-z0-9]+", "", requested.lower())
+    courier = re.sub(r"[^a-z0-9]+", "", row.courier_partner.lower())
+    service = re.sub(r"[^a-z0-9]+", "", row.service.lower())
+    return bool(needle and (needle in courier or needle in service))
 
 
 def _matches_service(row: RateRow, requested: str) -> bool:

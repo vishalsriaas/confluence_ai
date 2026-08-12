@@ -239,7 +239,6 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         system_prompt = agent.get_system_prompt(include_tool_catalog=False) if agent else ""
     except TypeError:
         system_prompt = agent.get_system_prompt() if agent else ""
-    personality = agent.personality if agent else ""
     prompt_version = str(payload.get("prompt_version") or "").strip()
     if agent_name == SHIPKIA_VOICE_AGENT:
         from confluence_ai.prompts.shipkia_voice import (
@@ -258,18 +257,6 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         if "{" in system_prompt:
             try:
                 system_prompt = SafeFormatter().format(system_prompt, **payload)
-            except Exception:
-                pass
-
-    if personality:
-        if "{{" in personality:
-            try:
-                personality = frappe.render_template(personality, payload)
-            except Exception:
-                pass
-        if "{" in personality:
-            try:
-                personality = SafeFormatter().format(personality, **payload)
             except Exception:
                 pass
 
@@ -300,7 +287,6 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
         "agent": agent_name,
         "audio_name": audio_name,
         "system_prompt": system_prompt,
-        "personality": personality,
         "context": _voice_metadata_context(payload),
     }
     if prompt_version:
@@ -649,16 +635,8 @@ def _rate_flow_started(audit: dict) -> bool:
 
 
 def _rate_flow_completed(audit: dict) -> bool:
-    """V5 is complete only after one of its two approved closing messages."""
-    if str(audit.get("prompt_version") or "") != "shipkia-voice-v5":
-        return True
-    snapshot = audit.get("state_snapshot")
-    if not isinstance(snapshot, dict):
-        return False
-    return bool(
-        snapshot.get("onboarding_link_presented")
-        or snapshot.get("better_plan_close_presented")
-    )
+    """V6 treats a successful requested rate as a complete Console result."""
+    return True
 
 
 def _console_audit_payload(payload: dict) -> dict:

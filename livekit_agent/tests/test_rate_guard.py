@@ -3,32 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from livekit_agent.agent import (
     GuardedTurnProcessor,
     ShipKiaAssistant,
-    _authoritative_call_state_instruction,
     _authorized_controlled_reply_tools,
     _authoritative_rate_request_arguments,
-    _detailed_services_reply_instruction,
     _gemini_end_sensitivity,
     _gemini_start_sensitivity,
-    _high_volume_manager_reply_instruction,
-    _high_volume_manager_delivery_complete,
     _asr_noise_reason,
     _is_opening_noise_turn,
     _normalize_rate_request_arguments,
     _prepare_rate_arguments,
-    _provider_options_reply_instruction,
     _rate_gate_response,
     _response_language_for_turn,
     _assistant_pincode_claims,
     _assistant_single_zone_claims,
     _shipkia_rate_claim_amounts,
     _shipkia_flow_response_violation,
-    _suppress_unsolicited_realtime_speech,
     _voice_flat_catalog_result,
     _voice_flat_zonal_catalog_result,
     _flat_catalog_response_complete,
@@ -37,10 +33,14 @@ from livekit_agent.agent import (
     _voice_selected_flat_service_result,
     _voice_safe_pincode_serviceability_result,
     _voice_safe_unknown_zone_result,
-    _worker_owns_realtime_turn,
+    load_local_console_prompt,
     make_mcp_forwarder,
 )
-from livekit_agent.conversation_state import GatedConversationState, STATE_MANAGED_RATE_FIELDS
+from livekit_agent.conversation_state import (
+    GatedConversationState,
+    STATE_MANAGED_RATE_FIELDS,
+    V6ConversationState,
+)
 
 
 class _Runtime:
@@ -63,47 +63,74 @@ class _Runtime:
 
 
 class TestRateGateResponse(unittest.TestCase):
-    def test_v6_model_owns_entire_sales_flow_without_duplicate_generation(self):
-        state = GatedConversationState(
-            v4_strict_flow=True,
-            v5_company_pair_flow=True,
-            direct_onboarding_flow=True,
-            model_led_flow=True,
-        )
-        state.apply_deterministic_answers("haan ji", turn_id="consent")
-        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
-        state.seed_context({"business_name": "Harsh Enterprises"})
-        self.assertEqual(state.pending_field(), "business_type")
-        self.assertFalse(_worker_owns_realtime_turn(state))
 
+    def test_business_model_question_must_use_plain_language(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("Ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Rates check karne hain", turn_id="intent")
         state.seed_context(
             {
-                "business_type": "D2C",
-                "business_platform": "Website",
-                "current_shipping_arrangement": "Shipping Aggregator",
-                "current_provider_name": "Shiprocket",
+                "business_name": "Evergreen",
             }
         )
-        self.assertEqual(state.pending_field(), "current_shipping_rate")
-        self.assertFalse(_worker_owns_realtime_turn(state))
 
-        state.seed_context({"current_shipping_rate": 35})
-        self.assertEqual(state.pending_field(), "current_problem")
-        self.assertFalse(_worker_owns_realtime_turn(state))
-
-        state.seed_context({"current_problem": "Support issue"})
-        self.assertFalse(_worker_owns_realtime_turn(state))
-
-        state.seed_context(
-            {"pickup_location": "Delhi", "delivery_location": "Bengaluru"}
+        violation = _shipkia_flow_response_violation(
+            agent_text="Aapka business mainly B2C ya B2B model hai?",
+            customer_text="Evergreen",
+            previous_agent_text="Aapke business ka naam kya hai?",
+            conversation_state=state,
         )
-        self.assertEqual(state.pricing_mode(), "route_starting_pending")
-        self.assertFalse(_worker_owns_realtime_turn(state))
 
-        state.mark_route_zone_verified("C", starting_presented=True)
-        state.mark_pricing_verified("lookup_pincode_serviceability")
-        self.assertEqual(state.pending_field(), "monthly_shipments")
-        self.assertFalse(_worker_owns_realtime_turn(state))
+        self.assertEqual(violation, "business_model_acronym_question")
+        self.assertFalse(
+            _flow_violation_requires_correction(violation, model_led_flow=True)
+        )
+
+    def test_services_answer_cannot_invent_a_customer_problem(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("Ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers(
+            "ShipKia ki services bata sakte ho?", turn_id="services"
+        )
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "ShipKia multi-courier options deta hai. Jaise aapko tracking mein "
+                "problem aa rahi hai, woh hum solve karte hain."
+            ),
+            customer_text="ShipKia ki services bata sakte ho?",
+            previous_agent_text="Kya abhi baat karna convenient hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "unverified_customer_problem_assumption")
+
+    def test_mid_call_self_introduction_is_treated_as_opening_restart(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("Ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("Rates check karne hain", turn_id="intent")
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="Ji, main Harsh ShipKia se bol raha hoon. Kaise hain aap?",
+            customer_text="Hello",
+            previous_agent_text="Delhi se Kerala ke rates ke liye...",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "restarted_opening")
+
+    def test_local_console_can_load_an_isolated_prompt_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prompt_path = Path(directory) / "prompt.txt"
+            prompt_path.write_text(
+                "# Notes\n\n## System Prompt\n\nTemporary prompt body.",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"SHIPKIA_PROMPT_FILE": str(prompt_path)}):
+                prompt, version = load_local_console_prompt()
+
+        self.assertEqual(prompt, "Temporary prompt body.")
+        self.assertTrue(version)
 
     def test_v5_controlled_turn_exposes_no_pricing_tool_before_rate_path(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -143,43 +170,7 @@ class TestRateGateResponse(unittest.TestCase):
             ["get_shipkia_flat_rates"],
         )
 
-    def test_interrupted_high_volume_sentence_is_not_marked_delivered(self):
-        self.assertFalse(
-            _high_volume_manager_delivery_complete(
-                "Theek hai, aapki monthly shipments 2,000 hain. Is"
-            )
-        )
-        self.assertTrue(
-            _high_volume_manager_delivery_complete(
-                "Aapko dedicated account manager milega jo support aur ticketing mein help karega."
-            )
-        )
 
-    def test_v5_suppresses_only_unowned_realtime_generation(self):
-        self.assertTrue(
-            _suppress_unsolicited_realtime_speech(
-                controlled_flow=True,
-                user_initiated=False,
-                expected_tool_reply=False,
-            )
-        )
-        for controlled_flow, user_initiated, expected_tool_reply in (
-            (False, False, False),
-            (True, True, False),
-            (True, False, True),
-        ):
-            with self.subTest(
-                controlled_flow=controlled_flow,
-                user_initiated=user_initiated,
-                expected_tool_reply=expected_tool_reply,
-            ):
-                self.assertFalse(
-                    _suppress_unsolicited_realtime_speech(
-                        controlled_flow=controlled_flow,
-                        user_initiated=user_initiated,
-                        expected_tool_reply=expected_tool_reply,
-                    )
-                )
 
     def test_call_1838_rejects_multilingual_noise_hallucinations(self):
         noisy_transcripts = (
@@ -217,68 +208,6 @@ class TestRateGateResponse(unittest.TestCase):
             "low_transcript_confidence",
         )
 
-    def test_controlled_detailed_services_reply_is_complete_and_single(self):
-        instruction = _detailed_services_reply_instruction("Hinglish")
-
-        for expected in (
-            "multiple courier partners",
-            "dedicated account manager",
-            "WhatsApp",
-            "call fallback",
-            "NDR",
-            "IVR calls",
-        ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, instruction)
-        self.assertEqual(instruction.count("Aap kuch aur jaanna chahenge"), 1)
-        self.assertIn("Say exactly once", instruction)
-        self.assertIn("repeat the closing question", instruction)
-
-    def test_v6_detailed_services_does_not_reoffer_rates_or_onboarding(self):
-        state = GatedConversationState(
-            v4_strict_flow=True,
-            v5_company_pair_flow=True,
-            direct_onboarding_flow=True,
-            model_led_flow=True,
-        )
-        instruction = _detailed_services_reply_instruction("Hinglish", state)
-
-        self.assertNotIn("rates check karne", instruction)
-        self.assertNotIn("onboarding mein help", instruction)
-        self.assertNotIn("Aap kuch aur jaanna chahenge", instruction)
-        self.assertIn("central V6 sales flow", instruction)
-
-    def test_controlled_provider_reply_lists_names_once_then_only_pending_question(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("rates", turn_id="intent")
-
-        instruction = _provider_options_reply_instruction("Hinglish", state)
-
-        for provider in (
-            "Amazon",
-            "Bluedart",
-            "Delhivery",
-            "E-Kart",
-            "Shadowfax",
-            "Shree Maruti",
-            "Xpressbees",
-        ):
-            with self.subTest(provider=provider):
-                self.assertEqual(instruction.count(provider), 1)
-        self.assertEqual(instruction.count("business ya brand ka naam kya hai"), 1)
-        self.assertNotIn("Aap kuch aur jaanna chahenge", instruction)
-        self.assertIn("repeat any information", instruction)
-
-    def test_high_volume_reply_adds_manager_support_before_information_checkpoint(self):
-        instruction = _high_volume_manager_reply_instruction("Hinglish", 1000)
-
-        self.assertIn("monthly shipments 1,000", instruction)
-        self.assertIn("dedicated account manager", instruction)
-        self.assertIn("support aur ticketing", instruction)
-        self.assertNotIn("Kya aap ShipKia ke saath aage badhna chahte hain", instruction)
-        self.assertEqual(instruction.count("Kya aap kuch aur jaanna chahenge"), 1)
-        self.assertIn("Never ask for monthly shipments again", instruction)
 
     def test_opening_ignores_short_non_actionable_asr_noise(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -319,6 +248,85 @@ class TestRateGateResponse(unittest.TestCase):
         )
 
         self.assertEqual(violation, "restarted_opening")
+
+    def test_v7_current_opening_and_wrong_flow_are_blocking_in_model_led_call(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates check karne hain", turn_id="intent")
+
+        restarted = _shipkia_flow_response_violation(
+            agent_text=(
+                "Namaste, main Harsh ShipKia se bol raha hoon. Business shipping ke regarding "
+                "call hai. Kya main business ki shipping ya operations handle karne wale person "
+                "se baat kar raha hoon?"
+            ),
+            customer_text="Delhi to Kerala ke rates batao",
+            previous_agent_text="Aap rates check karna chahenge?",
+            conversation_state=state,
+        )
+        reopened = _shipkia_flow_response_violation(
+            agent_text="Kya aap rates check karna chahenge ya kuch aur jaanna hai?",
+            customer_text="North Star mera brand hai",
+            previous_agent_text="Aapke business ka naam kya hai?",
+            conversation_state=state,
+        )
+        skipped = _shipkia_flow_response_violation(
+            agent_text="Aap abhi kaunsa courier use karte hain?",
+            customer_text="haan theek hai",
+            previous_agent_text="Aapke business ka naam kya hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(restarted, "restarted_opening")
+        self.assertEqual(reopened, "reopened_rate_intent")
+        self.assertEqual(skipped, "skipped_pending:business_name")
+        for violation in (restarted, reopened, skipped):
+            self.assertFalse(
+                _flow_violation_requires_correction(
+                    violation,
+                    model_led_flow=True,
+                )
+            )
+
+    def test_v7_catalog_unavailability_and_premature_farewell_are_blocked(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates check karne hain", turn_id="intent")
+
+        flat_unavailable = _shipkia_flow_response_violation(
+            agent_text="Filhaal flat rate available nahi hai.",
+            customer_text="Plater available hai?",
+            previous_agent_text="Zone A ka rate share kiya hai.",
+            conversation_state=state,
+        )
+        zonal_unavailable = _shipkia_flow_response_violation(
+            agent_text="Flat-Zonal rates bhi abhi available nahi hain.",
+            customer_text="of flight floral rates",
+            previous_agent_text="Flat rate available hai.",
+            conversation_state=state,
+        )
+        farewell = _shipkia_flow_response_violation(
+            agent_text="Theek hai ji, thank you for your time!",
+            customer_text="Delhi to Noida ke options bataiye",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+
+        self.assertEqual(flat_unavailable, "unverified_catalog_availability")
+        self.assertEqual(zonal_unavailable, "unverified_catalog_availability")
+        self.assertEqual(farewell, "premature_farewell")
+        self.assertTrue(
+            _flow_violation_requires_correction(
+                flat_unavailable,
+                model_led_flow=True,
+            )
+        )
+        self.assertFalse(
+            _flow_violation_requires_correction(
+                farewell,
+                model_led_flow=True,
+            )
+        )
 
     def test_call_1708_blocks_flat_zonal_claim_without_matching_catalog(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -462,23 +470,12 @@ class TestRateGateResponse(unittest.TestCase):
 
         self.assertEqual(violation, "")
 
-    def test_initial_authoritative_instruction_seeds_consent_before_realtime_draft(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-
-        instruction = _authoritative_call_state_instruction(state, "Hinglish")
-
-        self.assertIn("Pending field: conversation_consent", instruction)
-        self.assertIn("Current action: Ask only whether this is a convenient time to talk", instruction)
-        self.assertIn("No ShipKia numeric amount is authorized", instruction)
-        self.assertIn("Natural Hinglish in Latin script only", instruction)
-
     def test_assistant_constructor_sends_initial_consent_state_to_realtime_model(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
 
         with patch("livekit_agent.agent.Agent.__init__", return_value=None) as agent_init:
             ShipKiaAssistant(
                 system_prompt="ShipKia prompt",
-                personality="",
                 context={},
                 tools=[],
                 available_tool_names=(),
@@ -488,15 +485,12 @@ class TestRateGateResponse(unittest.TestCase):
             )
 
         instructions = agent_init.call_args.kwargs["instructions"]
-        self.assertIn("Pending field: conversation_consent", instructions)
-        self.assertIn("Ask only whether this is a convenient time to talk", instructions)
-        self.assertIn("## V5 quantity and close flow", instructions)
-        self.assertNotIn("## V4 post-rate close flow", instructions)
-        self.assertNotIn(
-            "Never ask the customer for monthly shipment volume at any point",
-            instructions,
-        )
-        self.assertIn("explain all four verified capabilities", instructions)
+        self.assertIn("## Live call state (worker-owned data", instructions)
+        self.assertNotIn('"pending_field"', instructions)
+        self.assertIn('"pricing_trigger_field": "conversation_consent"', instructions)
+        self.assertNotIn("## Voice runtime rules", instructions)
+        self.assertNotIn("## V4 voice runtime rules", instructions)
+        self.assertNotIn("PRIVATE TURN DIRECTION", instructions)
 
     def test_v6_assistant_uses_single_prompt_with_replaceable_state_data(self):
         state = GatedConversationState(model_led_flow=True)
@@ -508,7 +502,6 @@ class TestRateGateResponse(unittest.TestCase):
                     "V6 sales prompt. Save using create_or_update_shipkia_lead, then call "
                     "get_shipkia_starting_rate for a verified starting rate."
                 ),
-                personality="",
                 context={},
                 tools=[pricing_tool],
                 available_tool_names=("get_shipkia_starting_rate",),
@@ -523,7 +516,7 @@ class TestRateGateResponse(unittest.TestCase):
         self.assertIn("get_shipkia_starting_rate", instructions)
         self.assertNotIn("Current authoritative call state", instructions)
         self.assertIn("## Live call state (worker-owned data", instructions)
-        self.assertIn('"pending_field":', instructions)
+        self.assertNotIn('"pending_field"', instructions)
         self.assertNotIn("## Voice runtime rules", instructions)
         self.assertEqual(agent_init.call_args.kwargs["tools"], [pricing_tool])
         self.assertEqual(assistant._active_tools(), [pricing_tool])
@@ -772,6 +765,117 @@ class _ShadowfaxStartingFakeClientSession(_FakeClientSession):
     def post(self, _url, *, json, **_kwargs):
         type(self).captured_payload = json
         return _ShadowfaxStartingFakeResponseContext()
+
+
+class _BluedartStartingFakeResponse:
+    status = 200
+
+    async def text(self):
+        return json.dumps(
+            {
+                "message": {
+                    "result": {
+                        "status": "success",
+                        "response_type": "zone_starting",
+                        "zone": "D",
+                        "amount": 101.67,
+                        "currency": "INR",
+                        "gst_inclusive": True,
+                        "basis": {
+                            "movement_type": "Forward",
+                            "weight_slab_g": 500,
+                            "courier": "Bluedart",
+                            "service": "Bluedart Surface Express",
+                        },
+                        "available_courier_partners": ["Bluedart"],
+                        "starting_rate_options": [
+                            {
+                                "courier": "Bluedart",
+                                "service": "Bluedart Surface Express",
+                                "movement_type": "Forward",
+                                "weight_slab_g": 500,
+                                "amount": 101.67,
+                                "gst_inclusive": True,
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+
+
+class _BluedartStartingFakeResponseContext:
+    async def __aenter__(self):
+        return _BluedartStartingFakeResponse()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _BluedartStartingFakeClientSession(_FakeClientSession):
+    def post(self, _url, *, json, **_kwargs):
+        type(self).captured_payload = json
+        return _BluedartStartingFakeResponseContext()
+
+
+class _AllCouriersStartingFakeResponse:
+    status = 200
+
+    async def text(self):
+        partners = [
+            "Amazon",
+            "Bluedart",
+            "Delhivery",
+            "E-Kart",
+            "Shadowfax",
+            "Shree Maruti",
+            "Xpressbees",
+        ]
+        options = [
+            {
+                "courier": courier,
+                "service": f"{courier} Surface",
+                "movement_type": "Forward",
+                "weight_slab_g": 500,
+                "amount": amount,
+                "gst_inclusive": True,
+            }
+            for courier, amount in zip(
+                partners,
+                [38.94, 101.67, 45.43, 76.58, 76.58, 35.05, 50.62],
+            )
+        ]
+        return json.dumps(
+            {
+                "message": {
+                    "result": {
+                        "status": "success",
+                        "response_type": "zone_starting",
+                        "zone": "D",
+                        "amount": 35.05,
+                        "currency": "INR",
+                        "gst_inclusive": True,
+                        "basis": options[5],
+                        "available_courier_partners": partners,
+                        "starting_rate_options": options,
+                    }
+                }
+            }
+        )
+
+
+class _AllCouriersStartingFakeResponseContext:
+    async def __aenter__(self):
+        return _AllCouriersStartingFakeResponse()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _AllCouriersStartingFakeClientSession(_FakeClientSession):
+    def post(self, _url, *, json, **_kwargs):
+        type(self).captured_payload = json
+        return _AllCouriersStartingFakeResponseContext()
 
 
 class _RouteFakeResponse:
@@ -1109,7 +1213,12 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                     previous_agent_text="",
                     conversation_state=state,
                 )
-                self.assertEqual(violation, f"reasked_handled:{field}")
+                expected = (
+                    "unsolicited_cod_question"
+                    if field == "payment_type"
+                    else f"reasked_handled:{field}"
+                )
+                self.assertEqual(violation, expected)
 
     def test_v5_flow_guard_allows_the_actual_pending_question(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
@@ -1307,8 +1416,12 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["zone"], "A")
-        self.assertIn("monthly shipment quantity", result["post_rate_instruction"])
-        self.assertNotIn("business type", result["post_rate_instruction"])
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertIn("Zone A", result["customer_response"])
+        self.assertIn("Rs 22.07", result["customer_response"])
+        self.assertNotIn("starting rates:", result["customer_response"])
+        self.assertNotIn("Knowledge base", result["customer_response"])
+        self.assertNotIn("post_rate_instruction", result)
 
     async def test_v6_natural_consent_does_not_wait_for_phrase_gated_state(self):
         state = GatedConversationState(
@@ -1317,11 +1430,10 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             direct_onboarding_flow=True,
             model_led_flow=True,
         )
-        processor = type("Processor", (), {"schedule": Mock()})()
+        processor = type("Processor", (), {"process": AsyncMock()})()
         with patch("livekit_agent.agent.Agent.__init__", return_value=None) as agent_init:
             assistant = ShipKiaAssistant(
                 system_prompt="V6 sales prompt",
-                personality="",
                 context={},
                 tools=[],
                 available_tool_names=(),
@@ -1346,7 +1458,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         await assistant.on_user_turn_completed(turn_context, message)
 
-        processor.schedule.assert_called_once_with(
+        processor.process.assert_awaited_once_with(
             "Haan ji, bilkul kar sakte hain, aage batao.",
             turn_id="v6-consent",
         )
@@ -1367,7 +1479,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         with patch("livekit_agent.agent.Agent.__init__", return_value=None):
             assistant = ShipKiaAssistant(
                 system_prompt="V6 central prompt",
-                personality="",
                 context={},
                 tools=[],
                 available_tool_names=(),
@@ -1382,19 +1493,15 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         refreshed = assistant.update_instructions.await_args.args[0]
         self.assertEqual(refreshed.count("## Live call state (worker-owned data"), 1)
-        self.assertIn('"pending_field": "assistance_intent"', refreshed)
+        self.assertNotIn('"pending_field"', refreshed)
+        self.assertNotIn('"pricing_ready"', refreshed)
         self.assertNotIn("PRIVATE TURN DIRECTION", refreshed)
 
         await assistant.sync_pricing_tools()
         assistant.update_instructions.assert_awaited_once()
 
-    async def test_v6_flat_request_waits_for_discovery_and_keeps_verified_rates(self):
-        state = GatedConversationState(
-            v4_strict_flow=True,
-            v5_company_pair_flow=True,
-            direct_onboarding_flow=True,
-            model_led_flow=True,
-        )
+    async def test_v6_flat_request_returns_catalog_then_continues_discovery(self):
+        state = V6ConversationState()
         state.apply_deterministic_answers("ji", turn_id="consent")
         state.apply_deterministic_answers("flat rates chahiye", turn_id="intent")
         forwarder = make_mcp_forwarder(
@@ -1406,26 +1513,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         _FlatFakeClientSession.captured_payload = None
 
         with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
-            blocked = json.loads(await forwarder({}))
-
-        self.assertEqual(blocked["status"], "qualification_required")
-        self.assertEqual(blocked["required_next_question"], "business or brand name")
-        self.assertNotIn("spoken_response_instruction", blocked)
-        self.assertIsNone(_FlatFakeClientSession.captured_payload)
-
-        state.seed_context(
-            {
-                "business_name": "Acme",
-                "business_type": "D2C",
-                "business_platform": "Shopify",
-                "current_shipping_arrangement": "Shipping Aggregator",
-                "current_provider_name": "Shiprocket",
-                "current_shipping_rate": 40,
-                "current_problem": "Support delays",
-                "monthly_shipments": 1000,
-            }
-        )
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
             result = json.loads(await forwarder({}))
 
         self.assertEqual(result["status"], "success")
@@ -1433,9 +1520,12 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             _FlatFakeClientSession.captured_payload["params"]["arguments"],
             {"response_scope": "All", "payment_type": "Prepaid"},
         )
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertIn("Rs 76.58", result["customer_response"])
+        self.assertNotIn("post_rate_instruction", result)
         self.assertTrue(state.rate_claim_amounts_authorized([76.58, 88.26, 103.84, 11.68]))
 
-    async def test_v6_normal_route_rate_is_blocked_until_discovery_is_complete(self):
+    async def test_v6_complete_city_route_is_looked_up_then_resumes_discovery(self):
         state = GatedConversationState(
             v4_strict_flow=True,
             v5_company_pair_flow=True,
@@ -1455,43 +1545,22 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         _RouteFakeClientSession.captured_payloads = []
 
         with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
-            blocked = json.loads(
+            result = json.loads(
                 await forwarder(
                     {"pickup_location": "Unknown", "delivery_location": "Unknown"}
                 )
             )
 
         processor.wait_latest.assert_awaited_once()
-        self.assertEqual(blocked["status"], "qualification_required")
-        self.assertEqual(blocked["required_next_question"], "business or brand name")
-        self.assertNotIn("spoken_response_instruction", blocked)
-        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
-
-        state.seed_context(
-            {
-                "business_name": "Acme",
-                "business_type": "D2C",
-                "business_platform": "Shopify",
-                "current_shipping_arrangement": "Shipping Aggregator",
-                "current_provider_name": "Shiprocket",
-                "current_shipping_rate": 40,
-                "current_problem": "Support delays",
-                "monthly_shipments": 1000,
-            }
-        )
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
-            result = json.loads(await forwarder({}))
-
         self.assertEqual(result["status"], "success")
         self.assertEqual(
             _RouteFakeClientSession.captured_payloads[0]["params"]["arguments"],
             {"pickup_location": "Noida", "delivery_location": "Bengaluru", "pan_india": False},
         )
-        self.assertTrue(state.verified_rate_presented())
-        self.assertEqual(state.pending_field(), "")
-        self.assertFalse(state.qualification_bridge_due())
-        self.assertIn("Kya aap kuch aur jaanna chahenge", result["post_rate_instruction"])
-        self.assertNotIn("would like to move forward", result["post_rate_instruction"])
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertIn("customer_response", result)
+        self.assertNotIn("required_next_question", result)
+        self.assertNotIn("post_rate_instruction", result)
 
     async def test_v6_verified_rate_cannot_skip_discovery_or_offer_signup(self):
         state = GatedConversationState(
@@ -1607,10 +1676,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_v6_affirmative_only_name_reply_stays_unhandled_without_flow_correction(self):
-        state = GatedConversationState(
-            model_led_flow=True,
-            direct_onboarding_flow=True,
-        )
+        state = V6ConversationState()
         state.apply_deterministic_answers(
             "Delhi to Bangalore ke rates jaanne hain",
             turn_id="route-request",
@@ -1645,7 +1711,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             conversation_state=state,
         )
 
-        self.assertEqual(violation, "")
+        self.assertEqual(violation, "skipped_pending:business_name")
         self.assertEqual(transitions, [])
         self.assertEqual(semantic, [])
         self.assertEqual(
@@ -1654,6 +1720,48 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(state.pending_field(), "business_name")
         self.assertFalse(state.is_handled("business_name"))
+
+    def test_v6_verified_route_rate_must_name_the_resolved_zone(self):
+        state = V6ConversationState()
+        route = {"pickup_location": "Bareilly", "delivery_location": "Delhi"}
+        state.register_requested_route(route)
+        state.mark_route_zone_verified("D", route_arguments=route)
+        state.authorize_rate_result({"status": "success", "amount": 35.05})
+        state.primary_rate_amount = 35.05
+
+        omitted = _shipkia_flow_response_violation(
+            agent_text="Bareilly se Delhi ka starting rate Rs 35.05 hai, GST included.",
+            customer_text="Bareilly se Delhi ka rate batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+        included = _shipkia_flow_response_violation(
+            agent_text="Bareilly se Delhi, Zone D ka starting rate Rs 35.05 hai, GST included.",
+            customer_text="Bareilly se Delhi ka rate batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+
+        self.assertEqual(omitted, "verified_route_zone_omitted")
+        self.assertEqual(included, "")
+
+    def test_v7_flat_catalog_is_not_blocked_by_route_zone_wording_guard(self):
+        state = V6ConversationState()
+        route = {"pickup_location": "Delhi", "delivery_location": "Mumbai"}
+        state.register_requested_route(route)
+        state.mark_route_zone_verified("C", route_arguments=route)
+        state.primary_rate_amount = 76.58
+        state.authorized_rate_amounts = {76.58}
+        state.verified_pricing_tool = "get_shipkia_flat_rates"
+
+        violation = _shipkia_flow_response_violation(
+            agent_text="E-Kart Surface ka 500 gram flat rate Rs 76.58 hai.",
+            customer_text="Flat rates batao",
+            previous_agent_text="",
+            conversation_state=state,
+        )
+
+        self.assertEqual(violation, "")
 
     def test_call_2011_acknowledged_problem_is_not_treated_as_a_reasked_question(self):
         state = GatedConversationState(
@@ -1710,7 +1818,31 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             conversation_state=state,
         )
 
-        self.assertEqual(state.pending_field(), "business_platform")
+        self.assertEqual(state.pending_field(), "current_shipping_arrangement")
+        self.assertEqual(violation, "skipped_pending:current_shipping_arrangement")
+
+    def test_plain_language_operating_model_question_matches_pending_field(self):
+        state = GatedConversationState(
+            v4_strict_flow=True,
+            v5_company_pair_flow=True,
+            direct_onboarding_flow=True,
+            model_led_flow=True,
+        )
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates check karna hai", turn_id="intent")
+        state.seed_context({"business_name": "Evergreen"})
+
+        violation = _shipkia_flow_response_violation(
+            agent_text=(
+                "Aap directly customers ko sell karte hain, doosre businesses ko supply "
+                "karte hain, marketplace ke through sell karte hain, ya kisi aur tarah?"
+            ),
+            customer_text="Evergreen",
+            previous_agent_text="Aapke business ya brand ka naam kya hai?",
+            conversation_state=state,
+        )
+
+        self.assertEqual(state.pending_field(), "business_type")
         self.assertEqual(violation, "")
 
     def test_v6_advisory_flow_violation_does_not_start_a_correction_generator(self):
@@ -1738,7 +1870,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 model_led_flow=False,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             _flow_violation_requires_correction(
                 "skipped_pending:current_shipping_rate",
                 model_led_flow=True,
@@ -1752,7 +1884,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
                 preverified_rate_flow=False,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             _flow_violation_requires_correction(
                 "reasked_handled:business_name",
                 model_led_flow=True,
@@ -1787,7 +1919,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(violation, "reasked_handled:business_name")
-        self.assertTrue(
+        self.assertFalse(
             _flow_violation_requires_correction(
                 violation,
                 model_led_flow=True,
@@ -1834,14 +1966,14 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.pending_field(), "current_shipping_arrangement")
 
         state.apply_deterministic_answers(
-            "Shiv रॉकेट",
+            "Main Shiprocket use kar raha hun",
             turn_id="provider",
             previous_agent_text="Abhi aap shipping ke liye kya use karte hain?",
         )
 
-        self.assertEqual(state.value("current_shipping_arrangement"), "Other")
-        self.assertEqual(state.value("current_provider_name"), "shiv रॉकेट")
-        self.assertEqual(state.pending_field(), "current_shipping_rate")
+        self.assertEqual(state.value("current_shipping_arrangement"), "Shipping Aggregator")
+        self.assertEqual(state.value("current_provider_name"), "Shiprocket")
+        self.assertEqual(state.pending_field(), "pickup_location")
 
     async def test_v6_generic_starting_rate_cannot_replace_retained_city_route(self):
         state = GatedConversationState(
@@ -1884,10 +2016,9 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(_StartingFakeClientSession.captured_payload)
 
     async def test_v6_route_lookup_reuses_saved_cities_without_pincodes(self):
-        state = GatedConversationState(
-            model_led_flow=True,
-            direct_onboarding_flow=True,
-        )
+        state = V6ConversationState()
+        state.apply_deterministic_answers("haan ji", turn_id="consent")
+        state.apply_deterministic_answers("rates chahiye", turn_id="intent")
         state.seed_context(
             {
                 "business_name": "Acme",
@@ -1926,10 +2057,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(arguments["delivery_location"], "Bengaluru")
         self.assertNotIn("pickup_pincode", arguments)
         self.assertNotIn("delivery_pincode", arguments)
-        self.assertEqual(repeated["zone"], "C")
-        repeated_arguments = _RouteFakeClientSession.captured_payloads[1]["params"]["arguments"]
-        self.assertEqual(repeated_arguments["pickup_location"], "Delhi")
-        self.assertEqual(repeated_arguments["delivery_location"], "Bengaluru")
+        self.assertEqual(repeated["status"], "duplicate_suppressed")
+        self.assertEqual(len(_RouteFakeClientSession.captured_payloads), 1)
 
     async def test_v6_rate_interest_cannot_be_reopened_as_permission_question(self):
         state = GatedConversationState(
@@ -1950,28 +2079,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             "reopened_rate_intent",
         )
 
-    async def test_v5_flat_catalog_duplicate_is_suppressed_without_backend_call(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("slide rate bata do", turn_id="flat")
-        state.mark_flat_catalog_presented()
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_rates",
-            "call-1623-flat-duplicate",
-            conversation_state=state,
-            backend_argument_names=frozenset({"response_scope", "payment_type"}),
-        )
-        _FlatFakeClientSession.captured_payload = None
-
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
-            result = json.loads(await forwarder({"response_scope": "All"}))
-
-        self.assertEqual(result["status"], "duplicate_suppressed")
-        self.assertFalse(result["pricing_backend_called"])
-        self.assertIn("complete Flat catalog", result["spoken_response_instruction"])
-        self.assertIsNone(_FlatFakeClientSession.captured_payload)
-
-    async def test_unresolved_pincode_zone_returns_only_general_22_fallback(self):
+    async def test_unresolved_zone_never_returns_a_generic_amount(self):
         result = _voice_safe_pincode_serviceability_result(
             {
                 "status": "configuration_required",
@@ -1987,12 +2095,12 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["response_type"], "general_starting")
+        self.assertEqual(result["status"], "configuration_required")
+        self.assertEqual(result["response_type"], "zone_resolution_unavailable")
         self.assertIsNone(result["zone"])
         self.assertFalse(result["zone_verified"])
-        self.assertEqual(result["amount"], 22.0)
-        self.assertIn("Do not name or imply any Zone A-F", result["spoken_response_instruction"])
+        self.assertNotIn("amount", result)
+        self.assertIn("do not invent or estimate", result["spoken_response_instruction"])
 
     async def test_route_details_required_never_becomes_configuration_failure(self):
         result = _voice_safe_pincode_serviceability_result(
@@ -2121,6 +2229,19 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         )
         customer_text = "Main sabke rates individually janna chahunga."
         state.apply_deterministic_answers(customer_text, turn_id="all-provider-rates")
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "available_courier_partners": ["Shree Maruti", "Amazon"],
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                ],
+            }
+        )
 
         incomplete = _shipkia_flow_response_violation(
             agent_text="Shree Maruti ka starting rate Rs 31.15 hai. Kya aap kuch aur jaanna chahenge?",
@@ -2214,6 +2335,20 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             }
         )
         state.apply_deterministic_answers("sabke rates batao", turn_id="all-rates")
+        state.authorize_rate_result(
+            {
+                "status": "success",
+                "response_type": "zone_starting",
+                "zone": "C",
+                "amount": 31.15,
+                "available_courier_partners": ["Shree Maruti", "Amazon", "E-Kart"],
+                "starting_rate_options": [
+                    {"courier": "Shree Maruti", "service": "Shree Maruti Surface", "amount": 31.15},
+                    {"courier": "Amazon", "service": "Amazon Standard", "amount": 36.34},
+                    {"courier": "E-Kart", "service": "E-Kart SURFACE", "amount": 76.58},
+                ],
+            }
+        )
 
         swapped = _shipkia_flow_response_violation(
             agent_text=(
@@ -2409,71 +2544,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["zone"], "A")
 
-    async def test_call_1681_repeated_blocked_route_lookup_is_suppressed(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("Delhi to Mumbai rate", turn_id="intent-route")
-        runtime = _Runtime()
-        forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
-            "call-1681-blocked-loop",
-            runtime=runtime,
-            conversation_state=state,
-        )
-        _RouteFakeClientSession.captured_payloads = []
-
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
-            first = json.loads(await forwarder({}))
-            repeated = json.loads(await forwarder({}))
-
-        self.assertEqual(first["status"], "qualification_required")
-        self.assertEqual(repeated["status"], "duplicate_suppressed")
-        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
-        self.assertEqual(len(runtime.tool_outcomes), 1)
-        self.assertIn("Do not call this tool again", repeated["spoken_response_instruction"])
-
-    async def test_v5_partial_route_lookup_is_blocked_before_backend_call(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.seed_context(
-            {
-                "business_name": "Harsh Enterprises",
-                "business_type": "B2C",
-                "current_shipping_arrangement": "Shipping Aggregator",
-                "current_provider_name": "Shiprocket",
-                "current_shipping_rate": 35,
-                "current_problem": "RTO issue",
-            }
-        )
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("shipping rates", turn_id="intent")
-        state.apply_deterministic_answers(
-            "Delhi",
-            turn_id="pickup",
-            previous_agent_text="Aap shipments kahan se kahan bhejte hain?",
-        )
-        runtime = Mock()
-        runtime.expect_realtime_tool_reply = Mock()
-        forwarder = make_mcp_forwarder(
-            "lookup_pincode_serviceability",
-            "partial-route-test",
-            runtime=runtime,
-            conversation_state=state,
-        )
-        _RouteFakeClientSession.captured_payloads = []
-
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _RouteFakeClientSession):
-            result = json.loads(
-                await forwarder(
-                    {"pickup_location": "Delhi", "delivery_location": "Mumbai"}
-                )
-            )
-
-        self.assertEqual(result["status"], "route_details_required")
-        self.assertEqual(result["required_next_question"], "delivery city or locality")
-        runtime.expect_realtime_tool_reply.assert_not_called()
-        self.assertEqual(_RouteFakeClientSession.captured_payloads, [])
-        self.assertNotIn("unavailable", result["spoken_response_instruction"].casefold())
-
     async def test_processor_skips_semantic_spillover_after_deterministic_pending_answer(self):
         class _SpilloverGuard:
             def __init__(self):
@@ -2531,20 +2601,27 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         arguments = _FlatFakeClientSession.captured_payload["params"]["arguments"]
         self.assertEqual(arguments, {"response_scope": "All", "payment_type": "Prepaid"})
         self.assertEqual(result["status"], "success")
-        self.assertIn("exactly two verified Flat-related options", result["spoken_response_instruction"])
-        self.assertIn("Shadowfax Surface 5 KG", result["spoken_response_instruction"])
+        self.assertIn("Flat rule to flat_rate_options only", result["spoken_response_instruction"])
+        self.assertNotIn("Rs 11.68", result["spoken_response_instruction"])
+        self.assertEqual(result["flat_additional_rate_options"], [])
+        self.assertTrue(result["excluded_additional_weight_components"])
         self.assertTrue(state.flat_catalog_delivery_due)
         self.assertFalse(state.flat_catalog_due())
 
-        complete = (
-            "E-Kart Surface ke complete flat slabs Rs 76.58, Rs 88.26 aur Rs 103.84 hain. "
-            "Shadowfax Surface 5 KG ka additional 1000 gram amount Rs 11.68 hai; iska base "
-            "shipment rate zonal hai."
-        )
+        complete = "E-Kart Surface ke complete flat slabs Rs 76.58, Rs 88.26 aur Rs 103.84 hain."
         self.assertTrue(_flat_catalog_response_complete(complete, state))
         self.assertEqual(
             _shipkia_flow_response_violation(
                 agent_text="E-Kart Surface ke flat slabs Rs 76.58, Rs 88.26 aur Rs 103.84 hain.",
+                customer_text="flat rates batao",
+                previous_agent_text="",
+                conversation_state=state,
+            ),
+            "",
+        )
+        self.assertEqual(
+            _shipkia_flow_response_violation(
+                agent_text="E-Kart Surface ke flat slabs Rs 76.58 aur Rs 88.26 hain.",
                 customer_text="flat rates batao",
                 previous_agent_text="",
                 conversation_state=state,
@@ -2685,32 +2762,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(zonal_result["pricing_backend_called"])
         self.assertIsNone(_FlatFakeClientSession.captured_payload)
 
-    async def test_v5_explicit_flat_zonal_uses_only_flat_zonal_catalog(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("Rflat Zonal", turn_id="flat-zonal")
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_zonal_rates",
-            "v5-flat-zonal-test",
-            conversation_state=state,
-        )
-
-        with patch(
-            "livekit_agent.agent.aiohttp.ClientSession",
-            _FlatZonalFakeClientSession,
-        ):
-            result = json.loads(await forwarder({"payment_type": "COD"}))
-
-        arguments = _FlatZonalFakeClientSession.captured_payload["params"]["arguments"]
-        self.assertEqual(arguments, {"payment_type": "Prepaid"})
-        self.assertEqual(result["status"], "success")
-        self.assertIn("Zones A-B Rs 84.37", result["spoken_response_instruction"])
-        self.assertTrue(state.flat_zonal_catalog_presented)
-        self.assertTrue(state.flat_zonal_catalog_delivery_due)
-        self.assertEqual(state.flat_zonal_additional_total, 38.94)
-
     async def test_latest_call_flat_zonal_is_complete_once_without_permission_question(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
+        state = V6ConversationState()
         state.apply_deterministic_answers("ji bataiye", turn_id="consent")
         state.apply_deterministic_answers("flat zonal rates batao", turn_id="flat-zonal")
         state.seed_context({"monthly_shipments": 1000})
@@ -2726,14 +2779,13 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         ):
             result = json.loads(await forwarder({}))
 
-        instruction = result["spoken_response_instruction"]
+        instruction = result["customer_response"]
         self.assertIn("Zones A-B Rs 84.37", instruction)
         self.assertIn("Zones C-F Rs 109.03", instruction)
         self.assertIn("Rs 38.94", instruction)
-        self.assertNotIn("Kya aap kuch aur", instruction)
-        self.assertNotIn("Kya aap inmein se kisi ke rates", instruction)
-        self.assertIn("Do not ask whether they want the rates", instruction)
-        self.assertIn("stop without another question", result["post_rate_instruction"])
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertNotIn("spoken_response_instruction", result)
+        self.assertNotIn("post_rate_instruction", result)
 
         incomplete = (
             "E-Kart Express ke Flat-Zonal rates Zones A-B aur C-F ke liye alag hain. "
@@ -2748,6 +2800,34 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             ),
             "flat_zonal_catalog_omitted",
         )
+
+    async def test_v6_observed_flat_zonal_asr_calls_catalog_after_flat_followup(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates check karne hain", turn_id="intent")
+        state.mark_flat_catalog_presented()
+        state.mark_pricing_verified("get_shipkia_flat_rates")
+        state.anything_else_checkpoint_consumed = True
+        state.apply_deterministic_answers("flame zona red", turn_id="flat-zonal-asr")
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_flat_zonal_rates",
+            "flat-zonal-asr-followup",
+            conversation_state=state,
+        )
+
+        with patch(
+            "livekit_agent.agent.aiohttp.ClientSession",
+            _FlatZonalFakeClientSession,
+        ):
+            result = json.loads(await forwarder({}))
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            [group["zone_group"] for group in result["zone_groups"]],
+            ["A-B", "C-F"],
+        )
+        self.assertIn("Zones A-B Rs 84.37", result["customer_response"])
+        self.assertIn("Zones C-F Rs 109.03", result["customer_response"])
         complete = (
             "E-Kart Express Flat-Zonal mein Zones A-B ka 500 gram rate Rs 84.37, "
             "Zones C-F ka Rs 109.03, aur additional 500 gram Rs 38.94 hai."
@@ -2839,7 +2919,9 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         arguments = _StartingFakeClientSession.captured_payload["params"]["arguments"]
         self.assertEqual(arguments, {"zone": "D"})
         self.assertEqual(result["status"], "success")
-        self.assertIn("monthly shipment quantity", result["post_rate_instruction"])
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertIn("Zone D", result["customer_response"])
+        self.assertNotIn("post_rate_instruction", result)
 
     async def test_v6_explicit_zone_after_close_reaches_pricing_backend(self):
         state = GatedConversationState(
@@ -2871,7 +2953,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(arguments, {"zone": "D"})
         self.assertEqual(result["status"], "success")
 
-    async def test_active_tools_expose_only_the_authorized_pricing_path(self):
+    async def test_active_tools_keep_pricing_schemas_stable_for_realtime_session(self):
         assistant = object.__new__(ShipKiaAssistant)
         assistant._conversation_state = GatedConversationState()
         assistant._tools_by_name = {
@@ -2881,25 +2963,22 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             "get_shipkia_flat_zonal_rates": "flat-zonal",
             "get_shipkia_starting_rate": "starting",
         }
-        assistant._rate_tool_enabled = False
-        assistant._flat_tool_enabled = False
-        assistant._flat_zonal_tool_enabled = False
-        assistant._starting_tool_enabled = False
-        self.assertEqual(assistant._active_tools(), ["record"])
+        expected_tools = ["record", "normal", "flat", "flat-zonal", "starting"]
+        self.assertEqual(assistant._active_tools(), expected_tools)
 
-        assistant._flat_tool_enabled = True
-        self.assertEqual(assistant._active_tools(), ["record", "flat"])
-        assistant._flat_tool_enabled = False
-        assistant._flat_zonal_tool_enabled = True
-        self.assertEqual(assistant._active_tools(), ["record", "flat-zonal"])
-        assistant._flat_zonal_tool_enabled = False
-        assistant._starting_tool_enabled = True
-        self.assertEqual(assistant._active_tools(), ["record", "starting"])
-        assistant._starting_tool_enabled = False
-        assistant._rate_tool_enabled = True
-        self.assertEqual(assistant._active_tools(), ["record", "normal"])
+        for tool_name, expected in (
+            ("get_shipkia_flat_rates", "flat"),
+            ("get_shipkia_flat_zonal_rates", "flat-zonal"),
+            ("get_shipkia_starting_rate", "starting"),
+            ("calculate_shipkia_rate", "normal"),
+        ):
+            with self.subTest(tool_name=tool_name), patch(
+                "livekit_agent.agent._authorized_controlled_reply_tools",
+                return_value=[tool_name],
+            ):
+                self.assertEqual(assistant._active_tools(), expected_tools)
 
-    async def test_v5_keeps_guarded_pricing_schemas_visible_during_realtime_turns(self):
+    async def test_v6_keeps_all_pricing_schemas_registered_while_backend_gates_calls(self):
         assistant = object.__new__(ShipKiaAssistant)
         assistant._conversation_state = GatedConversationState(
             v4_strict_flow=True,
@@ -2912,11 +2991,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             "get_shipkia_flat_zonal_rates": "flat-zonal",
             "get_shipkia_starting_rate": "starting",
         }
-        assistant._rate_tool_enabled = False
-        assistant._flat_tool_enabled = False
-        assistant._flat_zonal_tool_enabled = False
-        assistant._starting_tool_enabled = False
-
         self.assertEqual(
             assistant._active_tools(),
             ["record", "normal", "flat", "flat-zonal", "starting"],
@@ -2956,31 +3030,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(zonal_result["status"], "success")
         self.assertFalse(state.flat_zonal_catalog_due())
 
-    async def test_v5_call_1617_flat_zonal_success_suppresses_duplicate_calls(self):
-        state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
-        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
-        state.apply_deterministic_answers("flat rates batao", turn_id="flat")
-        state.mark_flat_catalog_presented()
-        state.apply_deterministic_answers(
-            "aur E-Card Express ke rate dono rate",
-            turn_id="express",
-        )
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_zonal_rates",
-            "v5-call-1617-flat-zonal",
-            conversation_state=state,
-        )
-
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatZonalFakeClientSession):
-            first = json.loads(await forwarder({}))
-        second = json.loads(await forwarder({}))
-
-        self.assertEqual(first["status"], "success")
-        self.assertIn("Zones A-B Rs 84.37", first["spoken_response_instruction"])
-        self.assertIn("Zones C-F", first["spoken_response_instruction"])
-        self.assertEqual(second["status"], "duplicate_suppressed")
-        self.assertIn("do not ask which zone group", second["spoken_response_instruction"])
-
     async def test_v5_shadowfax_surface_starting_rate_uses_trusted_zone(self):
         state = GatedConversationState(v4_strict_flow=True, v5_company_pair_flow=True)
         state.seed_context({"zone": "C"})
@@ -3018,28 +3067,88 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Rs 76.58", result["spoken_response_instruction"])
         self.assertFalse(state.shadowfax_surface_rate_due)
 
-    async def test_v4_normal_rate_request_cannot_call_flat_tool(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.apply_deterministic_answers("haan ji", turn_id="consent")
-        state.apply_deterministic_answers("normal rates check karne hain", turn_id="intent")
-        _FlatFakeClientSession.captured_payload = None
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_rates",
-            "v4-normal-rate-test",
-            conversation_state=state,
-            backend_argument_names=frozenset({"response_scope"}),
+    async def test_v7_named_bluedart_rate_uses_filtered_kb_lookup_after_close(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates batao", turn_id="intent")
+        state.seed_context({"zone": "D"})
+        state.onboarding_link_presented = True
+        state.apply_deterministic_answers(
+            "Blue Dart ka rate bata do",
+            turn_id="bluedart-rate",
         )
+        self.assertEqual(
+            _authorized_controlled_reply_tools(state),
+            ["get_shipkia_starting_rate"],
+        )
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_starting_rate",
+            "v7-bluedart-rate",
+            conversation_state=state,
+        )
+        _BluedartStartingFakeClientSession.captured_payload = None
 
         with patch(
             "livekit_agent.agent.aiohttp.ClientSession",
-            _FlatFakeClientSession,
+            _BluedartStartingFakeClientSession,
         ):
-            result = json.loads(await forwarder({"response_scope": "Starting"}))
+            result = json.loads(await forwarder({"zone": "A"}))
 
-        self.assertEqual(result["status"], "flat_rate_not_requested")
-        self.assertFalse(result["pricing_backend_called"])
-        self.assertIsNone(_FlatFakeClientSession.captured_payload)
-        self.assertNotIn("76.58", result["spoken_response_instruction"])
+        arguments = _BluedartStartingFakeClientSession.captured_payload["params"][
+            "arguments"
+        ]
+        self.assertEqual(
+            arguments,
+            {"zone": "D", "courier_partner": "Blue Dart"},
+        )
+        self.assertEqual(result["status"], "success")
+        self.assertIn("Bluedart Surface Express", result["customer_response"])
+        self.assertIn("Rs 101.67", result["customer_response"])
+        self.assertEqual(state.verified_starting_options[0]["courier"], "Bluedart")
+        self.assertEqual(_authorized_controlled_reply_tools(state), [])
+        self.assertIn("101.67", state.guidance())
+
+    async def test_v7_all_available_rates_use_fresh_unfiltered_kb_lookup(self):
+        state = V6ConversationState()
+        state.apply_deterministic_answers("ji bataiye", turn_id="consent")
+        state.apply_deterministic_answers("rates batao", turn_id="intent")
+        state.seed_context({"zone": "D"})
+        state.verified_starting_options = [
+            {"courier": "Bluedart", "service": "Surface", "amount": 101.67}
+        ]
+        state.available_courier_partners = ["Bluedart"]
+        state.apply_deterministic_answers(
+            "Jo jo available hain sab bata do",
+            turn_id="all-rates",
+            previous_agent_text="Bluedart ka starting rate share kiya hai.",
+        )
+        self.assertEqual(
+            _authorized_controlled_reply_tools(state),
+            ["get_shipkia_starting_rate"],
+        )
+        forwarder = make_mcp_forwarder(
+            "get_shipkia_starting_rate",
+            "v7-all-courier-rates",
+            conversation_state=state,
+        )
+        _AllCouriersStartingFakeClientSession.captured_payload = None
+
+        with patch(
+            "livekit_agent.agent.aiohttp.ClientSession",
+            _AllCouriersStartingFakeClientSession,
+        ):
+            result = json.loads(await forwarder({"zone": "A", "courier_partner": "Bluedart"}))
+
+        arguments = _AllCouriersStartingFakeClientSession.captured_payload["params"][
+            "arguments"
+        ]
+        self.assertEqual(arguments, {"zone": "D"})
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(result["starting_rate_options"]), 7)
+        self.assertIn("Bluedart Surface Rs 101.67", result["customer_response"])
+        self.assertEqual(result["rate_source"], "knowledge_base_current_call")
+        self.assertEqual(len(state.verified_starting_options), 7)
+        self.assertEqual(_authorized_controlled_reply_tools(state), [])
 
     async def test_v4_flat_request_cannot_call_normal_calculator(self):
         state = GatedConversationState(v4_strict_flow=True)
@@ -3057,79 +3166,8 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["pricing_backend_called"])
         self.assertNotIn("22", result["spoken_response_instruction"])
 
-    async def test_v4_flat_tool_collects_requirements_before_quoting(self):
-        state = GatedConversationState()
-        _FlatFakeClientSession.captured_payload = None
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_rates",
-            "v4-flat-qualification-test",
-            conversation_state=state,
-            backend_argument_names=frozenset({"response_scope"}),
-        )
-
-        with patch(
-            "livekit_agent.agent.aiohttp.ClientSession",
-            _FlatFakeClientSession,
-        ):
-            result = json.loads(await forwarder({"response_scope": "Starting"}))
-
-        self.assertEqual(result["status"], "qualification_required")
-        self.assertEqual(result["next_missing_field"], "business_name")
-        self.assertFalse(result["pricing_backend_called"])
-        self.assertIsNone(_FlatFakeClientSession.captured_payload)
-        self.assertIn("business or brand name", result["spoken_response_instruction"])
-        self.assertNotIn("76.58", result["spoken_response_instruction"])
-
-    async def test_v4_flat_tool_forwards_without_unknown_function_error(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.seed_context(
-            {
-                "business_name": "Work Shop",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-                "dead_weight": 0.5,
-                "payment_type": "Prepaid",
-            }
-        )
-        state.apply_deterministic_answers("haan ji", turn_id="consent")
-        state.apply_deterministic_answers("flat rate check karna hai", turn_id="intent")
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_rates",
-            "v4-flat-test",
-            conversation_state=state,
-            backend_argument_names=frozenset(
-                {"response_scope", "dead_weight", "payment_type"}
-            ),
-        )
-
-        with patch(
-            "livekit_agent.agent.aiohttp.ClientSession",
-            _FlatFakeClientSession,
-        ):
-            result = json.loads(await forwarder({"response_scope": "Matching"}))
-
-        self.assertEqual(
-            _FlatFakeClientSession.captured_payload["params"]["name"],
-            "get_shipkia_flat_rates",
-        )
-        self.assertEqual(result["status"], "success")
-        self.assertNotIn(
-            "pickup_pincode", _FlatFakeClientSession.captured_payload["params"]["arguments"]
-        )
-        self.assertNotIn(
-            "delivery_pincode", _FlatFakeClientSession.captured_payload["params"]["arguments"]
-        )
-        self.assertIn("exactly two verified Flat-related options", result["spoken_response_instruction"])
-        self.assertIn("Shadowfax Surface 5 KG", result["spoken_response_instruction"])
-        self.assertIn(
-            "anything else",
-            result["spoken_response_instruction"],
-        )
-
-    async def test_v4_flat_catalog_starting_response_asks_if_more_help_is_needed(self):
-        state = GatedConversationState()
+    async def test_v6_flat_catalog_starting_response_asks_for_monthly_volume(self):
+        state = V6ConversationState()
         result = _voice_flat_catalog_result(
             {
                 "status": "success",
@@ -3155,7 +3193,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertIn("Rs 76.58 se start hota hai", result["spoken_response_instruction"])
-        self.assertIn("anything else", result["spoken_response_instruction"])
+        self.assertIn("monthly shipment quantity", result["spoken_response_instruction"])
         self.assertFalse(result["excluded_additional_weight_components"])
 
     async def test_v6_later_flat_catalog_never_appends_premature_move_forward(self):
@@ -3190,38 +3228,6 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stop without asking another question", instruction)
         self.assertNotIn("aage badhna", instruction)
         self.assertNotIn("kuch aur", instruction)
-
-    async def test_v4_flat_both_uses_prepaid_boundary_and_explains_cod_dependency(self):
-        state = GatedConversationState(v4_strict_flow=True)
-        state.seed_context(
-            {
-                "business_name": "Work Shop",
-                "business_type": "D2C",
-                "current_shipping_arrangement": "Own Arrangement",
-                "current_shipping_rate": 40,
-                "current_problem": "High Rates",
-                "dead_weight": 0.5,
-                "payment_type": "Both",
-            }
-        )
-        state.apply_deterministic_answers("haan ji", turn_id="consent")
-        state.apply_deterministic_answers("flat rate check karna hai", turn_id="intent")
-        forwarder = make_mcp_forwarder(
-            "get_shipkia_flat_rates",
-            "v4-flat-both-test",
-            conversation_state=state,
-            backend_argument_names=frozenset(
-                {"response_scope", "dead_weight", "payment_type"}
-            ),
-        )
-
-        with patch("livekit_agent.agent.aiohttp.ClientSession", _FlatFakeClientSession):
-            result = json.loads(await forwarder({"response_scope": "Matching"}))
-
-        arguments = _FlatFakeClientSession.captured_payload["params"]["arguments"]
-        self.assertEqual(arguments["payment_type"], "Prepaid")
-        self.assertEqual(state.value("payment_type"), "Both")
-        self.assertIn("COD rate depends on order value", result["spoken_response_instruction"])
 
     async def test_v4_flat_catalog_cod_requires_only_order_value(self):
         result = _voice_flat_catalog_result(
@@ -3287,7 +3293,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
             conversation_state=state,
         )
         self.assertEqual(violation, "unsolicited_cod_question")
-        self.assertTrue(
+        self.assertFalse(
             _flow_violation_requires_correction(violation, model_led_flow=True)
         )
 
@@ -3458,7 +3464,7 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["must_return_to_same_pending_question"])
         self.assertIn("brand name", result["spoken_response_instruction"])
 
-    async def test_starting_mode_blocks_calculator_and_deduplicates_audit(self):
+    async def test_missing_route_details_never_enable_generic_starting_rate(self):
         state = GatedConversationState()
         state.apply_deterministic_answers("business pata nahi", turn_id="optional")
         state.apply_deterministic_answers(
@@ -3476,13 +3482,13 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         first = json.loads(await forwarder({"dead_weight": 0.5}))
         second = json.loads(await forwarder({"dead_weight": 0.5}))
 
-        self.assertEqual(first["status"], "starting_rate_required")
-        self.assertEqual(first["pricing_mode"], "general_starting")
-        self.assertIn("get_shipkia_starting_rate", first["spoken_response_instruction"])
-        self.assertEqual(second["status"], "starting_rate_required")
+        self.assertEqual(first["status"], "shipment_details_required")
+        self.assertEqual(first["pricing_mode"], "pending")
+        self.assertNotIn("get_shipkia_starting_rate", first["spoken_response_instruction"])
+        self.assertEqual(second["status"], "shipment_details_required")
         self.assertEqual(len(runtime.tool_outcomes), 1)
 
-    async def test_v4_both_starting_response_never_asks_permission(self):
+    async def test_v4_incomplete_route_cannot_call_starting_rate_without_zone(self):
         state = GatedConversationState(v4_strict_flow=True)
         state.seed_context(
             {
@@ -3511,13 +3517,10 @@ class TestRateGuard(unittest.IsolatedAsyncioTestCase):
         ):
             result = json.loads(await forwarder({}))
 
-        instruction = result["spoken_response_instruction"]
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["pricing_trigger_field"], "payment_type_both")
-        self.assertIn("Prepaid rates", instruction)
-        self.assertIn("Rs 22", instruction)
-        self.assertIn("COD rate order value", instruction)
-        self.assertIn("Do not ask for permission", instruction)
+        self.assertEqual(result["status"], "starting_rate_not_authorized")
+        self.assertEqual(result["pricing_mode"], "pending")
+        self.assertEqual(result["required_next_question"], "6-digit delivery pincode")
+        self.assertFalse(result["pricing_backend_called"])
 
     async def test_authoritative_rate_arguments_ignore_invented_weight_alias(self):
         merged, ignored = _authoritative_rate_request_arguments(

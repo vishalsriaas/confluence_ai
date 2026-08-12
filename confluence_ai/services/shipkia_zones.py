@@ -48,6 +48,7 @@ _CITY_PROFILES = {
     "faridabad": _profile("Faridabad", "Haryana", cluster="NCR"),
     "mumbai": _profile("Mumbai", "Maharashtra", metro=True),
     "bombay": _profile("Mumbai", "Maharashtra", metro=True),
+    "bareilly": _profile("Bareilly", "Uttar Pradesh"),
     "pune": _profile("Pune", "Maharashtra"),
     "bengaluru": _profile("Bengaluru", "Karnataka", metro=True),
     "bangalore": _profile("Bengaluru", "Karnataka", metro=True),

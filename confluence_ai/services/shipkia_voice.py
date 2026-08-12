@@ -299,12 +299,9 @@ def lookup_pincode_serviceability(
                     "status": "configuration_required",
                     "zone": None,
                     "zone_verified": False,
-                    "fallback_starting_rate": get_starting_rate({}),
                     "message": "The route resolved, but its verified starting rate is unavailable.",
                 }
             )
-    elif result.get("status") != "route_details_required":
-        result["fallback_starting_rate"] = get_starting_rate({})
     _record("lookup_pincode_serviceability", arguments, result, task_id=task_id, agent=agent)
     return result
 
@@ -336,7 +333,7 @@ def get_shipkia_starting_rate(
     except (FileNotFoundError, ValueError) as exc:
         result = {
             "status": "configuration_required",
-            "response_type": "general_starting",
+            "response_type": "zone_starting",
             "zone": None,
             "amount": None,
             "message": str(exc),
