@@ -18,13 +18,25 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.settings = frappe.get_single("AI Repeat Follow Up Settings")
         self._settings_snapshot = {
             "enabled": self.settings.enabled,
+            "deterministic_medical_runtime_enabled": self.settings.get("deterministic_medical_runtime_enabled"),
             "agent_1": self.settings.agent_1,
             "agent_2": self.settings.agent_2,
+            "agent_3": self.settings.get("agent_3"),
+            "agent_4": self.settings.get("agent_4"),
             "voice_task_template": self.settings.voice_task_template,
             "max_agent_1_attempts": self.settings.max_agent_1_attempts,
+            "max_agent_2_attempts": self.settings.get("max_agent_2_attempts"),
+            "max_agent_3_attempts": self.settings.get("max_agent_3_attempts"),
+            "max_agent_4_attempts": self.settings.get("max_agent_4_attempts"),
             "retry_delay_minutes": self.settings.retry_delay_minutes,
             "voice_call_timeout_minutes": self.settings.voice_call_timeout_minutes,
             "agent_2_delay_days": self.settings.agent_2_delay_days,
+            "agent_3_delay_days": self.settings.get("agent_3_delay_days"),
+            "agent_4_before_course_end_days": self.settings.get("agent_4_before_course_end_days"),
+            "skip_agent_3_under_course_days": self.settings.get("skip_agent_3_under_course_days"),
+            "renewal_webhook_url": self.settings.get("renewal_webhook_url"),
+            "renewal_webhook_auth_header": self.settings.get("renewal_webhook_auth_header"),
+            "renewal_webhook_auth_token": self.settings.get("renewal_webhook_auth_token"),
             "shipkia_tracking_enabled": self.settings.shipkia_tracking_enabled,
             "shipkia_prefetch_before_call": self.settings.get("shipkia_prefetch_before_call"),
             "shipkia_tracking_api_url": self.settings.shipkia_tracking_api_url,
@@ -42,13 +54,35 @@ class TestRepeatFollowUp(unittest.TestCase):
         }
         if not self.settings.agent_1:
             self.settings.agent_1 = self._ensure_agent("Radha Repeat Agent Sriaas 1")
+        if not self.settings.agent_2:
+            self.settings.agent_2 = self._ensure_agent("Radha Repeat Agent Sriaas 2")
+        if self.settings.meta.has_field("agent_3") and not self.settings.get("agent_3"):
+            self.settings.agent_3 = self._ensure_agent("Radha Repeat Agent Sriaas 3")
+        if self.settings.meta.has_field("agent_4") and not self.settings.get("agent_4"):
+            self.settings.agent_4 = self._ensure_agent("Radha Repeat Agent Sriaas 4")
         if not self.settings.voice_task_template:
             self.settings.voice_task_template = self._ensure_template()
         self.settings.enabled = 1
+        if self.settings.meta.has_field("deterministic_medical_runtime_enabled"):
+            self.settings.deterministic_medical_runtime_enabled = 0
         self.settings.max_agent_1_attempts = 3
+        if self.settings.meta.has_field("max_agent_2_attempts"):
+            self.settings.max_agent_2_attempts = 3
+        if self.settings.meta.has_field("max_agent_3_attempts"):
+            self.settings.max_agent_3_attempts = 3
+        if self.settings.meta.has_field("max_agent_4_attempts"):
+            self.settings.max_agent_4_attempts = 3
         self.settings.retry_delay_minutes = 60
         self.settings.voice_call_timeout_minutes = 5
         self.settings.agent_2_delay_days = 7
+        if self.settings.meta.has_field("agent_3_delay_days"):
+            self.settings.agent_3_delay_days = 7
+        if self.settings.meta.has_field("agent_4_before_course_end_days"):
+            self.settings.agent_4_before_course_end_days = 3
+        if self.settings.meta.has_field("skip_agent_3_under_course_days"):
+            self.settings.skip_agent_3_under_course_days = 21
+        if self.settings.meta.has_field("renewal_webhook_url"):
+            self.settings.renewal_webhook_url = ""
         self.settings.shipkia_tracking_enabled = 1
         self.settings.shipkia_prefetch_before_call = 0
         self.settings.shipkia_tracking_api_url = "https://shipkia.test/api/track.php"
@@ -149,6 +183,28 @@ class TestRepeatFollowUp(unittest.TestCase):
         ]
         return payload
 
+    def _enable_deterministic_runtime(self):
+        self.settings.deterministic_medical_runtime_enabled = 1
+        self.settings.save(ignore_permissions=True)
+        frappe.db.commit()
+
+    def _play_current_step(self, task_id: str) -> dict:
+        turn = repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+        for unit in turn.get("speech_units") or []:
+            result = repeat_followup.record_repeat_speech_unit_played(
+                {
+                    "step_key": turn["step_key"],
+                    "unit_index": unit["unit_index"],
+                    "unit_id": unit["unit_id"],
+                    "unit_hash": unit["unit_hash"],
+                    "speech_id": f"test-{unit['unit_id']}",
+                    "playout_completed": True,
+                },
+                task_id=task_id,
+            )
+            self.assertIn(result["status"], {"success", "already_recorded"})
+        return repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_start_stores_full_encounter_but_task_context_is_compact(self, _enqueue):
         result = repeat_followup.start_from_event(self._payload())
@@ -166,19 +222,23 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertIn("get_repeat_medicine_list", workflow.mcp_tools_enabled)
         self.assertIn("verify_repeat_medicine_in_prescription", workflow.mcp_tools_enabled)
         self.assertIn("get_shipkia_tracking_status", workflow.mcp_tools_enabled)
+        self.assertIn("send_repeat_diet_chart_whatsapp", workflow.mcp_tools_enabled)
+        self.assertIn("trigger_repeat_renewal_n8n", workflow.mcp_tools_enabled)
         self.assertIn("log_repeat_followup_outcome", workflow.mcp_tools_enabled)
-        self.assertNotIn("send_repeat_diet_chart_whatsapp", workflow.mcp_tools_enabled)
         self.assertEqual(parse_json_object(workflow.mcp_tools_used_json), {"events": []})
+        self.assertEqual(workflow.course_duration_days, 0)
 
         task = frappe.get_doc("AI Task", result["task"])
         context = parse_json_object(task.context_json)
         self.assertEqual(context["repeat_followup_compacted"], 1)
         self.assertEqual(context["full_encounter_available_via_tool"], 1)
-        self.assertEqual(context["simple_followup_mode"], 1)
-        self.assertEqual(context["state_machine_required"], 0)
-        self.assertEqual(context["active_stage_id"], "SIMPLE_FOLLOWUP")
-        self.assertEqual(context["stage_prompt_loading_required"], 0)
+        self.assertEqual(context["simple_followup_mode"], 0)
+        self.assertEqual(context["state_machine_required"], 1)
+        self.assertEqual(context["active_stage_id"], "AGENT_1")
+        self.assertEqual(context["stage_prompt_loading_required"], 1)
+        self.assertIn("get_current_speech_unit", context["state_machine_tools"])
         self.assertEqual(context["current_step_key"], "opening")
+        self.assertIn("medicine package follow-up", context["current_speech_unit"])
         self.assertNotIn("nested", context)
         self.assertEqual(context["awb_number"], "AWB123")
         self.assertEqual(context["patient_department"], "Liver")
@@ -319,21 +379,23 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertEqual(medicine_summary["medicine_count"], 12)
         self.assertEqual(len(medicine_summary["drug_prescription"]), 12)
         self.assertIn("Medicine 12", medicine_summary["required_medicine_script"])
+        self.assertEqual(workflow.course_duration_days, 30)
         self.assertEqual(context["medicine_summary"]["medicine_count"], 12)
         self.assertIn("Medicine 12", context["required_medicine_script"])
         livekit_context = _voice_metadata_context(context)
-        self.assertEqual(livekit_context["active_stage_id"], "SIMPLE_FOLLOWUP")
-        self.assertEqual(livekit_context["simple_followup_mode"], 1)
+        self.assertEqual(livekit_context["active_stage_id"], "AGENT_1")
+        self.assertEqual(livekit_context["simple_followup_mode"], 0)
+        self.assertEqual(livekit_context["state_machine_required"], 1)
         self.assertIn("stage_sequence", livekit_context)
         self.assertIn("required_order_script", livekit_context)
         self.assertIn("medicine_summary", livekit_context)
         self.assertIn("required_medicine_script", livekit_context)
         self.assertIn("required_diet_script", livekit_context)
         self.assertIn("simple_followup_script", livekit_context)
+        self.assertIn("current_speech_unit", livekit_context)
+        self.assertIn("state_machine_tools", livekit_context)
         self.assertIn("Medicine 12", livekit_context["required_medicine_script"])
         self.assertNotIn("strict_followup_script", livekit_context)
-        self.assertNotIn("current_speech_unit", livekit_context)
-        self.assertNotIn("state_machine_tools", livekit_context)
 
     def test_agent_1_defaults_are_multistage_with_split_prompts(self):
         agent_name = repeat_followup._ensure_agent_1()
@@ -444,6 +506,170 @@ class TestRepeatFollowUp(unittest.TestCase):
             task_id=result["task"],
         )
         self.assertEqual(repeat_followup.get_current_speech_unit({}, task_id=result["task"])["step_key"], "medicine_item_2")
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_deterministic_runtime_requires_playout_and_contextual_answer(self, _enqueue):
+        self._enable_deterministic_runtime()
+        result = repeat_followup.start_from_event(self._payload_with_medicines("deterministic-answer", count=2))
+        task_id = result["task"]
+
+        turn = repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+        self.assertEqual(turn["status"], "success")
+        self.assertEqual(turn["step_key"], "opening")
+        self.assertEqual(turn["deterministic_runtime_enabled"], 1)
+        self.assertTrue(turn["source_integrity"]["valid"])
+        blocked = repeat_followup.mark_repeat_step_complete({"step_key": "opening"}, task_id=task_id)
+        self.assertEqual(blocked["status"], "blocked_incomplete_step")
+
+        self._play_current_step(task_id)
+        completed = repeat_followup.mark_repeat_step_complete({"step_key": "opening"}, task_id=task_id)
+        self.assertEqual(completed["status"], "success")
+        retried = repeat_followup.mark_repeat_step_complete({"step_key": "opening"}, task_id=task_id)
+        self.assertEqual(retried["status"], "success")
+        self.assertEqual(retried["already_completed"], 1)
+        delivery = self._play_current_step(task_id)
+        self.assertEqual(delivery["step_key"], "delivery_check")
+        self.assertEqual(delivery["answer_contract"]["answer_type"], "yes_no")
+
+        acknowledgement = repeat_followup.record_repeat_step_answer(
+            {
+                "step_key": "delivery_check",
+                "transcript": "haan ji",
+                "classification": "acknowledgement",
+                "confidence": 0.98,
+                "extracted_value": {},
+            },
+            task_id=task_id,
+        )
+        self.assertEqual(acknowledgement["status"], "not_satisfied")
+        still_blocked = repeat_followup.mark_repeat_step_complete({"step_key": "delivery_check"}, task_id=task_id)
+        self.assertEqual(still_blocked["status"], "blocked_incomplete_step")
+
+        accepted = repeat_followup.record_repeat_step_answer(
+            {
+                "step_key": "delivery_check",
+                "transcript": "haan, package receive ho gaya",
+                "classification": "valid_answer",
+                "confidence": 0.99,
+                "extracted_value": {"value": True},
+            },
+            task_id=task_id,
+        )
+        self.assertEqual(accepted["status"], "accepted")
+        completed = repeat_followup.mark_repeat_step_complete({"step_key": "delivery_check"}, task_id=task_id)
+        self.assertEqual(completed["status"], "success")
+        self.assertEqual(completed["next_step"]["step_key"], "medicine_intro")
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_deterministic_medicine_resumes_from_unplayed_unit(self, _enqueue):
+        self._enable_deterministic_runtime()
+        result = repeat_followup.start_from_event(self._payload_with_medicines("deterministic-medicine", count=2))
+        task_id = result["task"]
+
+        self._play_current_step(task_id)
+        repeat_followup.mark_repeat_step_complete({"step_key": "opening"}, task_id=task_id)
+        self._play_current_step(task_id)
+        repeat_followup.record_repeat_step_answer(
+            {
+                "step_key": "delivery_check",
+                "transcript": "receive ho gaya",
+                "classification": "valid_answer",
+                "confidence": 0.99,
+                "extracted_value": {"value": True},
+            },
+            task_id=task_id,
+        )
+        repeat_followup.mark_repeat_step_complete({"step_key": "delivery_check"}, task_id=task_id)
+        self._play_current_step(task_id)
+        repeat_followup.mark_repeat_step_complete({"step_key": "medicine_intro"}, task_id=task_id)
+
+        medicine = repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+        self.assertEqual(medicine["step_key"], "medicine_item_1")
+        self.assertGreaterEqual(len(medicine["speech_units"]), 2)
+        first = medicine["speech_units"][0]
+        repeat_followup.record_repeat_speech_unit_played(
+            {
+                "step_key": medicine["step_key"],
+                "unit_index": first["unit_index"],
+                "unit_id": first["unit_id"],
+                "unit_hash": first["unit_hash"],
+                "speech_id": "medicine-first-unit",
+                "playout_completed": True,
+            },
+            task_id=task_id,
+        )
+        repeat_followup.mark_repeat_step_interrupted({"patient_text": "ye kab leni hai"}, task_id=task_id)
+        resumed = repeat_followup.resume_repeat_pending_step({}, task_id=task_id)
+        self.assertEqual(resumed["current_step"]["speech_cursor"], 1)
+        blocked = repeat_followup.mark_repeat_step_complete({"step_key": "medicine_item_1"}, task_id=task_id)
+        self.assertEqual(blocked["status"], "blocked_incomplete_step")
+        self._play_current_step(task_id)
+        completed = repeat_followup.mark_repeat_step_complete({"step_key": "medicine_item_1"}, task_id=task_id)
+        self.assertEqual(completed["status"], "success")
+        self.assertEqual(completed["next_step"]["step_key"], "medicine_item_2")
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_deterministic_runtime_detects_prescription_change(self, _enqueue):
+        self._enable_deterministic_runtime()
+        result = repeat_followup.start_from_event(self._payload_with_medicines("deterministic-source-change", count=2))
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+        summary = parse_json_object(workflow.medicine_summary_json)
+        summary["drug_prescription"][0]["dosage"] = "2-0-2"
+        workflow.medicine_summary_json = json.dumps(summary)
+        workflow.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        turn = repeat_followup.get_repeat_runtime_turn({}, task_id=result["task"])
+        self.assertEqual(turn["status"], "source_changed")
+        self.assertFalse(turn["source_integrity"]["valid"])
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_deterministic_runtime_executes_optional_and_terminal_actions(self, _enqueue):
+        self._enable_deterministic_runtime()
+        result = repeat_followup.start_from_event(self._payload_with_medicines("deterministic-actions", count=1))
+        task_id = result["task"]
+
+        for _ in range(20):
+            turn = repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+            if turn.get("step_key") == "whatsapp_diet_chart":
+                break
+            self._play_current_step(task_id)
+            if (turn.get("answer_contract") or {}).get("required"):
+                repeat_followup.record_repeat_step_answer(
+                    {
+                        "step_key": turn["step_key"],
+                        "transcript": "haan, receive ho gaya",
+                        "classification": "valid_answer",
+                        "confidence": 0.99,
+                        "extracted_value": {"value": True},
+                    },
+                    task_id=task_id,
+                )
+            completed = repeat_followup.mark_repeat_step_complete({"step_key": turn["step_key"]}, task_id=task_id)
+            self.assertEqual(completed["status"], "success")
+
+        optional = repeat_followup.execute_repeat_runtime_action(
+            {"step_key": "whatsapp_diet_chart", "customer_requested": False},
+            task_id=task_id,
+        )
+        self.assertEqual(optional["status"], "success")
+        self.assertEqual(optional["action_status"], "not_requested")
+        optional_retry = repeat_followup.execute_repeat_runtime_action(
+            {"step_key": "whatsapp_diet_chart", "customer_requested": False},
+            task_id=task_id,
+        )
+        self.assertEqual(optional_retry["status"], "success")
+        self.assertEqual(optional_retry["already_completed"], 1)
+        outcome_turn = repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)
+        self.assertEqual(outcome_turn["step_key"], "outcome_log")
+
+        outcome = repeat_followup.execute_repeat_runtime_action(
+            {"step_key": "outcome_log"},
+            task_id=task_id,
+        )
+        self.assertEqual(outcome["status"], "success")
+        self.assertIn("follow-up", outcome["customer_message"])
+        self.assertEqual(repeat_followup.get_repeat_runtime_turn({}, task_id=task_id)["status"], "complete")
 
     @patch("confluence_ai.services.repeat_followup.requests.post")
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
@@ -699,7 +925,7 @@ class TestRepeatFollowUp(unittest.TestCase):
         self.assertIsNotNone(workflow.agent_2_scheduled_at)
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
-    def test_outcome_logging_can_complete_without_state_tool_steps(self, _enqueue):
+    def test_outcome_logging_blocks_when_agent_1_steps_are_incomplete(self, _enqueue):
         result = repeat_followup.start_from_event(self._payload_with_medicines("premature-outcome-block", count=2))
 
         logged = repeat_followup.log_repeat_followup_outcome(
@@ -711,9 +937,10 @@ class TestRepeatFollowUp(unittest.TestCase):
             task_id=result["task"],
         )
 
-        self.assertEqual(logged["status"], "success")
+        self.assertEqual(logged["status"], "blocked_incomplete_agent_1")
+        self.assertEqual(logged["pending_step"]["step_key"], "opening")
         workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
-        self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+        self.assertEqual(workflow.status, "Call Queued")
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_voice_result_does_not_schedule_agent_2_when_agent_1_steps_incomplete(self, _enqueue):
@@ -722,8 +949,110 @@ class TestRepeatFollowUp(unittest.TestCase):
         handled = repeat_followup.handle_voice_result(task=result["task"], outcome="completed", notes="Customer disconnected early.")
         workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
 
-        self.assertEqual(handled["status"], "unclear_logged")
-        self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+        self.assertEqual(handled["status"], "retry_queued_incomplete")
+        self.assertEqual(workflow.status, "Retry Queued")
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_agent_2_outcome_schedules_agent_3_for_full_course(self, _enqueue):
+        result = repeat_followup.start_from_event(self._payload_with_medicines("agent2-full-course", count=1))
+        scheduled = repeat_followup.schedule_agent_2(result["workflow"], real_conversation=True)
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+        workflow.agent_2_scheduled_at = now_datetime()
+        workflow.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        queued = repeat_followup.queue_agent_2_call(result["workflow"])
+        logged = repeat_followup.log_repeat_followup_outcome(
+            {
+                "primary_outcome": "medicine_taking",
+                "customer_summary": "Customer is taking medicine and following diet.",
+                "structured_details": {"medicine_left_days": 20},
+            },
+            task_id=queued["task"],
+        )
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(scheduled["status"], "scheduled")
+        self.assertEqual(logged["next"]["status"], "scheduled")
+        self.assertEqual(logged["next"]["stage"], "AGENT_3")
+        self.assertEqual(workflow.status, "Agent 3 Scheduled")
+        self.assertIsNotNone(workflow.agent_3_scheduled_at)
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_agent_2_outcome_skips_agent_3_for_short_course(self, _enqueue):
+        payload = self._payload_with_medicines("agent2-short-course", count=1)
+        payload["patient_encounter"]["drug_prescription"][0]["period"] = "15 Day"
+        result = repeat_followup.start_from_event(payload)
+        repeat_followup.schedule_agent_2(result["workflow"], real_conversation=True)
+        queued = repeat_followup.queue_agent_2_call(result["workflow"])
+
+        logged = repeat_followup.log_repeat_followup_outcome(
+            {
+                "primary_outcome": "medicine_taking",
+                "customer_summary": "Short course follow-up done.",
+                "structured_details": {"medicine_left_days": 8},
+            },
+            task_id=queued["task"],
+        )
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(workflow.course_duration_days, 15)
+        self.assertEqual(logged["next"]["stage"], "AGENT_4")
+        self.assertEqual(workflow.status, "Agent 4 Scheduled")
+        self.assertIsNotNone(workflow.agent_4_scheduled_at)
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_agent_3_outcome_schedules_agent_4(self, _enqueue):
+        result = repeat_followup.start_from_event(self._payload_with_medicines("agent3-to-agent4", count=1))
+        repeat_followup.schedule_stage(result["workflow"], "AGENT_3", real_conversation=True)
+        queued = repeat_followup.queue_agent_3_call(result["workflow"])
+
+        logged = repeat_followup.log_repeat_followup_outcome(
+            {
+                "primary_outcome": "improving",
+                "customer_summary": "Customer is improving.",
+                "structured_details": {"trust_level": "positive"},
+            },
+            task_id=queued["task"],
+        )
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(logged["next"]["stage"], "AGENT_4")
+        self.assertEqual(workflow.status, "Agent 4 Scheduled")
+
+    @patch("confluence_ai.services.repeat_followup.requests.post")
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_agent_4_renewal_consent_triggers_webhook(self, _enqueue, post):
+        response = Mock()
+        response.ok = True
+        response.status_code = 200
+        response.text = "{}"
+        response.json.return_value = {"ok": True, "renewal": "created"}
+        post.return_value = response
+
+        result = repeat_followup.start_from_event(self._payload_with_medicines("agent4-renewal", count=1))
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+        workflow.renewal_webhook_url = "https://n8n.test/webhook/renewal"
+        workflow.save(ignore_permissions=True)
+        frappe.db.commit()
+        repeat_followup.schedule_stage(result["workflow"], "AGENT_4", real_conversation=True)
+        queued = repeat_followup.queue_agent_4_call(result["workflow"])
+
+        logged = repeat_followup.log_repeat_followup_outcome(
+            {
+                "primary_outcome": "renewal_requested",
+                "customer_summary": "Customer agreed to continue next month.",
+                "renewal_consent": True,
+                "structured_details": {"payment_mode": "COD"},
+            },
+            task_id=queued["task"],
+        )
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(logged["renewal"]["status"], "triggered")
+        self.assertEqual(workflow.status, "Renewal Triggered")
+        self.assertIsNotNone(workflow.renewal_triggered_at)
+        post.assert_called_once()
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_missed_call_uses_configured_retry_delay_and_max_attempts(self, _enqueue):

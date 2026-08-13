@@ -20,6 +20,8 @@
   "scenario_key",
   "agent_1",
   "agent_2",
+  "agent_3",
+  "agent_4",
   "livekit_channel_account_fallback",
   "voice_task_template",
   "default_knowledge_document",
@@ -36,6 +38,8 @@
   "voice_dispatch_id",
   "voice_task",
   "agent_2_task",
+  "agent_3_task",
+  "agent_4_task",
   "task_batch",
   "state_machine_section",
   "journey_stages",
@@ -44,6 +48,15 @@
   "retry_delay_minutes",
   "voice_call_timeout_minutes",
   "agent_2_delay_days",
+  "agent_3_delay_days",
+  "agent_4_before_course_end_days",
+  "skip_agent_3_under_course_days",
+  "max_agent_2_attempts",
+  "max_agent_3_attempts",
+  "max_agent_4_attempts",
+  "renewal_webhook_url",
+  "renewal_webhook_auth_header",
+  "renewal_webhook_auth_token",
   "schedule_agent_2_only_after_conversation",
   "shipkia_tracking_enabled",
   "shipkia_prefetch_before_call",
@@ -74,8 +87,15 @@
   "next_scheduled_call_stage",
   "next_call_time",
   "retry_count",
+  "agent_2_retry_count",
+  "agent_3_retry_count",
+  "agent_4_retry_count",
   "max_retry_count",
   "agent_2_scheduled_at",
+  "agent_3_scheduled_at",
+  "agent_4_scheduled_at",
+  "course_duration_days",
+  "renewal_triggered_at",
   "result_section",
   "primary_outcome",
   "sub_outcome",
@@ -95,6 +115,7 @@
   "diet_chart_pdf_file",
   "diet_chart_summary_json",
   "diet_chart_whatsapp_result_json",
+  "renewal_result_json",
   "structured_details_json"
  ],
  "fields": [
@@ -105,7 +126,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Draft\nCall Queued\nCall Running\nRetry Queued\nCompleted\nUnclear Conversation\nAgent 2 Scheduled\nAgent 2 Queued\nAgent 2 Pending Config\nMissed After Retries\nFailed\nCancelled"
+   "options": "Draft\nCall Queued\nCall Running\nRetry Queued\nCompleted\nUnclear Conversation\nAgent 1 Completed\nAgent 2 Scheduled\nAgent 2 Queued\nAgent 2 Running\nAgent 2 Retry Queued\nAgent 2 Completed\nAgent 2 Pending Config\nAgent 3 Scheduled\nAgent 3 Queued\nAgent 3 Running\nAgent 3 Retry Queued\nAgent 3 Completed\nAgent 3 Pending Config\nAgent 4 Scheduled\nAgent 4 Queued\nAgent 4 Running\nAgent 4 Retry Queued\nAgent 4 Completed\nAgent 4 Pending Config\nRenewal Triggered\nClosed\nMissed After Retries\nFailed\nCancelled"
   },
   {
    "default": "Call Instance",
@@ -196,6 +217,18 @@
    "fieldname": "agent_2",
    "fieldtype": "Link",
    "label": "Agent 2",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "agent_3",
+   "fieldtype": "Link",
+   "label": "Agent 3",
+   "options": "AI Agent"
+  },
+  {
+   "fieldname": "agent_4",
+   "fieldtype": "Link",
+   "label": "Agent 4",
    "options": "AI Agent"
   },
   {
@@ -298,6 +331,18 @@
    "options": "AI Task"
   },
   {
+   "fieldname": "agent_3_task",
+   "fieldtype": "Link",
+   "label": "Agent 3 Task",
+   "options": "AI Task"
+  },
+  {
+   "fieldname": "agent_4_task",
+   "fieldtype": "Link",
+   "label": "Agent 4 Task",
+   "options": "AI Task"
+  },
+  {
    "fieldname": "task_batch",
    "fieldtype": "Link",
    "label": "Task Batch",
@@ -348,6 +393,58 @@
    "fieldname": "agent_2_delay_days",
    "fieldtype": "Int",
    "label": "Agent 2 Delay Days"
+  },
+  {
+   "default": "7",
+   "fieldname": "agent_3_delay_days",
+   "fieldtype": "Int",
+   "label": "Agent 3 Delay Days"
+  },
+  {
+   "default": "3",
+   "fieldname": "agent_4_before_course_end_days",
+   "fieldtype": "Int",
+   "label": "Agent 4 Days Before Course End"
+  },
+  {
+   "default": "21",
+   "description": "If the course is shorter than this many days, skip Agent 3 and schedule Agent 4 after Agent 2.",
+   "fieldname": "skip_agent_3_under_course_days",
+   "fieldtype": "Int",
+   "label": "Skip Agent 3 Under Course Days"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_agent_2_attempts",
+   "fieldtype": "Int",
+   "label": "Max Agent 2 Attempts"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_agent_3_attempts",
+   "fieldtype": "Int",
+   "label": "Max Agent 3 Attempts"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_agent_4_attempts",
+   "fieldtype": "Int",
+   "label": "Max Agent 4 Attempts"
+  },
+  {
+   "fieldname": "renewal_webhook_url",
+   "fieldtype": "Data",
+   "label": "Renewal Webhook URL"
+  },
+  {
+   "fieldname": "renewal_webhook_auth_header",
+   "fieldtype": "Data",
+   "label": "Renewal Webhook Auth Header"
+  },
+  {
+   "fieldname": "renewal_webhook_auth_token",
+   "fieldtype": "Password",
+   "label": "Renewal Webhook Auth Token"
   },
   {
    "default": "1",
@@ -534,6 +631,24 @@
    "label": "Agent 1 Attempt Count"
   },
   {
+   "default": "0",
+   "fieldname": "agent_2_retry_count",
+   "fieldtype": "Int",
+   "label": "Agent 2 Attempt Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "agent_3_retry_count",
+   "fieldtype": "Int",
+   "label": "Agent 3 Attempt Count"
+  },
+  {
+   "default": "0",
+   "fieldname": "agent_4_retry_count",
+   "fieldtype": "Int",
+   "label": "Agent 4 Attempt Count"
+  },
+  {
    "default": "3",
    "fieldname": "max_retry_count",
    "fieldtype": "Int",
@@ -544,6 +659,27 @@
    "fieldtype": "Datetime",
    "in_list_view": 1,
    "label": "Agent 2 Scheduled At"
+  },
+  {
+   "fieldname": "agent_3_scheduled_at",
+   "fieldtype": "Datetime",
+   "label": "Agent 3 Scheduled At"
+  },
+  {
+   "fieldname": "agent_4_scheduled_at",
+   "fieldtype": "Datetime",
+   "label": "Agent 4 Scheduled At"
+  },
+  {
+   "default": "0",
+   "fieldname": "course_duration_days",
+   "fieldtype": "Int",
+   "label": "Course Duration Days"
+  },
+  {
+   "fieldname": "renewal_triggered_at",
+   "fieldtype": "Datetime",
+   "label": "Renewal Triggered At"
   },
   {
    "fieldname": "result_section",
@@ -654,6 +790,13 @@
    "fieldname": "diet_chart_whatsapp_result_json",
    "fieldtype": "Code",
    "label": "Diet Chart WhatsApp Result JSON",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "renewal_result_json",
+   "fieldtype": "Code",
+   "label": "Renewal Result JSON",
    "options": "JSON",
    "read_only": 1
   },

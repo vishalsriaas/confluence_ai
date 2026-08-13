@@ -155,10 +155,15 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "log_sales_call_outcome",
         "create_draft_patient_encounter_from_sales",
         "send_mapped_whatsapp_template",
+        "globifit_send_mapped_whatsapp_template",
         "transfer_live_call",
         "get_repeat_workflow_state",
         "get_current_required_step",
         "get_current_speech_unit",
+        "get_repeat_runtime_turn",
+        "record_repeat_speech_unit_played",
+        "record_repeat_step_answer",
+        "execute_repeat_runtime_action",
         "mark_repeat_step_complete",
         "mark_repeat_step_interrupted",
         "resume_repeat_pending_step",
@@ -197,7 +202,7 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         return sales_context.log_sales_call_outcome(arguments, task_id=task_id, agent=agent)
     if tool_name == "create_draft_patient_encounter_from_sales":
         return sales_context.create_draft_patient_encounter_from_sales(arguments, task_id=task_id, agent=agent)
-    if tool_name == "send_mapped_whatsapp_template":
+    if tool_name in {"send_mapped_whatsapp_template", "globifit_send_mapped_whatsapp_template"}:
         from confluence_ai.services.whatsapp_templates import send_mapped_whatsapp_template
 
         return send_mapped_whatsapp_template(arguments, task_id=task_id, agent=agent)
@@ -217,6 +222,22 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         from confluence_ai.services import repeat_followup
 
         return repeat_followup.get_current_speech_unit(arguments, task_id=task_id, agent=agent)
+    if tool_name == "get_repeat_runtime_turn":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.get_repeat_runtime_turn(arguments, task_id=task_id, agent=agent)
+    if tool_name == "record_repeat_speech_unit_played":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.record_repeat_speech_unit_played(arguments, task_id=task_id, agent=agent)
+    if tool_name == "record_repeat_step_answer":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.record_repeat_step_answer(arguments, task_id=task_id, agent=agent)
+    if tool_name == "execute_repeat_runtime_action":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.execute_repeat_runtime_action(arguments, task_id=task_id, agent=agent)
     if tool_name == "mark_repeat_step_complete":
         from confluence_ai.services import repeat_followup
 
