@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 from typing import Any
 from urllib.parse import quote
@@ -17,31 +16,17 @@ from confluence_ai.services.utils import as_json, create_error, parse_json_objec
 WORKFLOW = "AI Repeat Follow Up Workflow"
 SETTINGS = "AI Repeat Follow Up Settings"
 
-TERMINAL_STATES = {"Closed", "Renewal Triggered", "Missed After Retries", "Failed", "Cancelled"}
-FINAL_STATES = TERMINAL_STATES
+FINAL_STATES = {"Agent 2 Scheduled", "Agent 2 Queued", "Agent 2 Pending Config", "Missed After Retries", "Failed", "Cancelled"}
 MISSED_OUTCOMES = {"missed", "no_answer", "no answer", "busy", "failed", "timeout", "cancelled", "canceled"}
-FOLLOWUP_STAGES = ("AGENT_1", "AGENT_2", "AGENT_3", "AGENT_4")
-STAGE_LABELS = {
-    "AGENT_1": "Agent 1",
-    "AGENT_2": "Agent 2",
-    "AGENT_3": "Agent 3",
-    "AGENT_4": "Agent 4",
-}
 
 DEFAULT_AGENT_1_NAME = "Radha Repeat Agent Sriaas 1"
 DEFAULT_AGENT_2_NAME = "Radha Repeat Agent Sriaas 2"
-DEFAULT_AGENT_3_NAME = "Radha Repeat Agent Sriaas 3"
-DEFAULT_AGENT_4_NAME = "Radha Repeat Agent Sriaas 4"
 DEFAULT_SHIPKIA_URL = "https://shipkia.com/api/track.php"
 DEFAULT_KB_TITLE = "Radha Repeat Agent Sriaas 1 Follow Up Guide"
 REPEAT_MCP_TOOL_NAMES = (
     "get_repeat_workflow_state",
     "get_current_required_step",
     "get_current_speech_unit",
-    "get_repeat_runtime_turn",
-    "record_repeat_speech_unit_played",
-    "record_repeat_step_answer",
-    "execute_repeat_runtime_action",
     "mark_repeat_step_complete",
     "mark_repeat_step_interrupted",
     "resume_repeat_pending_step",
@@ -49,38 +34,25 @@ REPEAT_MCP_TOOL_NAMES = (
     "get_repeat_medicine_list",
     "verify_repeat_medicine_in_prescription",
     "get_shipkia_tracking_status",
-    "send_repeat_diet_chart_whatsapp",
     "send_mapped_whatsapp_template",
-    "trigger_repeat_renewal_n8n",
     "log_repeat_followup_outcome",
 )
 STATE_MACHINE_CONTEXT_KEY = "repeat_state_machine"
-RADHA_RUNTIME_VERSION = "radha_repeat_deterministic_state_machine_v2"
+RADHA_RUNTIME_VERSION = "radha_repeat_multicall_state_machine_v1"
 WORKFLOW_CONFIG_FIELDS = (
     "scenario_key",
     "agent_1",
     "agent_2",
-    "agent_3",
-    "agent_4",
     "livekit_channel_account_fallback",
     "voice_channel_account",
     "voice_task_template",
     "default_knowledge_document",
     "medicine_summary_field_names",
     "max_retry_count",
-    "max_agent_2_attempts",
-    "max_agent_3_attempts",
-    "max_agent_4_attempts",
     "retry_delay_minutes",
     "voice_call_timeout_minutes",
     "agent_2_delay_days",
-    "agent_3_delay_days",
-    "agent_4_before_course_end_days",
-    "skip_agent_3_under_course_days",
     "schedule_agent_2_only_after_conversation",
-    "renewal_webhook_url",
-    "renewal_webhook_auth_header",
-    "renewal_webhook_auth_token",
     "shipkia_tracking_enabled",
     "shipkia_prefetch_before_call",
     "shipkia_tracking_api_url",
@@ -114,37 +86,22 @@ def ensure_defaults() -> None:
 
     template_name = _ensure_task_template()
     agent_name = _ensure_agent_1()
-    agent_2_name = _ensure_stage_agent(DEFAULT_AGENT_2_NAME, "Agent 2 follow-up: medicine use, side effects, confusion, remaining medicine, diet adherence, and next action.")
-    agent_3_name = _ensure_stage_agent(DEFAULT_AGENT_3_NAME, "Agent 3 follow-up: progress, trust, adherence, benefit/issues, and whether continuation support is needed.")
-    agent_4_name = _ensure_stage_agent(DEFAULT_AGENT_4_NAME, "Agent 4 follow-up: near-course-end benefit/issues check and next month renewal consent.")
     kb_name = _ensure_knowledge_document(agent_name)
     tool_names = _ensure_tools()
     _attach_agent_tools(agent_name, tool_names)
-    _attach_agent_tools(agent_2_name, tool_names)
-    _attach_agent_tools(agent_3_name, tool_names)
-    _attach_agent_tools(agent_4_name, tool_names)
 
     settings = frappe.get_single(SETTINGS)
     initializing_diet_chart_defaults = not bool(settings.get("diet_chart_dept_field_names"))
     defaults = {
         "enabled": 1,
-        "deterministic_medical_runtime_enabled": 1,
         "company": "sriaas",
         "agent_1": agent_name,
-        "agent_2": agent_2_name,
-        "agent_3": agent_3_name,
-        "agent_4": agent_4_name,
+        "agent_2": _agent_by_label(DEFAULT_AGENT_2_NAME) or "",
         "voice_task_template": template_name,
         "max_agent_1_attempts": 3,
-        "max_agent_2_attempts": 3,
-        "max_agent_3_attempts": 3,
-        "max_agent_4_attempts": 3,
         "retry_delay_minutes": 60,
         "voice_call_timeout_minutes": 5,
         "agent_2_delay_days": 7,
-        "agent_3_delay_days": 7,
-        "agent_4_before_course_end_days": 3,
-        "skip_agent_3_under_course_days": 21,
         "schedule_agent_2_only_after_conversation": 1,
         "shipkia_tracking_enabled": 1,
         "shipkia_prefetch_before_call": 1,
@@ -219,7 +176,6 @@ def start_from_event(payload: dict | list) -> dict:
             "source_payload_json": as_json(payload),
             "encounter_json": as_json(context["encounter"]),
             "medicine_summary_json": as_json(context.get("medicine_summary") or {}),
-            "course_duration_days": _course_duration_days(context.get("medicine_summary") or {}),
             "context_json": as_json(_voice_bootstrap_context(workflow=None, context=context)),
         }
     )
@@ -339,16 +295,16 @@ def mark_voice_started(task_name: str, provider_result: dict | None = None) -> d
 
     workflow = frappe.get_doc(WORKFLOW, task.external_record_id)
     provider_result = provider_result or {}
-    stage_key = _stage_for_task(workflow, task_name) or _stage_from_status(workflow.status) or "AGENT_1"
-    workflow.status = "Call Running" if stage_key == "AGENT_1" else f"{_stage_label(stage_key)} Running"
+    if workflow.status == "Call Queued":
+        workflow.status = "Call Running"
     workflow.voice_room_name = provider_result.get("room_name") or workflow.voice_room_name
     workflow.voice_room_sid = provider_result.get("room_sid") or workflow.voice_room_sid
     workflow.sip_call_sid = provider_result.get("sip_call_sid") or workflow.sip_call_sid
     workflow.voice_dispatch_id = provider_result.get("dispatch_id") or workflow.voice_dispatch_id
     workflow.active_call_timeout_at = task.deadline
     workflow.next_scheduled_call_time = task.deadline
-    workflow.next_scheduled_call_stage = f"{_stage_label(stage_key)} timeout/retry check"
-    workflow.timer_status = f"{_stage_label(stage_key)} call running; timeout check at {task.deadline}"
+    workflow.next_scheduled_call_stage = "Agent 1 timeout/retry check"
+    workflow.timer_status = f"Agent 1 call running; timeout check at {task.deadline}"
     workflow.save(ignore_permissions=True)
     frappe.db.commit()
     return {"status": "updated", "workflow": workflow.name}
@@ -403,370 +359,12 @@ def get_current_speech_unit(arguments: dict | None = None, *, task_id: str | Non
         "can_skip": step.get("can_skip"),
         "resume_policy": step.get("resume_policy"),
         "speech_unit": step.get("speech_unit"),
-        "speech_units": step.get("speech_units") or [],
-        "speech_cursor": int(step.get("speech_cursor") or 0),
-        "answer_contract": step.get("answer_contract") or {},
-        "answer_state": step.get("answer_state") or {},
-        "speak_to_customer": 1 if step.get("speak_to_customer", 1) else 0,
-        "action_contract": step.get("action_contract") or {},
         "variables": step.get("variables") or {},
         "rag_filters": step.get("rag_filters") or {},
         "tool_to_call": step.get("tool_to_call") or "",
         "completion_condition": step.get("completion_condition"),
         "agent_instruction": step.get("agent_instruction"),
         "interrupt_rule": "If the patient interrupts, answer only the immediate question briefly, then return to this same step unless safety override applies.",
-    }
-
-
-def get_repeat_runtime_turn(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    """Return one server-owned runtime turn for the deterministic voice worker."""
-    workflow = _workflow_for_tool(arguments or {}, task_id)
-    state = _repeat_state_machine(workflow)
-    step = _active_step(state)
-    if not step:
-        _append_mcp_tool_usage(workflow, "get_repeat_runtime_turn", task_id=task_id, status="complete")
-        return {
-            "status": "complete",
-            "workflow": workflow.name,
-            "runtime_version": state.get("runtime_version"),
-            "deterministic_runtime_enabled": 1 if state.get("deterministic_runtime_enabled") else 0,
-        }
-
-    source_integrity = _repeat_source_integrity(workflow, state)
-    status = "success" if source_integrity.get("valid") else "source_changed"
-    payload = _runtime_step_payload(step)
-    payload.update(
-        {
-            "status": status,
-            "workflow": workflow.name,
-            "runtime_version": state.get("runtime_version"),
-            "deterministic_runtime_enabled": 1 if state.get("deterministic_runtime_enabled") else 0,
-            "source_integrity": source_integrity,
-            "support_context": _repeat_runtime_support_context(workflow, step),
-        }
-    )
-    _append_mcp_tool_usage(
-        workflow,
-        "get_repeat_runtime_turn",
-        task_id=task_id,
-        status=status,
-        detail={"step_key": step.get("step_key"), "speech_cursor": payload.get("speech_cursor")},
-    )
-    return payload
-
-
-def record_repeat_speech_unit_played(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    """Persist proof that one exact server-issued speech unit finished audio playout."""
-    arguments = arguments or {}
-    workflow = _workflow_for_tool(arguments, task_id)
-    state = _repeat_state_machine(workflow)
-    step = _active_step(state)
-    if not step:
-        return {"status": "complete", "workflow": workflow.name}
-    if not state.get("deterministic_runtime_enabled"):
-        return {"status": "disabled", "workflow": workflow.name, "message": "Deterministic runtime is disabled."}
-
-    requested_step = _clean_text(arguments.get("step_key"))
-    if requested_step != step.get("step_key"):
-        return {
-            "status": "blocked_out_of_order",
-            "workflow": workflow.name,
-            "requested_step": requested_step,
-            "active_step": step.get("step_key"),
-        }
-
-    speech_units = step.get("speech_units") if isinstance(step.get("speech_units"), list) else []
-    try:
-        unit_index = int(arguments.get("unit_index"))
-    except (TypeError, ValueError):
-        unit_index = -1
-    if unit_index < 0 or unit_index >= len(speech_units):
-        return {
-            "status": "blocked_invalid_unit",
-            "workflow": workflow.name,
-            "active_step": step.get("step_key"),
-            "expected_unit_index": int(step.get("speech_cursor") or 0),
-        }
-
-    expected = speech_units[unit_index]
-    unit_id = _clean_text(arguments.get("unit_id"))
-    unit_hash = _clean_text(arguments.get("unit_hash"))
-    if unit_id != expected.get("unit_id") or unit_hash != expected.get("unit_hash"):
-        return {
-            "status": "blocked_unit_mismatch",
-            "workflow": workflow.name,
-            "active_step": step.get("step_key"),
-            "expected_unit_id": expected.get("unit_id"),
-            "expected_unit_hash": expected.get("unit_hash"),
-        }
-
-    cursor = int(step.get("speech_cursor") or 0)
-    receipts = step.get("playout_receipts") if isinstance(step.get("playout_receipts"), list) else []
-    if unit_index < cursor:
-        already_recorded = any(row.get("unit_id") == unit_id for row in receipts if isinstance(row, dict))
-        if already_recorded:
-            return {
-                "status": "already_recorded",
-                "workflow": workflow.name,
-                **_runtime_step_payload(step),
-            }
-    if unit_index != cursor:
-        return {
-            "status": "blocked_out_of_order_unit",
-            "workflow": workflow.name,
-            "active_step": step.get("step_key"),
-            "expected_unit_index": cursor,
-            "received_unit_index": unit_index,
-        }
-    if not _truthy(arguments.get("playout_completed")):
-        return {
-            "status": "blocked_playout_not_completed",
-            "workflow": workflow.name,
-            "active_step": step.get("step_key"),
-            "unit_id": unit_id,
-        }
-
-    receipts.append(
-        {
-            "unit_id": unit_id,
-            "unit_hash": unit_hash,
-            "unit_index": unit_index,
-            "speech_id": _clean_text(arguments.get("speech_id")),
-            "played_at": frappe.utils.now(),
-        }
-    )
-    step["playout_receipts"] = receipts
-    step["speech_cursor"] = unit_index + 1
-    _save_repeat_state_machine(workflow, state)
-    _append_mcp_tool_usage(
-        workflow,
-        "record_repeat_speech_unit_played",
-        task_id=task_id,
-        status="success",
-        detail={"step_key": step.get("step_key"), "unit_id": unit_id, "unit_index": unit_index},
-    )
-    return {"status": "success", "workflow": workflow.name, **_runtime_step_payload(step)}
-
-
-def record_repeat_step_answer(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    """Record a semantic answer classification without advancing the active step."""
-    arguments = arguments or {}
-    workflow = _workflow_for_tool(arguments, task_id)
-    state = _repeat_state_machine(workflow)
-    step = _active_step(state)
-    if not step:
-        return {"status": "complete", "workflow": workflow.name}
-
-    requested_step = _clean_text(arguments.get("step_key"))
-    if requested_step != step.get("step_key"):
-        return {
-            "status": "blocked_out_of_order",
-            "workflow": workflow.name,
-            "requested_step": requested_step,
-            "active_step": step.get("step_key"),
-        }
-
-    classification = _clean_text(arguments.get("classification")).lower()
-    allowed = {"valid_answer", "partial_answer", "acknowledgement", "side_question", "unrelated", "noise"}
-    if classification not in allowed:
-        return {
-            "status": "blocked_invalid_classification",
-            "workflow": workflow.name,
-            "allowed_classifications": sorted(allowed),
-        }
-    try:
-        confidence = float(arguments.get("confidence") or 0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-
-    contract = step.get("answer_contract") if isinstance(step.get("answer_contract"), dict) else {}
-    answer_state = step.get("answer_state") if isinstance(step.get("answer_state"), dict) else {}
-    attempts = answer_state.get("attempts") if isinstance(answer_state.get("attempts"), list) else []
-    extracted_value = arguments.get("extracted_value")
-    attempt = {
-        "at": frappe.utils.now(),
-        "transcript": _clean_text(arguments.get("transcript") or arguments.get("patient_text")),
-        "classification": classification,
-        "confidence": confidence,
-        "extracted_value": extracted_value,
-        "reason": _clean_text(arguments.get("reason")),
-    }
-    attempts.append(attempt)
-    answer_state["attempts"] = attempts[-20:]
-    answer_state["last_attempt"] = attempt
-
-    satisfied, completion_details = _semantic_answer_satisfies_contract(contract, classification, confidence, extracted_value)
-    answer_state["satisfied"] = 1 if satisfied else 0
-    if satisfied:
-        answer_state["accepted_at"] = frappe.utils.now()
-        answer_state["completion_details"] = completion_details
-    step["answer_state"] = answer_state
-    if step.get("status") == "RESUME_REQUIRED":
-        step["status"] = "IN_PROGRESS"
-    _save_repeat_state_machine(workflow, state)
-    status = "accepted" if satisfied else "not_satisfied"
-    _append_mcp_tool_usage(
-        workflow,
-        "record_repeat_step_answer",
-        task_id=task_id,
-        status=status,
-        detail={"step_key": step.get("step_key"), "classification": classification, "confidence": confidence},
-    )
-    return {
-        "status": status,
-        "workflow": workflow.name,
-        "answer_satisfied": 1 if satisfied else 0,
-        "current_step": _runtime_step_payload(step),
-    }
-
-
-def execute_repeat_runtime_action(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    """Execute the active non-speech action from the server-owned contract."""
-    arguments = arguments or {}
-    workflow = _workflow_for_tool(arguments, task_id)
-    state = _repeat_state_machine(workflow)
-    step = _active_step(state)
-    requested_step = _clean_text(arguments.get("step_key"))
-    if not step:
-        completed = _state_step(state, requested_step)
-        return {
-            "status": "success" if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"} else "complete",
-            "workflow": workflow.name,
-            "already_completed": 1 if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"} else 0,
-        }
-    if not state.get("deterministic_runtime_enabled"):
-        return {"status": "disabled", "workflow": workflow.name}
-
-    if requested_step != step.get("step_key"):
-        completed = _state_step(state, requested_step)
-        if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"}:
-            return {
-                "status": "success",
-                "workflow": workflow.name,
-                "already_completed": 1,
-                "active_step": step.get("step_key"),
-            }
-        return {
-            "status": "blocked_out_of_order",
-            "workflow": workflow.name,
-            "requested_step": requested_step,
-            "active_step": step.get("step_key"),
-        }
-    if step.get("speak_to_customer", 1):
-        return {
-            "status": "blocked_speech_step",
-            "workflow": workflow.name,
-            "active_step": step.get("step_key"),
-        }
-
-    contract = step.get("action_contract") if isinstance(step.get("action_contract"), dict) else {}
-    mode = _clean_text(contract.get("mode"))
-    tool_name = _clean_text(step.get("tool_to_call"))
-    action_result: dict = {}
-    customer_message = ""
-
-    if mode == "only_if_customer_requested":
-        if not _truthy(arguments.get("customer_requested")):
-            completion = mark_repeat_step_complete(
-                {"workflow": workflow.name, "step_key": step.get("step_key"), "structured_details": {"no_customer_request": True}},
-                task_id=task_id,
-                agent=agent,
-            )
-            return {
-                "status": completion.get("status") or "success",
-                "workflow": workflow.name,
-                "action_status": "not_requested",
-                "customer_message": "",
-                "completion": completion,
-            }
-        if tool_name != "send_repeat_diet_chart_whatsapp":
-            return {
-                "status": "blocked_unsupported_action",
-                "workflow": workflow.name,
-                "active_step": step.get("step_key"),
-                "tool_to_call": tool_name,
-            }
-        action_result = send_repeat_diet_chart_whatsapp(
-            {"workflow": workflow.name},
-            task_id=task_id,
-            agent=agent,
-        )
-        if action_result.get("status") == "success":
-            customer_message = "Diet chart WhatsApp par send ho gaya hai."
-        else:
-            customer_message = "Diet chart ki send confirmation abhi nahi mili; ise pending note kar diya hai."
-        completion = mark_repeat_step_complete(
-            {
-                "workflow": workflow.name,
-                "step_key": step.get("step_key"),
-                "structured_details": {
-                    "customer_requested": True,
-                    "action_status": action_result.get("status") or "unknown",
-                },
-            },
-            task_id=task_id,
-            agent=agent,
-        )
-        return {
-            "status": completion.get("status") or "success",
-            "workflow": workflow.name,
-            "action_status": action_result.get("status") or "unknown",
-            "customer_message": customer_message,
-            "result": action_result,
-            "completion": completion,
-        }
-
-    if mode == "server_generated_outcome" and tool_name == "log_repeat_followup_outcome":
-        delivery_value = None
-        close_message = ""
-        for state_step in state.get("steps") or []:
-            if not isinstance(state_step, dict):
-                continue
-            if state_step.get("step_key") == "delivery_check":
-                answer_state = state_step.get("answer_state") if isinstance(state_step.get("answer_state"), dict) else {}
-                details = answer_state.get("completion_details") if isinstance(answer_state.get("completion_details"), dict) else {}
-                delivery_value = details.get("order_received")
-            if state_step.get("step_key") == "close":
-                close_message = _clean_text(state_step.get("speech_unit"))
-        outcome = "medicine_received" if delivery_value is True else "medicine_not_received" if delivery_value is False else "follow_up_completed"
-        result = log_repeat_followup_outcome(
-            {
-                "workflow": workflow.name,
-                "primary_outcome": outcome,
-                "customer_summary": "Agent 1 repeat follow-up completed using the deterministic server checklist.",
-                "next_action": "Schedule the next configured repeat follow-up stage.",
-                "structured_details": {
-                    "runtime_version": state.get("runtime_version"),
-                    "delivery_received": delivery_value,
-                    "completed_step_keys": [
-                        row.get("step_key")
-                        for row in state.get("steps") or []
-                        if isinstance(row, dict) and row.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"}
-                    ],
-                },
-                "real_conversation": True,
-            },
-            task_id=task_id,
-            agent=agent,
-        )
-        if result.get("status") == "success":
-            result["customer_message"] = close_message
-        return result
-
-    if mode == "backend_managed":
-        completion = mark_repeat_step_complete(
-            {"workflow": workflow.name, "step_key": step.get("step_key"), "structured_details": {"backend_managed": True}},
-            task_id=task_id,
-            agent=agent,
-        )
-        return {"status": completion.get("status") or "success", "workflow": workflow.name, "completion": completion}
-
-    return {
-        "status": "blocked_unsupported_action",
-        "workflow": workflow.name,
-        "active_step": step.get("step_key"),
-        "action_contract": contract,
-        "tool_to_call": tool_name,
     }
 
 
@@ -777,27 +375,10 @@ def mark_repeat_step_complete(arguments: dict | None = None, *, task_id: str | N
     state = _repeat_state_machine(workflow)
     step = _active_step(state)
     if not step:
-        requested = _clean_text(arguments.get("step_key"))
-        completed = _state_step(state, requested)
-        return {
-            "status": "success" if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"} else "complete",
-            "workflow": workflow.name,
-            "already_completed": 1 if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"} else 0,
-            "message": "No pending Agent 1 step.",
-        }
+        return {"status": "complete", "workflow": workflow.name, "message": "No pending Agent 1 step."}
 
     requested = _clean_text(arguments.get("step_key") or step.get("step_key"))
     if requested != step.get("step_key"):
-        completed = _state_step(state, requested)
-        if completed and completed.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"}:
-            return {
-                "status": "success",
-                "workflow": workflow.name,
-                "completed_step": requested,
-                "already_completed": 1,
-                "next_step": step,
-                "all_required_steps_complete": 0,
-            }
         _append_mcp_tool_usage(workflow, "mark_repeat_step_complete", task_id=task_id, status="blocked", detail={"requested": requested, "active": step.get("step_key")})
         return {
             "status": "blocked_out_of_order",
@@ -810,10 +391,7 @@ def mark_repeat_step_complete(arguments: dict | None = None, *, task_id: str | N
     details = arguments.get("structured_details") or arguments.get("details") or {}
     if not isinstance(details, dict):
         details = {"value": details}
-    answer_state = step.get("answer_state") if isinstance(step.get("answer_state"), dict) else {}
-    answer_details = answer_state.get("completion_details") if isinstance(answer_state.get("completion_details"), dict) else {}
-    details = {**answer_details, **details}
-    completion_block = _validate_repeat_step_completion(step, details, state=state)
+    completion_block = _validate_repeat_step_completion(step, details)
     if completion_block:
         _append_mcp_tool_usage(workflow, "mark_repeat_step_complete", task_id=task_id, status="blocked", detail=completion_block)
         return {
@@ -842,36 +420,13 @@ def mark_repeat_step_complete(arguments: dict | None = None, *, task_id: str | N
     }
 
 
-def _validate_repeat_step_completion(step: dict, details: dict, *, state: dict | None = None) -> dict:
+def _validate_repeat_step_completion(step: dict, details: dict) -> dict:
     """Block unsafe early completion of medical speech units.
 
     The realtime model can sometimes call the completion tool before the full
     audio has covered dose/instruction/period. The backend cannot hear the
     audio, so require explicit completion flags for medicine item steps.
     """
-    if isinstance(state, dict) and state.get("deterministic_runtime_enabled"):
-        speech_units = step.get("speech_units") if isinstance(step.get("speech_units"), list) else []
-        cursor = int(step.get("speech_cursor") or 0)
-        if step.get("speak_to_customer", 1) and cursor < len(speech_units):
-            return {
-                "message": "Current speech is not fully played. Resume from the server speech cursor before advancing.",
-                "required_fields": ["speech_playout_receipts"],
-                "missing_fields": [f"speech units {cursor + 1} to {len(speech_units)}"],
-                "step_key": step.get("step_key"),
-                "speech_cursor": cursor,
-                "speech_unit_count": len(speech_units),
-            }
-        contract = step.get("answer_contract") if isinstance(step.get("answer_contract"), dict) else {}
-        answer_state = step.get("answer_state") if isinstance(step.get("answer_state"), dict) else {}
-        if contract.get("required") and not answer_state.get("satisfied"):
-            return {
-                "message": "The pending question does not yet have a valid contextual answer. Keep the same question active.",
-                "required_fields": ["valid_contextual_answer"],
-                "missing_fields": [contract.get("answer_type") or "answer"],
-                "step_key": step.get("step_key"),
-            }
-        return {}
-
     step_key = _clean_text(step.get("step_key"))
     if not step_key.startswith("medicine_item_"):
         return {}
@@ -1035,146 +590,6 @@ def _loose_contains(normalized_text: str, expected: Any) -> bool:
     if words and all(_normalize_for_loose_match(word) in normalized_text for word in words[:4]):
         return True
     return False
-
-
-def _runtime_step_payload(step: dict) -> dict:
-    speech_units = step.get("speech_units") if isinstance(step.get("speech_units"), list) else []
-    cursor = int(step.get("speech_cursor") or 0)
-    next_unit = speech_units[cursor] if 0 <= cursor < len(speech_units) else None
-    answer_contract = step.get("answer_contract") if isinstance(step.get("answer_contract"), dict) else {}
-    answer_state = step.get("answer_state") if isinstance(step.get("answer_state"), dict) else {}
-    return {
-        "step_key": step.get("step_key"),
-        "step_label": step.get("step_label"),
-        "stage_key": step.get("stage_key"),
-        "required": step.get("required"),
-        "can_skip": step.get("can_skip"),
-        "step_status": step.get("status"),
-        "speak_to_customer": 1 if step.get("speak_to_customer", 1) else 0,
-        "speech_unit": step.get("speech_unit") or "",
-        "speech_units": speech_units,
-        "speech_cursor": cursor,
-        "next_speech_unit": next_unit,
-        "all_speech_played": 1 if cursor >= len(speech_units) else 0,
-        "answer_contract": answer_contract,
-        "answer_state": answer_state,
-        "answer_satisfied": 1 if answer_state.get("satisfied") else 0,
-        "variables": step.get("variables") or {},
-        "rag_filters": step.get("rag_filters") or {},
-        "tool_to_call": step.get("tool_to_call") or "",
-        "action_contract": step.get("action_contract") or {},
-        "completion_condition": step.get("completion_condition") or "",
-        "agent_instruction": step.get("agent_instruction") or "",
-    }
-
-
-def _semantic_answer_satisfies_contract(
-    contract: dict,
-    classification: str,
-    confidence: float,
-    extracted_value: Any,
-) -> tuple[bool, dict]:
-    if not contract.get("required") or classification != "valid_answer":
-        return False, {}
-    try:
-        minimum_confidence = float(contract.get("minimum_confidence") or 0.72)
-    except (TypeError, ValueError):
-        minimum_confidence = 0.72
-    if confidence < minimum_confidence:
-        return False, {}
-
-    answer_type = _clean_text(contract.get("answer_type") or "open").lower()
-    value = extracted_value
-    if isinstance(value, dict) and "value" in value:
-        value = value.get("value")
-    if answer_type == "yes_no":
-        if isinstance(value, bool):
-            normalized_value = value
-        elif str(value or "").strip().lower() in {"true", "yes", "received", "1"}:
-            normalized_value = True
-        elif str(value or "").strip().lower() in {"false", "no", "not_received", "0"}:
-            normalized_value = False
-        else:
-            return False, {}
-        value = normalized_value
-    elif value in (None, "", [], {}):
-        return False, {}
-
-    storage_field = _clean_text(contract.get("storage_field") or "answer")
-    return True, {
-        storage_field: value,
-        "answer_classification": classification,
-        "answer_confidence": confidence,
-    }
-
-
-def _speech_units(step_key: str, speech: Any) -> list[dict]:
-    text = _script_text(speech)
-    if not text:
-        return []
-    chunks = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
-    if not chunks:
-        chunks = [text]
-    units = []
-    for index, chunk in enumerate(chunks):
-        units.append(
-            {
-                "unit_id": f"{step_key}:{index + 1}",
-                "unit_index": index,
-                "text": chunk,
-                "unit_hash": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
-            }
-        )
-    return units
-
-
-def _medicine_source_manifest(summary: dict) -> dict:
-    medicines = _medicine_guard_items(summary if isinstance(summary, dict) else {})
-    canonical = []
-    for index, item in enumerate(medicines, start=1):
-        canonical.append(
-            {
-                "index": index,
-                "source_row_name": _clean_text(item.get("source_row_name") or item.get("name")),
-                "name": _clean_text(item.get("display_name") or item.get("medicine_name")),
-                "dosage": _clean_text(item.get("dosage")),
-                "instruction": _clean_text(item.get("instruction")),
-                "period": _clean_text(item.get("period")),
-            }
-        )
-    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return {
-        "medicine_count": len(canonical),
-        "medicine_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
-        "medicine_rows": canonical,
-    }
-
-
-def _repeat_source_integrity(workflow, state: dict) -> dict:
-    expected = state.get("source_manifest") if isinstance(state.get("source_manifest"), dict) else {}
-    current = _medicine_source_manifest(_medicine_summary_for_workflow(workflow))
-    if not expected:
-        return {"valid": True, "expected": current, "current": current}
-    valid = (
-        int(expected.get("medicine_count") or 0) == int(current.get("medicine_count") or 0)
-        and expected.get("medicine_hash") == current.get("medicine_hash")
-    )
-    return {"valid": valid, "expected": expected, "current": current}
-
-
-def _repeat_runtime_support_context(workflow, step: dict) -> dict:
-    context = _workflow_context(workflow)
-    return {
-        "patient_name": workflow.patient_name or "",
-        "patient_department": context.get("patient_department") or "",
-        "patient_encounter": workflow.patient_encounter or "",
-        "order_id": workflow.order_id or "",
-        "awb_number": workflow.awb_number or "",
-        "tracking_summary": context.get("tracking_summary") or {},
-        "active_step_variables": step.get("variables") or {},
-        "medicine_manifest": _medicine_source_manifest(context.get("medicine_summary") or {}),
-        "diet_chart_summary": context.get("diet_chart_summary") or {},
-    }
 
 
 def mark_repeat_step_interrupted(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
@@ -1540,26 +955,22 @@ def _fetch_shipkia_tracking_for_workflow(
 def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
     arguments = arguments or {}
     workflow = _workflow_for_tool(arguments, task_id)
-    stage_key = _stage_for_task(workflow, task_id) or _stage_from_status(workflow.status) or "AGENT_1"
-    if stage_key == "AGENT_1":
-        state = _repeat_state_machine(workflow)
-        pending_step = _pending_required_steps_before(state, "outcome_log")
-        if pending_step:
-            _append_mcp_tool_usage(
-                workflow,
-                "log_repeat_followup_outcome",
-                task_id=task_id,
-                status="blocked",
-                detail={"pending_step": pending_step.get("step_key")},
-            )
-            return {
-                "status": "blocked_incomplete_agent_1",
-                "workflow": workflow.name,
-                "pending_step": pending_step,
-                "message": "Agent 1 required flow is incomplete. Finish the active required step before logging outcome or scheduling Agent 2.",
-            }
-    else:
-        state = _repeat_state_machine(workflow)
+    state = _repeat_state_machine(workflow)
+    pending_step = {} if _is_simple_followup_mode(workflow) else _pending_required_steps_before(state, "outcome_log")
+    if pending_step:
+        _append_mcp_tool_usage(
+            workflow,
+            "log_repeat_followup_outcome",
+            task_id=task_id,
+            status="blocked",
+            detail={"pending_step": pending_step.get("step_key")},
+        )
+        return {
+            "status": "blocked_incomplete_agent_1",
+            "workflow": workflow.name,
+            "pending_step": pending_step,
+            "message": "Agent 1 required flow is incomplete. Finish the active required step before logging outcome or scheduling Agent 2.",
+        }
     workflow.primary_outcome = _clean_text(arguments.get("primary_outcome") or arguments.get("outcome") or "")
     workflow.sub_outcome = _clean_text(arguments.get("sub_outcome") or "")
     workflow.customer_summary = _clean_text(arguments.get("customer_summary") or arguments.get("summary") or arguments.get("notes") or "")
@@ -1571,10 +982,7 @@ def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str |
     workflow.structured_details_json = as_json(structured)
     if arguments.get("shipkia_result") and isinstance(arguments.get("shipkia_result"), dict):
         workflow.shipkia_result_json = as_json(arguments.get("shipkia_result"))
-    if stage_key == "AGENT_1":
-        _complete_terminal_state_steps(state)
-    else:
-        _mark_journey_stage_complete(state, stage_key)
+    _complete_terminal_state_steps(state)
     context = parse_json_object(workflow.context_json, "Workflow Context JSON") if workflow.context_json else {}
     context[STATE_MACHINE_CONTEXT_KEY] = state
     workflow.context_json = as_json(context)
@@ -1585,23 +993,20 @@ def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str |
     if "real_conversation" not in arguments:
         real_conversation = _normalize_outcome(workflow.primary_outcome) not in MISSED_OUTCOMES
 
+    if _normalize_outcome(workflow.primary_outcome) in {"unclear", "unclear_conversation", "unknown"}:
+        workflow.status = "Unclear Conversation"
+    else:
+        workflow.status = "Completed"
     workflow.active_call_timeout_at = None
     workflow.next_scheduled_call_time = None
-    workflow.next_scheduled_call_stage = f"{_stage_label(stage_key)} outcome logged"
-    workflow.timer_status = f"{_stage_label(stage_key)} outcome logged"
+    workflow.next_scheduled_call_stage = "Outcome logged"
+    workflow.timer_status = "Agent 1 outcome logged"
     workflow.last_error = ""
     workflow.save(ignore_permissions=True)
     frappe.db.commit()
 
-    if stage_key == "AGENT_4":
-        renewal_result = _maybe_trigger_renewal_from_outcome(workflow.name, arguments, task_id=task_id, agent=agent)
-        if renewal_result.get("status") in {"triggered", "already_triggered"}:
-            return {"status": "success", "workflow": workflow.name, "stage": stage_key, "renewal": renewal_result}
-        _close_repeat_workflow(workflow.name, "Agent 4 completed without renewal consent.")
-        return {"status": "success", "workflow": workflow.name, "stage": stage_key, "next": {"status": "closed"}}
-
-    schedule_result = schedule_next_stage(workflow.name, completed_stage=stage_key, real_conversation=real_conversation)
-    return {"status": "success", "workflow": workflow.name, "stage": stage_key, "next": schedule_result}
+    schedule_result = schedule_agent_2(workflow.name, real_conversation=real_conversation)
+    return {"status": "success", "workflow": workflow.name, "agent_2": schedule_result}
 
 
 def handle_voice_result(workflow: str | None = None, task: str | None = None, outcome: str | None = None, notes: str | None = None) -> dict:
@@ -1611,12 +1016,11 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     if doc.status in FINAL_STATES:
         return {"status": "ignored", "reason": "final_state", "workflow": doc.name}
 
-    stage_key = _stage_for_task(doc, task) or _stage_from_status(doc.status) or "AGENT_1"
     normalized = _normalize_outcome(outcome)
     if normalized in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or outcome)
 
-    if stage_key == "AGENT_1":
+    if not _is_simple_followup_mode(doc):
         state = _repeat_state_machine(doc)
         pending_step = _pending_required_steps_before(state, "outcome_log")
         if pending_step:
@@ -1626,18 +1030,15 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
         doc.customer_summary = _clean_text(notes)
     if not doc.primary_outcome:
         doc.primary_outcome = outcome or "unclear"
-    doc.status = f"{_stage_label(stage_key)} Completed"
+    doc.status = "Unclear Conversation"
     doc.active_call_timeout_at = None
     doc.next_scheduled_call_time = None
-    doc.next_scheduled_call_stage = f"{_stage_label(stage_key)} completed"
-    doc.timer_status = f"{_stage_label(stage_key)} completed; outcome was not explicitly logged"
+    doc.next_scheduled_call_stage = "Call completed"
+    doc.timer_status = "Call completed; outcome was not explicitly logged"
     doc.save(ignore_permissions=True)
     frappe.db.commit()
-    if stage_key == "AGENT_4":
-        _close_repeat_workflow(doc.name, "Agent 4 completed without explicit renewal outcome.")
-        return {"status": "unclear_logged", "workflow": doc.name, "stage": stage_key, "next": {"status": "closed"}}
-    schedule_result = schedule_next_stage(doc.name, completed_stage=stage_key, real_conversation=True)
-    return {"status": "unclear_logged", "workflow": doc.name, "stage": stage_key, "next": schedule_result}
+    schedule_result = schedule_agent_2(doc.name, real_conversation=True)
+    return {"status": "unclear_logged", "workflow": doc.name, "agent_2": schedule_result}
 
 
 def _is_simple_followup_mode(workflow) -> bool:
@@ -1703,27 +1104,23 @@ def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> d
 def mark_call_missed(workflow_name: str, notes: str | None = None, *, missed_at=None) -> dict:
     workflow = frappe.get_doc(WORKFLOW, workflow_name)
     settings = _workflow_settings(workflow)
-    stage_key = _stage_from_status(workflow.status) or _stage_for_task(workflow, workflow.voice_task) or "AGENT_1"
-    task_field = _task_field(stage_key)
-    _mark_voice_task_missed(workflow.get(task_field))
+    _mark_voice_task_missed(workflow.voice_task)
     if notes:
         workflow.agent_notes = _clean_text(notes)
 
-    retry_field = _retry_field(stage_key)
-    max_attempts = _max_attempts_for_stage(workflow, settings, stage_key)
-    current_attempts = int(workflow.get(retry_field) or 0)
-    if current_attempts >= max_attempts:
+    max_attempts = int(workflow.max_retry_count or settings.max_agent_1_attempts or 3)
+    if int(workflow.retry_count or 0) >= max_attempts:
         workflow.status = "Missed After Retries"
         workflow.primary_outcome = workflow.primary_outcome or "missed"
         workflow.active_call_timeout_at = None
         workflow.next_scheduled_call_time = None
         workflow.next_scheduled_call_stage = "Stopped"
-        workflow.timer_status = f"{_stage_label(stage_key)} missed after configured retries"
+        workflow.timer_status = "Agent 1 missed after configured retries"
         workflow.save(ignore_permissions=True)
         frappe.db.commit()
         return {"status": "missed_after_retries", "workflow": workflow.name}
 
-    workflow.status = "Retry Queued" if stage_key == "AGENT_1" else f"{_stage_label(stage_key)} Retry Queued"
+    workflow.status = "Retry Queued"
     workflow.next_call_time = add_to_date(
         missed_at or now_datetime(),
         minutes=int(settings.retry_delay_minutes or 60),
@@ -1731,37 +1128,17 @@ def mark_call_missed(workflow_name: str, notes: str | None = None, *, missed_at=
     )
     workflow.active_call_timeout_at = None
     workflow.next_scheduled_call_time = workflow.next_call_time
-    workflow.next_scheduled_call_stage = f"{_stage_label(stage_key)} retry"
-    workflow.timer_status = f"{_stage_label(stage_key)} retry scheduled for {workflow.next_call_time}"
+    workflow.next_scheduled_call_stage = "Agent 1 retry"
+    workflow.timer_status = f"Retry scheduled for {workflow.next_call_time}"
     workflow.save(ignore_permissions=True)
     frappe.db.commit()
     return {"status": "retry_queued", "workflow": workflow.name, "next_call_time": workflow.next_call_time}
 
 
 def schedule_agent_2(workflow_name: str, *, real_conversation: bool) -> dict:
-    return schedule_stage(workflow_name, "AGENT_2", real_conversation=real_conversation)
-
-
-def schedule_next_stage(workflow_name: str, *, completed_stage: str, real_conversation: bool) -> dict:
-    completed_stage = _clean_text(completed_stage) or "AGENT_1"
-    if completed_stage == "AGENT_1":
-        return schedule_stage(workflow_name, "AGENT_2", real_conversation=real_conversation)
-    if completed_stage == "AGENT_2":
-        workflow = frappe.get_doc(WORKFLOW, workflow_name)
-        course_days = int(workflow.get("course_duration_days") or 0)
-        settings = _workflow_settings(workflow)
-        if course_days and course_days < int(settings.get("skip_agent_3_under_course_days") or 21):
-            return schedule_stage(workflow_name, "AGENT_4", real_conversation=real_conversation)
-        return schedule_stage(workflow_name, "AGENT_3", real_conversation=real_conversation)
-    if completed_stage == "AGENT_3":
-        return schedule_stage(workflow_name, "AGENT_4", real_conversation=real_conversation)
-    return _close_repeat_workflow(workflow_name, f"{_stage_label(completed_stage)} completed.")
-
-
-def schedule_stage(workflow_name: str, stage_key: str, *, real_conversation: bool = True) -> dict:
     workflow = frappe.get_doc(WORKFLOW, workflow_name)
     settings = _workflow_settings(workflow)
-    if stage_key == "AGENT_2" and settings.schedule_agent_2_only_after_conversation and not real_conversation:
+    if settings.schedule_agent_2_only_after_conversation and not real_conversation:
         workflow.active_call_timeout_at = None
         workflow.next_scheduled_call_time = None
         workflow.next_scheduled_call_stage = "No follow-up scheduled"
@@ -1769,37 +1146,32 @@ def schedule_stage(workflow_name: str, stage_key: str, *, real_conversation: boo
         workflow.save(ignore_permissions=True)
         frappe.db.commit()
         return {"status": "skipped", "reason": "no_real_conversation"}
+    if workflow.agent_2_scheduled_at or workflow.agent_2_task:
+        return {"status": "already_scheduled", "scheduled_at": workflow.agent_2_scheduled_at, "task": workflow.agent_2_task}
 
-    scheduled_field = _scheduled_field(stage_key)
-    task_field = _task_field(stage_key)
-    if workflow.get(scheduled_field) or workflow.get(task_field):
-        return {"status": "already_scheduled", "scheduled_at": workflow.get(scheduled_field), "task": workflow.get(task_field)}
-
-    agent_field = _agent_field(stage_key)
-    agent_name = workflow.get(agent_field) or settings.get(agent_field)
-    workflow.set(agent_field, agent_name)
-    if not agent_name or not frappe.db.exists("AI Agent", agent_name) or not frappe.db.get_value("AI Agent", agent_name, "enabled"):
-        workflow.status = f"{_stage_label(stage_key)} Pending Config"
+    agent_2 = workflow.agent_2 or settings.agent_2
+    workflow.agent_2 = agent_2
+    if not agent_2 or not frappe.db.exists("AI Agent", agent_2) or not frappe.db.get_value("AI Agent", agent_2, "enabled"):
+        workflow.status = "Agent 2 Pending Config"
         workflow.active_call_timeout_at = None
         workflow.next_scheduled_call_time = None
-        workflow.next_scheduled_call_stage = f"{_stage_label(stage_key)} pending config"
-        workflow.timer_status = f"{_stage_label(stage_key)} is missing or disabled"
-        _sync_journey_stage_to_workflow(workflow, stage_key, "PENDING_CONFIG")
+        workflow.next_scheduled_call_stage = "Agent 2 pending config"
+        workflow.timer_status = "Agent 2 is missing or disabled"
+        _sync_journey_stage_to_workflow(workflow, "AGENT_2", "PENDING_CONFIG")
         workflow.save(ignore_permissions=True)
         frappe.db.commit()
-        return {"status": "pending_config", "stage": stage_key}
+        return {"status": "pending_config"}
 
-    scheduled_at = _scheduled_time_for_stage(workflow, settings, stage_key)
-    workflow.status = f"{_stage_label(stage_key)} Scheduled"
-    workflow.set(scheduled_field, scheduled_at)
+    workflow.status = "Agent 2 Scheduled"
+    workflow.agent_2_scheduled_at = add_to_date(now_datetime(), days=int(settings.agent_2_delay_days or 7), as_datetime=True)
     workflow.active_call_timeout_at = None
-    workflow.next_scheduled_call_time = scheduled_at
-    workflow.next_scheduled_call_stage = _stage_label(stage_key)
-    workflow.timer_status = f"{_stage_label(stage_key)} scheduled for {scheduled_at}"
-    _sync_journey_stage_to_workflow(workflow, stage_key, "SCHEDULED", scheduled_at=scheduled_at)
+    workflow.next_scheduled_call_time = workflow.agent_2_scheduled_at
+    workflow.next_scheduled_call_stage = "Agent 2"
+    workflow.timer_status = f"Agent 2 scheduled for {workflow.agent_2_scheduled_at}"
+    _sync_journey_stage_to_workflow(workflow, "AGENT_2", "SCHEDULED", scheduled_at=workflow.agent_2_scheduled_at)
     workflow.save(ignore_permissions=True)
     frappe.db.commit()
-    return {"status": "scheduled", "stage": stage_key, "scheduled_at": scheduled_at}
+    return {"status": "scheduled", "scheduled_at": workflow.agent_2_scheduled_at}
 
 
 def process_due_workflows() -> dict:
@@ -1807,8 +1179,6 @@ def process_due_workflows() -> dict:
     retried = 0
     missed = 0
     agent_2_queued = 0
-    agent_3_queued = 0
-    agent_4_queued = 0
 
     for name in frappe.get_all(WORKFLOW, filters={"status": "Retry Queued", "next_call_time": ["<=", now_value]}, pluck="name", limit=200):
         try:
@@ -1816,14 +1186,6 @@ def process_due_workflows() -> dict:
                 retried += 1
         except Exception as exc:
             _mark_failed(name, exc)
-
-    for stage_key in ("AGENT_2", "AGENT_3", "AGENT_4"):
-        for name in frappe.get_all(WORKFLOW, filters={"status": f"{_stage_label(stage_key)} Retry Queued", "next_call_time": ["<=", now_value]}, pluck="name", limit=200):
-            try:
-                if queue_stage_call(name, stage_key).get("status") == "queued":
-                    retried += 1
-            except Exception as exc:
-                _mark_failed(name, exc)
 
     for name in _stale_voice_workflows(now_value):
         try:
@@ -1846,72 +1208,33 @@ def process_due_workflows() -> dict:
         except Exception as exc:
             _mark_failed(name, exc)
 
-    for name in frappe.get_all(WORKFLOW, filters={"status": "Agent 3 Scheduled", "agent_3_scheduled_at": ["<=", now_value]}, pluck="name", limit=200):
-        try:
-            if queue_agent_3_call(name).get("status") == "queued":
-                agent_3_queued += 1
-        except Exception as exc:
-            _mark_failed(name, exc)
-
-    for name in frappe.get_all(WORKFLOW, filters={"status": "Agent 4 Scheduled", "agent_4_scheduled_at": ["<=", now_value]}, pluck="name", limit=200):
-        try:
-            if queue_agent_4_call(name).get("status") == "queued":
-                agent_4_queued += 1
-        except Exception as exc:
-            _mark_failed(name, exc)
-
-    return {"retried": retried, "missed": missed, "agent_2_queued": agent_2_queued, "agent_3_queued": agent_3_queued, "agent_4_queued": agent_4_queued}
+    return {"retried": retried, "missed": missed, "agent_2_queued": agent_2_queued}
 
 
 def queue_agent_2_call(workflow_name: str) -> dict:
-    return queue_stage_call(workflow_name, "AGENT_2")
-
-
-def queue_agent_3_call(workflow_name: str) -> dict:
-    return queue_stage_call(workflow_name, "AGENT_3")
-
-
-def queue_agent_4_call(workflow_name: str) -> dict:
-    return queue_stage_call(workflow_name, "AGENT_4")
-
-
-def queue_stage_call(workflow_name: str, stage_key: str) -> dict:
     workflow = frappe.get_doc(WORKFLOW, workflow_name)
     settings = _workflow_settings(workflow)
-    agent_field = _agent_field(stage_key)
-    task_field = _task_field(stage_key)
-    retry_field = _retry_field(stage_key)
-    agent_name = workflow.get(agent_field) or settings.get(agent_field)
-    if not agent_name or not frappe.db.exists("AI Agent", agent_name) or not frappe.db.get_value("AI Agent", agent_name, "enabled"):
-        workflow.status = f"{_stage_label(stage_key)} Pending Config"
-        workflow.timer_status = f"{_stage_label(stage_key)} is missing or disabled"
+    agent_2 = workflow.agent_2 or settings.agent_2
+    if not agent_2 or not frappe.db.exists("AI Agent", agent_2) or not frappe.db.get_value("AI Agent", agent_2, "enabled"):
+        workflow.status = "Agent 2 Pending Config"
+        workflow.timer_status = "Agent 2 is missing or disabled"
         workflow.save(ignore_permissions=True)
         frappe.db.commit()
         return {"status": "pending_config", "workflow": workflow.name}
 
-    attempt_number = int(workflow.get(retry_field) or 0) + 1
-    max_attempts = _max_attempts_for_stage(workflow, settings, stage_key)
-    if attempt_number > max_attempts:
-        workflow.status = "Missed After Retries"
-        workflow.timer_status = f"{_stage_label(stage_key)} has no attempts remaining"
-        workflow.save(ignore_permissions=True)
-        frappe.db.commit()
-        return {"status": "missed_after_retries", "workflow": workflow.name}
-
     task_template = settings.voice_task_template or _template_by_key("repeat_followup_voice") or _ensure_task_template()
     context = _workflow_context(workflow)
-    context.update(_stage_context(workflow, stage_key))
-    trunk_id = _workflow_voice_trunk_id(workflow, settings)
+    context["agent_2_from_workflow"] = workflow.name
     batch = frappe.new_doc("AI Task Batch")
     batch.update(
         {
             "company": workflow.company,
             "status": "Queued",
             "source_system": "AI Repeat Follow Up",
-            "batch_label": f"{workflow.name}:{stage_key.lower()}",
-            "idempotency_key": f"{workflow.name}:{stage_key.lower()}:{attempt_number}",
+            "batch_label": f"{workflow.name}:agent2",
+            "idempotency_key": f"{workflow.name}:agent2",
             "task_template": task_template,
-            "target_agent": agent_name,
+            "target_agent": agent_2,
             "priority": "Normal",
             "source_payload_json": workflow.source_payload_json,
         }
@@ -1925,299 +1248,30 @@ def queue_stage_call(workflow_name: str, stage_key: str) -> dict:
             "status": "Queued",
             "task_batch": batch.name,
             "task_template": task_template,
-            "target_agent": agent_name,
-            "assigned_agent": agent_name,
+            "target_agent": agent_2,
+            "assigned_agent": agent_2,
             "channel": "Voice",
             "priority": "Normal",
             "deadline": deadline,
             "external_record_id": workflow.name,
             "external_record_type": WORKFLOW,
-            "idempotency_key": f"{workflow.name}:{stage_key.lower()}:{attempt_number}",
-            "trunk_id": trunk_id,
+            "idempotency_key": f"{workflow.name}:agent2",
             "context_json": as_json(context),
         }
     )
     task.insert(ignore_permissions=True)
     refresh_batch_counts(batch.name)
-    workflow.status = f"{_stage_label(stage_key)} Queued"
-    workflow.set(task_field, task.name)
-    workflow.set(retry_field, attempt_number)
+    workflow.status = "Agent 2 Queued"
+    workflow.agent_2_task = task.name
     workflow.active_call_timeout_at = deadline
     workflow.next_scheduled_call_time = deadline
-    workflow.next_scheduled_call_stage = f"{_stage_label(stage_key)} timeout check"
-    workflow.timer_status = f"{_stage_label(stage_key)} attempt {attempt_number} queued"
-    _sync_journey_stage_to_workflow(workflow, stage_key, "QUEUED", started_at=now_datetime())
+    workflow.next_scheduled_call_stage = "Agent 2 timeout check"
+    workflow.timer_status = "Agent 2 queued"
+    _sync_journey_stage_to_workflow(workflow, "AGENT_2", "QUEUED", started_at=now_datetime())
     workflow.save(ignore_permissions=True)
     frappe.db.commit()
     enqueue_task_execution(task.name, "Voice", enqueue_after_commit=False)
-    return {"status": "queued", "workflow": workflow.name, "task": task.name, "stage": stage_key, "attempt": attempt_number}
-
-
-def trigger_repeat_renewal_n8n(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    """Trigger the configured renewal webhook for Agent 4 consent."""
-    arguments = arguments or {}
-    workflow = _workflow_for_tool(arguments, task_id)
-    return _trigger_renewal_webhook(workflow, arguments, task_id=task_id, agent=agent)
-
-
-def _maybe_trigger_renewal_from_outcome(workflow_name: str, arguments: dict, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    consent = (
-        arguments.get("renewal_consent")
-        or arguments.get("repeat_order_consent")
-        or arguments.get("customer_wants_next_month")
-        or arguments.get("next_month_treatment")
-    )
-    if not _truthy(consent):
-        return {"status": "not_requested"}
-    workflow = frappe.get_doc(WORKFLOW, workflow_name)
-    return _trigger_renewal_webhook(workflow, arguments, task_id=task_id, agent=agent)
-
-
-def _trigger_renewal_webhook(workflow, arguments: dict, *, task_id: str | None = None, agent: str | None = None) -> dict:
-    if workflow.get("renewal_triggered_at"):
-        return {"status": "already_triggered", "workflow": workflow.name, "triggered_at": workflow.get("renewal_triggered_at")}
-    settings = _workflow_settings(workflow)
-    url = _clean_text(arguments.get("renewal_webhook_url") or workflow.get("renewal_webhook_url") or settings.get("renewal_webhook_url"))
-    if not url:
-        result = {"status": "missing_config", "message": "Renewal webhook URL is not configured."}
-        _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="missing_config", detail=result)
-        return result
-
-    payload = {
-        "event": "repeat_followup_renewal_requested",
-        "workflow": workflow.name,
-        "company": workflow.company,
-        "patient_encounter": workflow.patient_encounter,
-        "patient_name": workflow.patient_name,
-        "patient_mobile": workflow.patient_mobile,
-        "course_duration_days": workflow.get("course_duration_days"),
-        "primary_outcome": workflow.primary_outcome,
-        "sub_outcome": workflow.sub_outcome,
-        "customer_summary": workflow.customer_summary,
-        "agent_notes": workflow.agent_notes,
-        "structured_details": arguments.get("structured_details") or arguments.get("details") or {},
-        "source_payload": parse_json_object(workflow.source_payload_json, "Source Payload JSON") if workflow.source_payload_json else {},
-    }
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    auth_header = _clean_text(arguments.get("renewal_webhook_auth_header") or workflow.get("renewal_webhook_auth_header") or settings.get("renewal_webhook_auth_header"))
-    auth_token = _clean_text(arguments.get("renewal_webhook_auth_token") or workflow.get("renewal_webhook_auth_token") or settings.get("renewal_webhook_auth_token"))
-    if auth_header and auth_token:
-        headers[auth_header] = auth_token
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
-        try:
-            body = response.json() if response.text else {}
-        except Exception:
-            body = {"text": response.text[:1000]}
-        result = {"status": "triggered" if response.ok else "failed", "status_code": response.status_code, "response": body}
-        workflow.renewal_result_json = as_json(result)
-        if response.ok:
-            workflow.status = "Renewal Triggered"
-            workflow.renewal_triggered_at = frappe.utils.now()
-            workflow.timer_status = "Agent 4 renewal webhook triggered"
-            workflow.next_scheduled_call_time = None
-            workflow.next_scheduled_call_stage = "Renewal triggered"
-        else:
-            workflow.last_error = f"Renewal webhook failed with HTTP {response.status_code}"
-        workflow.save(ignore_permissions=True)
-        frappe.db.commit()
-        record_provider_event(
-            provider="n8n",
-            operation="repeat_followup_renewal",
-            status="Succeeded" if response.ok else "Failed",
-            agent=agent,
-            task=task_id,
-            request={"url": url, "workflow": workflow.name},
-            response=result,
-            error=None if response.ok else workflow.last_error,
-        )
-        _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status=result["status"], detail={"status_code": response.status_code})
-        return {"workflow": workflow.name, **result}
-    except Exception as exc:
-        result = {"status": "error", "message": str(exc)}
-        workflow.renewal_result_json = as_json(result)
-        workflow.last_error = str(exc)
-        workflow.save(ignore_permissions=True)
-        frappe.db.commit()
-        create_error("Repeat Follow Up Renewal Webhook", str(exc), source="repeat_followup", task=task_id, agent=agent, payload={"workflow": workflow.name, "url": url}, exc=exc)
-        _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="error", detail=result)
-        return {"workflow": workflow.name, **result}
-
-
-def _close_repeat_workflow(workflow_name: str, reason: str) -> dict:
-    workflow = frappe.get_doc(WORKFLOW, workflow_name)
-    workflow.status = "Closed"
-    workflow.active_call_timeout_at = None
-    workflow.next_scheduled_call_time = None
-    workflow.next_scheduled_call_stage = "Closed"
-    workflow.timer_status = reason
-    workflow.save(ignore_permissions=True)
-    frappe.db.commit()
-    return {"status": "closed", "workflow": workflow.name, "reason": reason}
-
-
-def _stage_context(workflow, stage_key: str) -> dict:
-    return {
-        "event": "repeat_followup",
-        "workflow": workflow.name,
-        "repeat_followup_compacted": 1,
-        "stage_agent": stage_key,
-        "active_stage_id": stage_key,
-        "active_stage_name": _stage_label(stage_key),
-        "stage_sequence": "AGENT_1 -> AGENT_2 -> AGENT_3/AGENT_4 -> RENEWAL_OR_CLOSE",
-        "course_duration_days": workflow.get("course_duration_days"),
-        "agent_instruction": _stage_call_instruction(stage_key),
-    }
-
-
-def _stage_call_instruction(stage_key: str) -> str:
-    if stage_key == "AGENT_2":
-        return "Ask medicine adherence, side effects/confusion, remaining medicine, diet following, and log outcome. Do not create renewal."
-    if stage_key == "AGENT_3":
-        return "Ask progress, benefit/issues, confidence, medicine/diet adherence, and log outcome. Do not create renewal unless explicitly configured later."
-    if stage_key == "AGENT_4":
-        return "Ask benefit/issues near course end, ask next month treatment only after context, and trigger renewal only after clear consent."
-    return "Follow the Agent 1 deterministic step machine."
-
-
-def _scheduled_time_for_stage(workflow, settings, stage_key: str):
-    now_value = now_datetime()
-    if stage_key == "AGENT_2":
-        return add_to_date(now_value, days=int(settings.get("agent_2_delay_days") or 7), as_datetime=True)
-    if stage_key == "AGENT_3":
-        return add_to_date(now_value, days=int(settings.get("agent_3_delay_days") or 7), as_datetime=True)
-    if stage_key == "AGENT_4":
-        course_days = int(workflow.get("course_duration_days") or 0)
-        before_days = int(settings.get("agent_4_before_course_end_days") or 3)
-        if course_days:
-            days_from_start = max(1, course_days - before_days)
-            try:
-                created = get_datetime(workflow.creation)
-                scheduled = add_to_date(created, days=days_from_start, as_datetime=True)
-                if scheduled > now_value:
-                    return scheduled
-            except Exception:
-                pass
-        return add_to_date(now_value, days=max(1, before_days), as_datetime=True)
-    return now_value
-
-
-def _stage_label(stage_key: str) -> str:
-    return STAGE_LABELS.get(_clean_text(stage_key), _clean_text(stage_key) or "Agent")
-
-
-def _agent_field(stage_key: str) -> str:
-    return {
-        "AGENT_1": "agent_1",
-        "AGENT_2": "agent_2",
-        "AGENT_3": "agent_3",
-        "AGENT_4": "agent_4",
-    }.get(_clean_text(stage_key), "agent_1")
-
-
-def _task_field(stage_key: str) -> str:
-    return {
-        "AGENT_1": "voice_task",
-        "AGENT_2": "agent_2_task",
-        "AGENT_3": "agent_3_task",
-        "AGENT_4": "agent_4_task",
-    }.get(_clean_text(stage_key), "voice_task")
-
-
-def _retry_field(stage_key: str) -> str:
-    return {
-        "AGENT_1": "retry_count",
-        "AGENT_2": "agent_2_retry_count",
-        "AGENT_3": "agent_3_retry_count",
-        "AGENT_4": "agent_4_retry_count",
-    }.get(_clean_text(stage_key), "retry_count")
-
-
-def _scheduled_field(stage_key: str) -> str:
-    return {
-        "AGENT_1": "next_call_time",
-        "AGENT_2": "agent_2_scheduled_at",
-        "AGENT_3": "agent_3_scheduled_at",
-        "AGENT_4": "agent_4_scheduled_at",
-    }.get(_clean_text(stage_key), "next_call_time")
-
-
-def _max_attempts_for_stage(workflow, settings, stage_key: str) -> int:
-    if stage_key == "AGENT_1":
-        return int(workflow.get("max_retry_count") or settings.get("max_agent_1_attempts") or 3)
-    fieldname = {
-        "AGENT_2": "max_agent_2_attempts",
-        "AGENT_3": "max_agent_3_attempts",
-        "AGENT_4": "max_agent_4_attempts",
-    }.get(stage_key)
-    return int(workflow.get(fieldname) or settings.get(fieldname) or 3)
-
-
-def _stage_for_task(workflow, task_id: str | None) -> str:
-    if not task_id:
-        return ""
-    for stage_key in FOLLOWUP_STAGES:
-        if workflow.get(_task_field(stage_key)) == task_id:
-            return stage_key
-    return ""
-
-
-def _stage_from_status(status: str | None) -> str:
-    text = _clean_text(status)
-    for stage_key, label in STAGE_LABELS.items():
-        if text.startswith(label):
-            return stage_key
-    if text in {"Call Queued", "Call Running", "Retry Queued", "Completed", "Unclear Conversation"}:
-        return "AGENT_1"
-    return ""
-
-
-def _mark_journey_stage_complete(state: dict, stage_key: str) -> None:
-    journey = state.get("journey") if isinstance(state.get("journey"), dict) else {}
-    stages = journey.get("stage_schedule") if isinstance(journey.get("stage_schedule"), list) else []
-    now_value = frappe.utils.now()
-    for stage in stages:
-        if isinstance(stage, dict) and stage.get("stage_key") == stage_key:
-            stage["status"] = "COMPLETED"
-            stage["completed_at"] = now_value
-            break
-    journey["stage_schedule"] = stages
-    state["journey"] = journey
-
-
-def _course_duration_days(summary: dict | None) -> int:
-    if not isinstance(summary, dict):
-        return 0
-    durations = []
-    prescriptions = summary.get("drug_prescription")
-    if not isinstance(prescriptions, list):
-        return 0
-    for item in prescriptions:
-        if isinstance(item, dict):
-            days = _period_to_days(item.get("period"))
-            if days:
-                durations.append(days)
-    return max(durations) if durations else 0
-
-
-def _period_to_days(value: Any) -> int:
-    text = _clean_text(value).lower()
-    if not text:
-        return 0
-    match = re.search(r"(\d+)\s*(day|days|din|दिवस)", text)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"(\d+)\s*(week|weeks|hafte|hafta)", text)
-    if match:
-        return int(match.group(1)) * 7
-    match = re.search(r"(\d+)\s*(month|months|mahina|mahine)", text)
-    if match:
-        return int(match.group(1)) * 30
-    if "month" in text or "mahina" in text:
-        return 30
-    if "week" in text or "hafta" in text:
-        return 7
-    return 0
+    return {"status": "queued", "workflow": workflow.name, "task": task.name}
 
 
 def _settings() -> frappe._dict:
@@ -2230,14 +1284,9 @@ def _settings_config(settings) -> frappe._dict:
     return frappe._dict(
         {
             "scenario_key": "",
-            "deterministic_medical_runtime_enabled": 1
-            if settings.get("deterministic_medical_runtime_enabled")
-            else 0,
             "company": settings.company or "sriaas",
             "agent_1": settings.agent_1,
             "agent_2": settings.agent_2,
-            "agent_3": settings.get("agent_3"),
-            "agent_4": settings.get("agent_4"),
             "livekit_channel_account_fallback": settings.livekit_channel_account_fallback,
             "voice_channel_account": settings.livekit_channel_account_fallback,
             "voice_channel_source": "Settings fallback" if settings.livekit_channel_account_fallback else "",
@@ -2246,19 +1295,10 @@ def _settings_config(settings) -> frappe._dict:
             "medicine_summary_field_names": settings.get("medicine_summary_field_names")
             or "drug_prescription,sr_allopathy_drug_prescription,sr_homeopathy_drug_prescription,sr_pe_order_items,sr_medication_template,sr_pe_instruction,sr_pe_disease,sr_diagnosis,sr_complaints",
             "max_retry_count": int(settings.max_agent_1_attempts or 3),
-            "max_agent_2_attempts": int(settings.get("max_agent_2_attempts") or 3),
-            "max_agent_3_attempts": int(settings.get("max_agent_3_attempts") or 3),
-            "max_agent_4_attempts": int(settings.get("max_agent_4_attempts") or 3),
             "retry_delay_minutes": int(settings.retry_delay_minutes or 60),
             "voice_call_timeout_minutes": int(settings.voice_call_timeout_minutes or 5),
             "agent_2_delay_days": int(settings.agent_2_delay_days or 7),
-            "agent_3_delay_days": int(settings.get("agent_3_delay_days") or 7),
-            "agent_4_before_course_end_days": int(settings.get("agent_4_before_course_end_days") or 3),
-            "skip_agent_3_under_course_days": int(settings.get("skip_agent_3_under_course_days") or 21),
             "schedule_agent_2_only_after_conversation": 1 if settings.schedule_agent_2_only_after_conversation else 0,
-            "renewal_webhook_url": settings.get("renewal_webhook_url") or "",
-            "renewal_webhook_auth_header": settings.get("renewal_webhook_auth_header") or "",
-            "renewal_webhook_auth_token": settings.get("renewal_webhook_auth_token") or "",
             "shipkia_tracking_enabled": 1 if settings.shipkia_tracking_enabled else 0,
             "shipkia_prefetch_before_call": 1 if settings.get("shipkia_prefetch_before_call") else 0,
             "shipkia_tracking_api_url": settings.shipkia_tracking_api_url or DEFAULT_SHIPKIA_URL,
@@ -2414,15 +1454,9 @@ def _workflow_config_values(config: frappe._dict) -> dict:
         if value not in (None, ""):
             values[fieldname] = value
     values["max_retry_count"] = int(values.get("max_retry_count") or 3)
-    values["max_agent_2_attempts"] = int(values.get("max_agent_2_attempts") or 3)
-    values["max_agent_3_attempts"] = int(values.get("max_agent_3_attempts") or 3)
-    values["max_agent_4_attempts"] = int(values.get("max_agent_4_attempts") or 3)
     values["retry_delay_minutes"] = int(values.get("retry_delay_minutes") or 60)
     values["voice_call_timeout_minutes"] = int(values.get("voice_call_timeout_minutes") or 5)
     values["agent_2_delay_days"] = int(values.get("agent_2_delay_days") or 7)
-    values["agent_3_delay_days"] = int(values.get("agent_3_delay_days") or 7)
-    values["agent_4_before_course_end_days"] = int(values.get("agent_4_before_course_end_days") or 3)
-    values["skip_agent_3_under_course_days"] = int(values.get("skip_agent_3_under_course_days") or 21)
     values["schedule_agent_2_only_after_conversation"] = 1 if _truthy(values.get("schedule_agent_2_only_after_conversation")) else 0
     values["shipkia_tracking_enabled"] = 1 if _truthy(values.get("shipkia_tracking_enabled")) else 0
     values["shipkia_prefetch_before_call"] = 1 if _truthy(values.get("shipkia_prefetch_before_call")) else 0
@@ -2450,9 +1484,6 @@ def _workflow_settings(workflow) -> frappe._dict:
     if workflow.get("max_retry_count") not in (None, ""):
         config.max_retry_count = workflow.max_retry_count
     config.max_agent_1_attempts = config.max_retry_count
-    config.max_agent_2_attempts = int(config.get("max_agent_2_attempts") or 3)
-    config.max_agent_3_attempts = int(config.get("max_agent_3_attempts") or 3)
-    config.max_agent_4_attempts = int(config.get("max_agent_4_attempts") or 3)
     return config
 
 
@@ -2615,24 +1646,9 @@ def _initialize_agent_1_state_machine(workflow) -> dict:
 def _repeat_state_machine(workflow) -> dict:
     context = parse_json_object(workflow.context_json, "Workflow Context JSON") if workflow.context_json else {}
     state = context.get(STATE_MACHINE_CONTEXT_KEY)
-    if isinstance(state, dict) and state.get("runtime_version") == RADHA_RUNTIME_VERSION:
+    if isinstance(state, dict) and state.get("runtime_version"):
         return state
-    previous = state if isinstance(state, dict) else {}
-    upgraded = _build_agent_1_state_machine(workflow=workflow, context=_workflow_context(workflow))
-    completed_keys = {
-        row.get("step_key")
-        for row in (previous.get("steps") or [])
-        if isinstance(row, dict) and row.get("status") in {"COMPLETED", "SKIPPED_ALLOWED"}
-    }
-    if completed_keys:
-        for row in upgraded.get("steps") or []:
-            if row.get("step_key") in completed_keys:
-                row["status"] = "COMPLETED"
-                row["completed_at"] = frappe.utils.now()
-        upgraded["active_step_key"] = ""
-        _advance_state_machine(upgraded)
-    _save_repeat_state_machine(workflow, upgraded)
-    return upgraded
+    return _initialize_agent_1_state_machine(workflow)
 
 
 def _save_repeat_state_machine(workflow, state: dict) -> None:
@@ -2658,8 +1674,6 @@ def _save_repeat_state_machine(workflow, state: dict) -> None:
 
 
 def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
-    settings = _workflow_settings(workflow)
-    deterministic_runtime_enabled = 1 if settings.get("deterministic_medical_runtime_enabled") else 0
     medicine_summary = context.get("medicine_summary") or {}
     prescriptions = medicine_summary.get("drug_prescription") if isinstance(medicine_summary, dict) else []
     if not isinstance(prescriptions, list):
@@ -2685,11 +1699,7 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
         tool_to_call: str = "",
         completion_condition: str = "mark_repeat_step_complete",
         agent_instruction: str = "",
-        answer_contract: dict | None = None,
-        action_contract: dict | None = None,
-        speak_to_customer: bool = True,
     ) -> None:
-        speech_text = _script_text(speech_unit) if speak_to_customer else ""
         steps.append(
             {
                 "step_key": step_key,
@@ -2702,16 +1712,9 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
                 "resume_policy": "resume_same_step_after_interrupt",
                 "completion_condition": completion_condition,
                 "tool_to_call": tool_to_call,
-                "action_contract": action_contract or {},
                 "variables": variables or {},
                 "rag_filters": rag_filters or {},
-                "speak_to_customer": 1 if speak_to_customer else 0,
-                "speech_unit": speech_text,
-                "speech_units": _speech_units(step_key, speech_text),
-                "speech_cursor": 0,
-                "playout_receipts": [],
-                "answer_contract": answer_contract or {"required": 0, "answer_type": "none"},
-                "answer_state": {"satisfied": 0, "attempts": []},
+                "speech_unit": _script_text(speech_unit),
                 "agent_instruction": agent_instruction
                 or "Speak only this step. Do not move to the next step until mark_repeat_step_complete succeeds.",
             }
@@ -2719,11 +1722,12 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
 
     add_step(
         "opening",
-        "Opening",
-        f"Namaste {patient_name} ji, main Radha sriaas treatment-support team se bol rahi hoon. Aapke medicine package follow-up ke liye call kiya hai.",
+        "Opening plus delivery question",
+        f"Namaste {patient_name} ji, main Radha sriaas treatment-support team se bol rahi hoon. Aapke medicine package follow-up ke liye call kiya hai. Sabse pehle confirm kar leti hoon: aapko medicine package receive ho gaya hai?",
         variables={"awb_number": workflow.awb_number or "", "order_id": workflow.order_id or ""},
         agent_instruction=(
-            "Speak this short introduction once. The server immediately follows it with the delivery question."
+            "This first step must never be only an intro. Greet briefly and ask the delivery question in the same reply. "
+            "After asking this question, wait for the customer's delivery answer; do not go silent after just the greeting."
         ),
     )
     add_step(
@@ -2731,14 +1735,6 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
         "Medicine/order delivery check",
         "Sabse pehle confirm kar leti hoon: aapko medicine package receive ho gaya hai?",
         variables={"awb_number": workflow.awb_number or "", "order_id": workflow.order_id or ""},
-        answer_contract={
-            "required": 1,
-            "answer_type": "yes_no",
-            "storage_field": "order_received",
-            "minimum_confidence": 0.72,
-            "question": "Kya medicine package receive ho gaya hai?",
-            "reask_text": "Medicine package aapko receive hua hai ya abhi receive nahi hua?",
-        },
         agent_instruction=(
             "Ask delivery status first. If received, complete with structured_details.order_received=true. "
             "If not received, complete with structured_details.order_received=false so tracking step unlocks."
@@ -2798,7 +1794,7 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
         add_step(
             "medicine_recap",
             "Medicine completion recap",
-            f"Toh ji, total {medicine_count} medicines ka naam aur use clear ho gaya. Ab main diet clear kar deti hoon.",
+            f"Toh ji, total {medicine_count} medicines ka naam aur use clear ho gaya. Agar kisi medicine ki timing ko lekar doubt ho to abhi pooch sakte hain; warna main ab diet clear kar deti hoon.",
             variables={"medicine_count": medicine_count},
         )
     else:
@@ -2830,11 +1826,9 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
         add_step(
             "whatsapp_diet_chart",
             "Send diet chart on WhatsApp",
-            "",
+            "Agar customer ne WhatsApp par diet chart maanga hai, to send confirmation milne ke baad hi bolna ki chart send ho gaya hai. Agar customer ne nahi maanga, is step ko no_customer_request ke saath complete karna hai.",
             tool_to_call="send_repeat_diet_chart_whatsapp",
             completion_condition="complete after WhatsApp send result is SUCCESS/FAILED/PENDING or no_customer_request is logged",
-            speak_to_customer=False,
-            action_contract={"mode": "only_if_customer_requested", "default_completion_details": {"no_customer_request": True}},
             agent_instruction=(
                 "Only call send_repeat_diet_chart_whatsapp if the customer explicitly asks/agrees. If success, confirm sent. If failed/missing, say send confirmation nahi mili and log pending support. Never fake success."
             ),
@@ -2842,33 +1836,27 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
     add_step(
         "outcome_log",
         "Outcome logging",
-        "",
+        "Call ka short outcome save karna hai: delivery status, medicine explanation completion, diet explanation, WhatsApp result, customer summary, and next action.",
         tool_to_call="log_repeat_followup_outcome",
         completion_condition="complete only after log_repeat_followup_outcome succeeds",
-        speak_to_customer=False,
-        action_contract={"mode": "server_generated_outcome"},
         agent_instruction="Mandatory before closing any real conversation.",
     )
     add_step(
         "schedule_next_agent",
         "Schedule Agent 2",
-        "",
+        "Agent 1 conversation complete hone ke baad configured delay ke according Agent 2 follow-up schedule hoga.",
         completion_condition="backend schedules Agent 2 after outcome logging",
-        speak_to_customer=False,
-        action_contract={"mode": "backend_managed"},
         agent_instruction="Do not say an exact future call time unless backend/tool result provides it.",
     )
     add_step(
         "close",
         "Supportive close",
-        "Aapko medicine dekar chhoda nahi ja raha; follow-up mein progress step by step monitor hogi. Dhanyavaad.",
+        "Aapko medicine dekar chhoda nahi ja raha; follow-up mein progress step by step monitor hogi. Dhanyavaad ji.",
     )
     if steps:
         steps[0]["status"] = "IN_PROGRESS"
     return {
         "runtime_version": RADHA_RUNTIME_VERSION,
-        "deterministic_runtime_enabled": deterministic_runtime_enabled,
-        "source_manifest": _medicine_source_manifest(medicine_summary),
         "journey": {
             "workflow": workflow.name,
             "journey_state": "AGENT_1_IN_PROGRESS",
@@ -2876,16 +1864,15 @@ def _build_agent_1_state_machine(*, workflow, context: dict) -> dict:
             "stage_schedule": [
                 {"stage_key": "AGENT_1", "agent_field": "agent_1", "delay_after_previous": "immediate", "status": "IN_PROGRESS"},
                 {"stage_key": "AGENT_2", "agent_field": "agent_2", "delay_after_previous_days": int((workflow.agent_2_delay_days or 7)), "status": "WAITING_FOR_AGENT_1_COMPLETION"},
-                {"stage_key": "AGENT_3", "agent_field": "agent_3", "delay_after_previous_days": int(workflow.get("agent_3_delay_days") or 7), "status": "WAITING_FOR_AGENT_2_COMPLETION"},
-                {"stage_key": "AGENT_4", "agent_field": "agent_4", "delay_before_course_end_days": int(workflow.get("agent_4_before_course_end_days") or 3), "status": "WAITING_FOR_PROGRESS_FOLLOWUPS"},
+                {"stage_key": "AGENT_3", "agent_field": "agent_3", "delay_after_previous_days": "workflow_config_future", "status": "PENDING_CONFIG"},
+                {"stage_key": "AGENT_4", "agent_field": "agent_4", "delay_after_previous_days": "workflow_config_future", "status": "PENDING_CONFIG"},
             ],
         },
         "active_step_key": steps[0]["step_key"] if steps else "",
         "steps": steps,
         "rules": {
-            "no_skip_policy": "Required steps cannot be skipped. The server advances only after exact speech playout and any required contextual answer are recorded.",
-            "interruption_policy": "Finish the active sentence, answer a clear side question briefly, then resume from the server speech cursor.",
-            "acknowledgement_policy": "Acknowledgements never satisfy open questions. They satisfy yes/no questions only when the semantic evaluator returns a high-confidence boolean answer.",
+            "no_skip_policy": "Required steps cannot be skipped. Medicine items are generated per drug_prescription and must complete in order.",
+            "interruption_policy": "Answer interruption briefly, then resume the same active step unless safety override applies.",
             "context_policy": "Live context gets only current step, variables, verified state, tool truth and filtered RAG. Full encounter is available through tool.",
             "rag_policy": "Retrieve by current stage, current step, department/disease and allowed_for_patient_speech. Never load all stages/diseases/docs together.",
             "tool_truth_policy": "Do not claim tracking/WhatsApp/outcome/schedule success until the corresponding tool returns SUCCESS.",
@@ -2963,15 +1950,6 @@ def _active_step(state: dict | None) -> dict:
             if step.get("status") == "PENDING":
                 step["status"] = "IN_PROGRESS"
                 step["started_at"] = frappe.utils.now()
-            return step
-    return {}
-
-
-def _state_step(state: dict | None, step_key: str) -> dict:
-    if not isinstance(state, dict) or not step_key:
-        return {}
-    for step in state.get("steps") or []:
-        if isinstance(step, dict) and step.get("step_key") == step_key:
             return step
     return {}
 
@@ -4122,14 +3100,9 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
         diet_summary=diet_summary,
     )
     medicine_script = context.get("required_medicine_script") or (medicine_summary.get("required_medicine_script") if isinstance(medicine_summary, dict) else "")
-    runtime_enabled = (
-        state.get("deterministic_runtime_enabled")
-        if isinstance(state, dict) and "deterministic_runtime_enabled" in state
-        else (_settings().get("deterministic_medical_runtime_enabled") if frappe.db.exists("DocType", SETTINGS) else 0)
-    )
     return {
         "event": "repeat_followup",
-        "simple_followup_mode": 0,
+        "simple_followup_mode": 1,
         "workflow": workflow.name if workflow else context.get("workflow"),
         "company": context.get("company") or (workflow.company if workflow else "sriaas"),
         "scenario_key": context.get("scenario_key") or (workflow.scenario_key if workflow else ""),
@@ -4150,11 +3123,9 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
         "simple_followup_script": _simple_followup_script(order_script, medicine_summary, diet_script),
         "diet_chart_summary": diet_summary,
         "radha_runtime_version": RADHA_RUNTIME_VERSION,
-        "deterministic_medical_runtime_enabled": 1 if runtime_enabled else 0,
-        "runtime_execution_strategy": "deterministic_medical_followup" if runtime_enabled else "prompt_driven",
-        "active_stage_id": "AGENT_1",
-        "active_stage_name": "Agent 1 delivery medicine diet flow",
-        "stage_sequence": "AGENT_1 -> AGENT_2 -> AGENT_3/AGENT_4 -> RENEWAL_OR_CLOSE",
+        "active_stage_id": "SIMPLE_FOLLOWUP",
+        "active_stage_name": "Simple Agent 1 delivery medicine diet flow",
+        "stage_sequence": "DELIVERY -> MEDICINE -> DIET -> CLOSE",
         "next_stage_after_order": "MEDICINE_EXPLANATION",
         "next_stage_after_medicine": "DIET_EXPLANATION",
         "next_stage_after_diet": "OUTCOME_CLOSE",
@@ -4163,20 +3134,8 @@ def _voice_bootstrap_context(workflow, context: dict) -> dict:
         "current_step_label": active_step.get("step_label") or context.get("current_step_label") or "",
         "current_speech_unit": active_step.get("speech_unit") or context.get("current_speech_unit") or "",
         "current_rag_filters": active_step.get("rag_filters") or context.get("current_rag_filters") or {},
-        "state_machine_required": 1,
-        "state_machine_tools": [
-            "get_repeat_workflow_state",
-            "get_current_required_step",
-            "get_current_speech_unit",
-            "get_repeat_runtime_turn",
-            "record_repeat_speech_unit_played",
-            "record_repeat_step_answer",
-            "mark_repeat_step_complete",
-            "mark_repeat_step_interrupted",
-            "resume_repeat_pending_step",
-            "log_repeat_followup_outcome",
-        ],
-        "stage_prompt_loading_required": 1,
+        "state_machine_required": 0,
+        "stage_prompt_loading_required": 0,
         "voice_channel_account": context.get("voice_channel_account") or (workflow.voice_channel_account if workflow else ""),
         "livekit_channel_account_fallback": context.get("livekit_channel_account_fallback") or (workflow.livekit_channel_account_fallback if workflow else ""),
         "repeat_followup_compacted": 1,
@@ -4263,12 +3222,7 @@ def _find_workflow(workflow: str | None = None, task: str | None = None):
     if workflow and frappe.db.exists(WORKFLOW, workflow):
         return frappe.get_doc(WORKFLOW, workflow)
     if task:
-        name = (
-            frappe.db.get_value(WORKFLOW, {"voice_task": task}, "name")
-            or frappe.db.get_value(WORKFLOW, {"agent_2_task": task}, "name")
-            or frappe.db.get_value(WORKFLOW, {"agent_3_task": task}, "name")
-            or frappe.db.get_value(WORKFLOW, {"agent_4_task": task}, "name")
-        )
+        name = frappe.db.get_value(WORKFLOW, {"voice_task": task}, "name") or frappe.db.get_value(WORKFLOW, {"agent_2_task": task}, "name")
         return frappe.get_doc(WORKFLOW, name) if name else None
     return None
 
@@ -4314,64 +3268,39 @@ def _workflow_voice_trunk_id(workflow, settings=None) -> str | None:
 
 
 def _stale_voice_workflows(now_value) -> list[str]:
-    names = []
-    stage_specs = [
-        ("voice_task", ("Call Queued", "Call Running")),
-        ("agent_2_task", ("Agent 2 Queued", "Agent 2 Running")),
-        ("agent_3_task", ("Agent 3 Queued", "Agent 3 Running")),
-        ("agent_4_task", ("Agent 4 Queued", "Agent 4 Running")),
-    ]
-    for task_field, statuses in stage_specs:
-        names.extend(
-            frappe.db.sql(
-                f"""
-                select workflow.name
-                from `tabAI Repeat Follow Up Workflow` workflow
-                inner join `tabAI Task` task on task.name = workflow.{task_field}
-                where workflow.status in %s
-                    and workflow.{task_field} is not null
-                    and workflow.{task_field} != ''
-                    and task.channel = 'Voice'
-                    and task.status in ('Queued', 'Waiting', 'Running')
-                    and task.modified <= date_sub(%s, interval coalesce(nullif(workflow.voice_call_timeout_minutes, 0), 5) minute)
-                order by workflow.modified asc
-                limit 200
-                """,
-                (tuple(statuses), now_value),
-                pluck=True,
-            )
-            or []
-        )
-    return list(dict.fromkeys(names))[:200]
+    return frappe.db.sql(
+        """
+        select workflow.name
+        from `tabAI Repeat Follow Up Workflow` workflow
+        inner join `tabAI Task` task on task.name = workflow.voice_task
+        where workflow.status in ('Call Queued', 'Call Running')
+            and workflow.voice_task is not null
+            and workflow.voice_task != ''
+            and task.channel = 'Voice'
+            and task.status in ('Queued', 'Waiting', 'Running')
+            and task.modified <= date_sub(%s, interval coalesce(nullif(workflow.voice_call_timeout_minutes, 0), 5) minute)
+        order by workflow.modified asc
+        limit 200
+        """,
+        now_value,
+        pluck=True,
+    ) or []
 
 
 def _missed_voice_task_workflows() -> list[str]:
-    names = []
-    stage_specs = [
-        ("voice_task", ("Call Queued", "Call Running")),
-        ("agent_2_task", ("Agent 2 Queued", "Agent 2 Running")),
-        ("agent_3_task", ("Agent 3 Queued", "Agent 3 Running")),
-        ("agent_4_task", ("Agent 4 Queued", "Agent 4 Running")),
-    ]
-    for task_field, statuses in stage_specs:
-        names.extend(
-            frappe.db.sql(
-                f"""
-                select workflow.name
-                from `tabAI Repeat Follow Up Workflow` workflow
-                inner join `tabAI Task` task on task.name = workflow.{task_field}
-                where workflow.status in %s
-                    and task.channel = 'Voice'
-                    and task.status = 'Deadline Missed'
-                order by workflow.modified asc
-                limit 200
-                """,
-                (tuple(statuses),),
-                pluck=True,
-            )
-            or []
-        )
-    return list(dict.fromkeys(names))[:200]
+    return frappe.db.sql(
+        """
+        select workflow.name
+        from `tabAI Repeat Follow Up Workflow` workflow
+        inner join `tabAI Task` task on task.name = workflow.voice_task
+        where workflow.status in ('Call Queued', 'Call Running')
+            and task.channel = 'Voice'
+            and task.status = 'Deadline Missed'
+        order by workflow.modified asc
+        limit 200
+        """,
+        pluck=True,
+    ) or []
 
 
 def _mark_voice_task_missed(task_name: str | None) -> None:
@@ -4466,50 +3395,6 @@ def _ensure_agent_1() -> str:
         }
     )
     _sync_agent_1_stage_prompts(doc)
-    doc.insert(ignore_permissions=True)
-    return doc.name
-
-
-def _ensure_stage_agent(label: str, prompt_line: str) -> str:
-    existing = _agent_by_label(label)
-    prompt = _default_followup_stage_prompt(label, prompt_line)
-    if existing:
-        try:
-            doc = frappe.get_doc("AI Agent", existing)
-            changed = False
-            if not doc.enabled:
-                doc.enabled = 1
-                changed = True
-            if not doc.company:
-                doc.company = "sriaas"
-                changed = True
-            if "RADHA_REPEAT_LATER_STAGE_V1" not in (doc.system_prompt or ""):
-                doc.system_prompt = prompt
-                changed = True
-            if not doc.get("audio_name"):
-                doc.audio_name = "Kore"
-                changed = True
-            if changed:
-                doc.save(ignore_permissions=True)
-        except Exception as exc:
-            create_error("Repeat Follow Up Stage Agent Update", str(exc), source="repeat_followup", payload={"agent": existing}, exc=exc)
-        return existing
-    doc = frappe.new_doc("AI Agent")
-    doc.update(
-        {
-            "enabled": 1,
-            "company": "sriaas",
-            "agent_name": label,
-            "personality": "Warm, practical sriaas follow-up voice assistant.",
-            "system_prompt": prompt,
-            "language": "Hinglish",
-            "audio_name": "Kore",
-            "primary_provider": "Gemini",
-            "fallback_provider": "OpenAI",
-            "agent_type": "Single-Stage",
-            "max_concurrency": 5,
-        }
-    )
     doc.insert(ignore_permissions=True)
     return doc.name
 
@@ -4619,43 +3504,6 @@ def _ensure_tools() -> list[str]:
             [("workflow", "string", 0, "Optional workflow id. Usually omit; active task scope is used.")],
         ),
         (
-            "get_repeat_runtime_turn",
-            "Fetch the server-owned active repeat-follow-up step, exact next speech unit, answer contract, action contract and prescription integrity status.",
-            [("workflow", "string", 0, "Optional workflow id. Usually omit; active task scope is used.")],
-        ),
-        (
-            "record_repeat_speech_unit_played",
-            "Record that one exact server-issued speech unit completed audio playout. Units are accepted only in order with matching id and hash.",
-            [
-                ("step_key", "string", 1, "Active step key."),
-                ("unit_index", "number", 1, "Zero-based index of the exact speech unit."),
-                ("unit_id", "string", 1, "Server-issued speech unit id."),
-                ("unit_hash", "string", 1, "Server-issued SHA-256 speech text hash."),
-                ("speech_id", "string", 0, "LiveKit SpeechHandle id used for diagnostics."),
-                ("playout_completed", "boolean", 1, "True only after SpeechHandle.wait_for_playout completed without interruption or error."),
-            ],
-        ),
-        (
-            "record_repeat_step_answer",
-            "Record the semantic classification of the caller's answer for the active question. This never advances the step by itself.",
-            [
-                ("step_key", "string", 1, "Active step key."),
-                ("transcript", "string", 1, "Final caller transcript being evaluated."),
-                ("classification", "string", 1, "One of valid_answer, partial_answer, acknowledgement, side_question, unrelated, or noise."),
-                ("confidence", "number", 1, "Semantic evaluator confidence from 0 to 1."),
-                ("extracted_value", "object", 0, "Structured answer value. For yes/no questions pass a JSON boolean."),
-                ("reason", "string", 0, "Short evaluator reason for diagnostics."),
-            ],
-        ),
-        (
-            "execute_repeat_runtime_action",
-            "Execute only the active server-owned non-speech action, including optional WhatsApp and outcome/scheduling work.",
-            [
-                ("step_key", "string", 1, "Active non-speech step key."),
-                ("customer_requested", "boolean", 0, "True only when the caller explicitly requested the optional action."),
-            ],
-        ),
-        (
             "mark_repeat_step_complete",
             "Mark the active repeat-follow-up step complete and unlock the next step. Out-of-order completion is blocked.",
             [
@@ -4724,15 +3572,6 @@ def _ensure_tools() -> list[str]:
                 ("customer_requested", "boolean", 1, "True only when the customer explicitly asked or agreed to receive WhatsApp."),
                 ("phone", "string", 0, "Optional customer phone. If omitted, task/workflow context is used."),
                 ("template_map", "string", 0, "Optional AI WhatsApp Template Map such as the configured generic map."),
-            ],
-        ),
-        (
-            "trigger_repeat_renewal_n8n",
-            "Trigger the configured repeat follow-up renewal webhook after Agent 4 gets clear next-month continuation consent.",
-            [
-                ("renewal_consent", "boolean", 1, "True only after customer clearly agrees to continue next-month treatment/medicine."),
-                ("structured_details", "object", 0, "Customer consent/payment/order notes to pass to n8n."),
-                ("workflow", "string", 0, "Optional workflow id. Usually omit; active task scope is used."),
             ],
         ),
         (
@@ -4853,10 +3692,6 @@ def _repeat_tool_name_set() -> set[str]:
         "get_repeat_workflow_state",
         "get_current_required_step",
         "get_current_speech_unit",
-        "get_repeat_runtime_turn",
-        "record_repeat_speech_unit_played",
-        "record_repeat_step_answer",
-        "execute_repeat_runtime_action",
         "mark_repeat_step_complete",
         "mark_repeat_step_interrupted",
         "resume_repeat_pending_step",
@@ -4865,8 +3700,6 @@ def _repeat_tool_name_set() -> set[str]:
         "verify_repeat_medicine_in_prescription",
         "get_shipkia_tracking_status",
         "send_repeat_diet_chart_whatsapp",
-        "send_mapped_whatsapp_template",
-        "trigger_repeat_renewal_n8n",
         "log_repeat_followup_outcome",
     }
 
@@ -4879,14 +3712,6 @@ def _tool_condition(tool_docname: str) -> str:
         return "Call before deciding what to say next. The returned active step is mandatory."
     if tool_name == "get_current_speech_unit":
         return "Call before speaking each controlled step. Speak only the returned speech unit and relevant retrieved content."
-    if tool_name == "get_repeat_runtime_turn":
-        return "Deterministic repeat-follow-up worker only. Fetch before each server-controlled speech or answer decision."
-    if tool_name == "record_repeat_speech_unit_played":
-        return "Deterministic repeat-follow-up worker only. Call after exact audio playout completes; never infer playout from generated text."
-    if tool_name == "record_repeat_step_answer":
-        return "Deterministic repeat-follow-up worker only. Record semantic answer type; acknowledgement must not satisfy an open question."
-    if tool_name == "execute_repeat_runtime_action":
-        return "Deterministic repeat-follow-up worker only. Execute the active server action; never choose a future action or invent its arguments."
     if tool_name == "mark_repeat_step_complete":
         return "Call only after the active step has truly been spoken/handled. Never complete a future step out of order."
     if tool_name == "mark_repeat_step_interrupted":
@@ -4905,8 +3730,6 @@ def _tool_condition(tool_docname: str) -> str:
         return "Call when the customer asks for a diet chart, says they did not receive the diet chart, or asks for food/diet guidance that should be sent as PDF. Match using sr_pe_deptt from the full encounter."
     if tool_name == "send_mapped_whatsapp_template":
         return "Call only after explicit WhatsApp request/consent. Pass customer_requested=true and a complete medicine/order message; never pass a placeholder."
-    if tool_name == "trigger_repeat_renewal_n8n":
-        return "Agent 4 only. Call after the customer clearly agrees to continue next-month medicine/treatment. Do not call for vague interest."
     if tool_name == "log_repeat_followup_outcome":
         return "Mandatory before closing any real conversation."
     return "Use only when needed for the repeat follow-up flow."
@@ -5018,31 +3841,6 @@ Diet safety:
 - If customer asks about a food, answer from required_diet_script if visible. If unsure, say team will verify; do not guess.
 
 Do not call state/progress tools during the call. Speak the flow naturally.
-""".strip()
-
-
-def _default_followup_stage_prompt(label: str, prompt_line: str) -> str:
-    return f"""
-RADHA_REPEAT_LATER_STAGE_V1
-
-You are Radha, a warm female sriaas treatment-support voice agent.
-
-Current stage: {label}
-Core duty: {prompt_line}
-
-Use the active workflow context and repeat-follow-up MCP tools only.
-
-Rules:
-- Speak natural Hindi/Hinglish. Radha is female: say "bol rahi hoon", "samjha deti hoon", "kar deti hoon".
-- Never say "raha hoon".
-- Do not say labels like workflow, JSON, tool, metadata, RAG, stage, or prompt to the customer.
-- Start by reminding the previous context briefly, then ask the current follow-up question.
-- If customer interrupts, answer briefly and return to the current follow-up topic.
-- If customer asks delivery/order status, call get_shipkia_tracking_status if AWB/order context is available.
-- If customer asks medicine detail, call get_repeat_medicine_list or verify_repeat_medicine_in_prescription. Never invent medicine names or dosage.
-- If customer asks diet chart on WhatsApp, call send_repeat_diet_chart_whatsapp and confirm only after success.
-- Always call log_repeat_followup_outcome before closing a real conversation.
-- In Agent 4 only: if the customer clearly agrees to continue next-month medicine/treatment, call trigger_repeat_renewal_n8n after logging the outcome.
 """.strip()
 
 

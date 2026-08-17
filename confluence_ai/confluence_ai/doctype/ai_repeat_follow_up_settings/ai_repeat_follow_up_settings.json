@@ -5,31 +5,17 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
-  "deterministic_runtime_section",
-  "deterministic_medical_runtime_enabled",
   "company",
   "agent_1",
   "agent_2",
-  "agent_3",
-  "agent_4",
   "livekit_channel_account_fallback",
   "voice_task_template",
   "timing_section",
   "max_agent_1_attempts",
-  "max_agent_2_attempts",
-  "max_agent_3_attempts",
-  "max_agent_4_attempts",
   "retry_delay_minutes",
   "voice_call_timeout_minutes",
   "agent_2_delay_days",
-  "agent_3_delay_days",
-  "agent_4_before_course_end_days",
-  "skip_agent_3_under_course_days",
   "schedule_agent_2_only_after_conversation",
-  "renewal_section",
-  "renewal_webhook_url",
-  "renewal_webhook_auth_header",
-  "renewal_webhook_auth_token",
   "shipkia_section",
   "shipkia_tracking_enabled",
   "shipkia_prefetch_before_call",
@@ -71,19 +57,6 @@
    "label": "Enabled"
   },
   {
-   "collapsible": 1,
-   "fieldname": "deterministic_runtime_section",
-   "fieldtype": "Section Break",
-   "label": "Deterministic Medical Runtime"
-  },
-  {
-   "default": "1",
-   "description": "Use server-controlled speech playout, contextual answer validation, exact prescription sequencing, and interruption resume for repeat follow-up calls. Disable to return to the legacy prompt-driven runtime.",
-   "fieldname": "deterministic_medical_runtime_enabled",
-   "fieldtype": "Check",
-   "label": "Deterministic Medical Runtime Enabled"
-  },
-  {
    "default": "sriaas",
    "fieldname": "company",
    "fieldtype": "Link",
@@ -101,18 +74,6 @@
    "fieldname": "agent_2",
    "fieldtype": "Link",
    "label": "Agent 2",
-   "options": "AI Agent"
-  },
-  {
-   "fieldname": "agent_3",
-   "fieldtype": "Link",
-   "label": "Agent 3",
-   "options": "AI Agent"
-  },
-  {
-   "fieldname": "agent_4",
-   "fieldtype": "Link",
-   "label": "Agent 4",
    "options": "AI Agent"
   },
   {
@@ -140,24 +101,6 @@
    "label": "Max Agent 1 Attempts"
   },
   {
-   "default": "3",
-   "fieldname": "max_agent_2_attempts",
-   "fieldtype": "Int",
-   "label": "Max Agent 2 Attempts"
-  },
-  {
-   "default": "3",
-   "fieldname": "max_agent_3_attempts",
-   "fieldtype": "Int",
-   "label": "Max Agent 3 Attempts"
-  },
-  {
-   "default": "3",
-   "fieldname": "max_agent_4_attempts",
-   "fieldtype": "Int",
-   "label": "Max Agent 4 Attempts"
-  },
-  {
    "default": "60",
    "fieldname": "retry_delay_minutes",
    "fieldtype": "Int",
@@ -176,50 +119,10 @@
    "label": "Agent 2 Delay Days"
   },
   {
-   "default": "7",
-   "fieldname": "agent_3_delay_days",
-   "fieldtype": "Int",
-   "label": "Agent 3 Delay Days"
-  },
-  {
-   "default": "3",
-   "fieldname": "agent_4_before_course_end_days",
-   "fieldtype": "Int",
-   "label": "Agent 4 Days Before Course End"
-  },
-  {
-   "default": "21",
-   "description": "If the course is shorter than this many days, skip Agent 3 and schedule Agent 4 after Agent 2.",
-   "fieldname": "skip_agent_3_under_course_days",
-   "fieldtype": "Int",
-   "label": "Skip Agent 3 Under Course Days"
-  },
-  {
    "default": "1",
    "fieldname": "schedule_agent_2_only_after_conversation",
    "fieldtype": "Check",
    "label": "Schedule Agent 2 Only After Conversation"
-  },
-  {
-   "fieldname": "renewal_section",
-   "fieldtype": "Section Break",
-   "label": "Renewal Trigger"
-  },
-  {
-   "fieldname": "renewal_webhook_url",
-   "fieldtype": "Data",
-   "label": "Renewal Webhook URL"
-  },
-  {
-   "description": "Optional header name, for example Authorization.",
-   "fieldname": "renewal_webhook_auth_header",
-   "fieldtype": "Data",
-   "label": "Renewal Webhook Auth Header"
-  },
-  {
-   "fieldname": "renewal_webhook_auth_token",
-   "fieldtype": "Password",
-   "label": "Renewal Webhook Auth Token"
   },
   {
    "fieldname": "shipkia_section",
