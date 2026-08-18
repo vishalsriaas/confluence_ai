@@ -1,0 +1,138 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:ffuset-{##}",
+ "creation": "2026-08-18 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "settings_name",
+  "company",
+  "voice_task_template",
+  "livekit_channel_account_fallback",
+  "voice_call_timeout_minutes",
+  "agents_section",
+  "agents",
+  "payload_mapping_section",
+  "idempotency_key_field_names",
+  "phone_field_names",
+  "customer_name_field_names"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "settings_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Settings Name",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template",
+   "reqd": 1
+  },
+  {
+   "description": "Optional fallback used when a selected agent has no allowed LiveKit channel account.",
+   "fieldname": "livekit_channel_account_fallback",
+   "fieldtype": "Link",
+   "label": "LiveKit Channel Account Fallback",
+   "options": "AI Channel Account"
+  },
+  {
+   "default": "5",
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "fieldname": "agents_section",
+   "fieldtype": "Section Break",
+   "label": "Agents"
+  },
+  {
+   "fieldname": "agents",
+   "fieldtype": "Table",
+   "label": "Agents",
+   "options": "AI Fresh Follow Up Agent"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "payload_mapping_section",
+   "fieldtype": "Section Break",
+   "label": "Payload Mapping"
+  },
+  {
+   "default": "idempotency_key,event_id,data.idempotency_key,data.event_id,lead,lead_id,customer_phone,phone,mobile",
+   "description": "Comma-separated payload paths. First non-empty value is used for duplicate protection.",
+   "fieldname": "idempotency_key_field_names",
+   "fieldtype": "Small Text",
+   "label": "Idempotency Key Field Names"
+  },
+  {
+   "default": "phone,mobile,customer_phone,patient_mobile,data.phone,data.mobile,data.customer_phone,lead.phone,lead.mobile",
+   "description": "Comma-separated payload paths used to find the customer phone.",
+   "fieldname": "phone_field_names",
+   "fieldtype": "Small Text",
+   "label": "Phone Field Names"
+  },
+  {
+   "default": "customer_name,patient_name,name,data.customer_name,data.patient_name,lead.name,lead.customer_name",
+   "description": "Comma-separated payload paths used to find the customer name.",
+   "fieldname": "customer_name_field_names",
+   "fieldtype": "Small Text",
+   "label": "Customer Name Field Names"
+  }
+ ],
+ "indexes": [
+  [
+   "company",
+   "enabled"
+  ]
+ ],
+ "modified": "2026-08-18 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Fresh Follow Up Settings",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

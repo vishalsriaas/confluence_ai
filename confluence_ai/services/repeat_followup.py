@@ -35,6 +35,7 @@ REPEAT_MCP_TOOL_NAMES = (
     "verify_repeat_medicine_in_prescription",
     "get_shipkia_tracking_status",
     "send_mapped_whatsapp_template",
+    "trigger_repeat_renewal_n8n",
     "log_repeat_followup_outcome",
 )
 STATE_MACHINE_CONTEXT_KEY = "repeat_state_machine"
@@ -1009,6 +1010,177 @@ def log_repeat_followup_outcome(arguments: dict | None = None, *, task_id: str |
     return {"status": "success", "workflow": workflow.name, "agent_2": schedule_result}
 
 
+def trigger_repeat_renewal_n8n(arguments: dict | None = None, *, task_id: str | None = None, agent: str | None = None) -> dict:
+    arguments = arguments or {}
+    workflow = _workflow_for_tool(arguments, task_id)
+    webhook_url = _clean_text(workflow.renewal_webhook_url or _settings().get("renewal_webhook_url"))
+    if not webhook_url:
+        result = {"status": "missing_webhook_url", "workflow": workflow.name}
+        _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="missing_webhook_url", detail=result)
+        frappe.throw("Renewal Webhook URL is not configured.")
+
+    consent = _truthy(arguments.get("renewal_consent") or arguments.get("consent") or arguments.get("confirmed"))
+    if not consent:
+        result = {"status": "blocked_missing_consent", "workflow": workflow.name}
+        _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="blocked", detail=result)
+        return {**result, "message": "Renewal webhook was not triggered because renewal_consent was not true."}
+
+    structured = arguments.get("structured_details") or arguments.get("details") or {}
+    if not isinstance(structured, dict):
+        structured = {"value": structured}
+
+    customer_said = _clean_text(
+        arguments.get("customer_said")
+        or arguments.get("customer_exact_words")
+        or arguments.get("customer_message")
+        or arguments.get("customer_consent_text")
+        or arguments.get("what_customer_said")
+        or structured.get("customer_said")
+        or structured.get("customer_exact_words")
+        or structured.get("customer_message")
+        or structured.get("customer_consent_text")
+    )
+    customer_summary = _clean_text(
+        arguments.get("customer_summary")
+        or arguments.get("short_summary")
+        or arguments.get("summary")
+        or structured.get("customer_summary")
+        or structured.get("short_summary")
+        or structured.get("summary")
+    )
+    medicine_status = _clean_text(arguments.get("medicine_status") or structured.get("medicine_status"))
+    medicine_name = _clean_text(
+        arguments.get("medicine_name")
+        or arguments.get("medicine_names")
+        or structured.get("medicine_name")
+        or structured.get("medicine_names")
+    )
+    medicine_duration = _clean_text(
+        arguments.get("medicine_duration")
+        or arguments.get("duration")
+        or arguments.get("course_duration")
+        or structured.get("medicine_duration")
+        or structured.get("duration")
+        or structured.get("course_duration")
+    )
+    renewal_reason = _clean_text(arguments.get("renewal_reason") or structured.get("renewal_reason"))
+    consent_summary = _clean_text(arguments.get("consent_summary") or structured.get("consent_summary"))
+    if customer_said and not customer_summary:
+        customer_summary = customer_said
+    for key, value in {
+        "customer_said": customer_said,
+        "customer_summary": customer_summary,
+        "medicine_status": medicine_status,
+        "medicine_name": medicine_name,
+        "medicine_duration": medicine_duration,
+        "renewal_reason": renewal_reason,
+        "consent_summary": consent_summary,
+    }.items():
+        if value and not structured.get(key):
+            structured[key] = value
+
+    payload = {
+        "event": "repeat_renewal_requested",
+        "workflow": workflow.name,
+        "company": workflow.company,
+        "patient_encounter": workflow.patient_encounter,
+        "patient_name": workflow.patient_name,
+        "customer_name": workflow.patient_name,
+        "customer_phone": workflow.patient_mobile,
+        "phone": workflow.patient_mobile,
+        "awb_number": workflow.awb_number,
+        "order_id": workflow.order_id,
+        "agent": agent,
+        "task": task_id,
+        "renewal_consent": True,
+        "customer_said": customer_said,
+        "customer_summary": customer_summary,
+        "medicine_status": medicine_status,
+        "medicine_name": medicine_name,
+        "medicine_duration": medicine_duration,
+        "renewal_reason": renewal_reason,
+        "consent_summary": consent_summary,
+        "structured_details": structured,
+        "source": "confluence_ai_repeat_followup",
+    }
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    auth_header = _clean_text(workflow.renewal_webhook_auth_header or _settings().get("renewal_webhook_auth_header"))
+    auth_token = _password_value(workflow, "renewal_webhook_auth_token") or _password_value(_settings(), "renewal_webhook_auth_token")
+    if auth_header and auth_token and _is_valid_http_header_name(auth_header):
+        headers[auth_header] = auth_token
+    elif auth_token:
+        headers["Authorization"] = auth_token
+
+    request_log = {
+        "url": webhook_url,
+        "payload": payload,
+        "headers": sorted(headers.keys()),
+    }
+    try:
+        response = requests.post(webhook_url, json=payload, headers=headers, timeout=30)
+        try:
+            body = response.json() if response.text else {}
+        except Exception:
+            body = {"text": response.text[:2000]}
+        result = {
+            "status": "success" if response.ok else "failed",
+            "workflow": workflow.name,
+            "status_code": response.status_code,
+            "ok": response.ok,
+            "body": body,
+        }
+        record_provider_event(
+            provider="N8N",
+            operation="trigger_repeat_renewal_n8n",
+            status="Succeeded" if response.ok else "Failed",
+            company=workflow.company,
+            agent=agent,
+            task=task_id,
+            request=request_log,
+            response=result,
+            error=None if response.ok else str(body)[:1000],
+        )
+        if not response.ok:
+            _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="failed", detail=result)
+            frappe.throw(f"Renewal webhook failed with status {response.status_code}.")
+    except Exception as exc:
+        if not isinstance(exc, frappe.ValidationError):
+            record_provider_event(
+                provider="N8N",
+                operation="trigger_repeat_renewal_n8n",
+                status="Failed",
+                company=workflow.company,
+                agent=agent,
+                task=task_id,
+                request=request_log,
+                response={},
+                error=str(exc),
+            )
+            create_error(
+                "Repeat Renewal Webhook Failed",
+                str(exc),
+                company=workflow.company,
+                source="repeat_followup",
+                task=task_id,
+                agent=agent,
+                payload={"workflow": workflow.name, "webhook_url": webhook_url},
+                exc=exc,
+            )
+        raise
+
+    workflow.renewal_triggered_at = now_datetime()
+    workflow.renewal_result_json = as_json(result)
+    workflow.last_error = ""
+    workflow.save(ignore_permissions=True)
+    frappe.db.commit()
+    _append_mcp_tool_usage(workflow, "trigger_repeat_renewal_n8n", task_id=task_id, status="success", detail={"status_code": result["status_code"]})
+    return result
+
+
 def handle_voice_result(workflow: str | None = None, task: str | None = None, outcome: str | None = None, notes: str | None = None) -> dict:
     doc = _find_workflow(workflow=workflow, task=task)
     if not doc:
@@ -1223,7 +1395,7 @@ def queue_agent_2_call(workflow_name: str) -> dict:
         return {"status": "pending_config", "workflow": workflow.name}
 
     task_template = settings.voice_task_template or _template_by_key("repeat_followup_voice") or _ensure_task_template()
-    context = _workflow_context(workflow)
+    context = _agent_2_workflow_context(workflow)
     context["agent_2_from_workflow"] = workflow.name
     batch = frappe.new_doc("AI Task Batch")
     batch.update(
@@ -1272,6 +1444,59 @@ def queue_agent_2_call(workflow_name: str) -> dict:
     frappe.db.commit()
     enqueue_task_execution(task.name, "Voice", enqueue_after_commit=False)
     return {"status": "queued", "workflow": workflow.name, "task": task.name}
+
+
+def _agent_2_workflow_context(workflow) -> dict:
+    context = _workflow_context(workflow)
+    for key in (
+        STATE_MACHINE_CONTEXT_KEY,
+        "active_stage_id",
+        "active_stage_name",
+        "current_journey_stage",
+        "current_rag_filters",
+        "current_speech_unit",
+        "current_step_key",
+        "current_step_label",
+        "diet_chart_summary",
+        "next_stage_after_diet",
+        "next_stage_after_medicine",
+        "next_stage_after_order",
+        "required_diet_script",
+        "required_medicine_script",
+        "required_order_script",
+        "simple_followup_script",
+        "stage_sequence",
+        "strict_followup_script",
+    ):
+        context.pop(key, None)
+
+    medicine_summary = context.get("medicine_summary")
+    if isinstance(medicine_summary, dict):
+        medicine_summary = medicine_summary.copy()
+        medicine_summary.pop("required_medicine_script", None)
+        context["medicine_summary"] = medicine_summary
+
+    context.update(
+        {
+            "event": "repeat_followup",
+            "simple_followup_mode": 0,
+            "workflow": workflow.name,
+            "company": workflow.company,
+            "patient_name": workflow.patient_name,
+            "customer_name": workflow.patient_name,
+            "phone": workflow.patient_mobile,
+            "customer_phone": workflow.patient_mobile,
+            "patient_encounter": workflow.patient_encounter,
+            "awb_number": workflow.awb_number,
+            "order_id": workflow.order_id,
+            "active_stage_id": "AGENT_2",
+            "active_stage_name": "Agent 2 follow-up",
+            "current_journey_stage": "AGENT_2",
+            "repeat_followup_compacted": 1,
+            "full_encounter_available_via_tool": 1,
+        }
+    )
+    return context
 
 
 def _settings() -> frappe._dict:
@@ -3700,6 +3925,7 @@ def _repeat_tool_name_set() -> set[str]:
         "verify_repeat_medicine_in_prescription",
         "get_shipkia_tracking_status",
         "send_repeat_diet_chart_whatsapp",
+        "trigger_repeat_renewal_n8n",
         "log_repeat_followup_outcome",
     }
 
@@ -3730,6 +3956,8 @@ def _tool_condition(tool_docname: str) -> str:
         return "Call when the customer asks for a diet chart, says they did not receive the diet chart, or asks for food/diet guidance that should be sent as PDF. Match using sr_pe_deptt from the full encounter."
     if tool_name == "send_mapped_whatsapp_template":
         return "Call only after explicit WhatsApp request/consent. Pass customer_requested=true and a complete medicine/order message; never pass a placeholder."
+    if tool_name == "trigger_repeat_renewal_n8n":
+        return "Call only after the patient says medicine is khatam/empty/khatam hone wali and clearly agrees to repeat order. This triggers the configured Renewal Webhook URL."
     if tool_name == "log_repeat_followup_outcome":
         return "Mandatory before closing any real conversation."
     return "Use only when needed for the repeat follow-up flow."
@@ -3777,6 +4005,23 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "haan", "ha"}
+
+
+def _password_value(doc, fieldname: str) -> str:
+    if not doc:
+        return ""
+    try:
+        if hasattr(doc, "get_password"):
+            value = doc.get_password(fieldname)
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    return _clean_text(doc.get(fieldname))
+
+
+def _is_valid_http_header_name(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$", value or ""))
 
 
 def _diet_chart_prompt_addendum() -> str:

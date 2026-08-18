@@ -402,9 +402,29 @@
    "link_type": "DocType",
    "onboard": 0,
    "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Fresh Follow Up Settings",
+   "link_count": 0,
+   "link_to": "AI Fresh Follow Up Settings",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Fresh Follow Up Workflows",
+   "link_count": 0,
+   "link_to": "AI Fresh Follow Up Workflow",
+   "link_type": "DocType",
+   "onboard": 0,
+   "type": "Link"
   }
  ],
- "modified": "2026-07-29 17:02:21.324692",
+ "modified": "2026-08-18 18:11:50.952115",
  "modified_by": "Administrator",
  "module": "Confluence AI",
  "name": "Confluence AI",

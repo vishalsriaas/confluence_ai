@@ -167,6 +167,7 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         "verify_repeat_medicine_in_prescription",
         "get_shipkia_tracking_status",
         "send_repeat_diet_chart_whatsapp",
+        "trigger_repeat_renewal_n8n",
         "log_repeat_followup_outcome",
     }:
         return None
@@ -249,6 +250,10 @@ def execute_builtin_sales_tool(tool_name: str, arguments: dict, task_id: str | N
         from confluence_ai.services import repeat_followup
 
         return repeat_followup.send_repeat_diet_chart_whatsapp(arguments, task_id=task_id, agent=agent)
+    if tool_name == "trigger_repeat_renewal_n8n":
+        from confluence_ai.services import repeat_followup
+
+        return repeat_followup.trigger_repeat_renewal_n8n(arguments, task_id=task_id, agent=agent)
     if tool_name == "log_repeat_followup_outcome":
         from confluence_ai.services import repeat_followup
 

@@ -18,6 +18,8 @@ tenant_doctypes = [
     "AI Channel Account",
     "AI Error Log",
     "AI Event Route",
+    "AI Fresh Follow Up Settings",
+    "AI Fresh Follow Up Workflow",
     "AI Knowledge Category",
     "AI Knowledge Chunk",
     "AI Knowledge Document",
@@ -73,6 +75,7 @@ scheduler_events = {
     "cron": {
         "* * * * *": [
             "confluence_ai.services.order_confirmation.process_due_workflows",
+            "confluence_ai.services.fresh_followup.process_due_workflows",
             "confluence_ai.services.repeat_followup.process_due_workflows",
         ],
     },
@@ -105,6 +108,8 @@ permission_query_conditions = {
     "AI Channel Account": "confluence_ai.tenant.ai_channel_account_query_condition",
     "AI Error Log": "confluence_ai.tenant.ai_error_log_query_condition",
     "AI Event Route": "confluence_ai.tenant.ai_event_route_query_condition",
+    "AI Fresh Follow Up Settings": "confluence_ai.tenant.ai_fresh_follow_up_settings_query_condition",
+    "AI Fresh Follow Up Workflow": "confluence_ai.tenant.ai_fresh_follow_up_workflow_query_condition",
     "AI Knowledge Category": "confluence_ai.tenant.ai_knowledge_category_query_condition",
     "AI Knowledge Chunk": "confluence_ai.tenant.ai_knowledge_chunk_query_condition",
     "AI Knowledge Document": "confluence_ai.tenant.ai_knowledge_document_query_condition",

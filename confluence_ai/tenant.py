@@ -23,6 +23,8 @@ TENANT_DOCTYPES = {
 	"AI Channel Account",
 	"AI Error Log",
 	"AI Event Route",
+	"AI Fresh Follow Up Settings",
+	"AI Fresh Follow Up Workflow",
 	"AI Knowledge Category",
 	"AI Knowledge Chunk",
 	"AI Knowledge Document",
@@ -249,6 +251,14 @@ def ai_error_log_query_condition(user: str | None = None) -> str:
 
 def ai_event_route_query_condition(user: str | None = None) -> str:
 	return _condition_for("AI Event Route", user)
+
+
+def ai_fresh_follow_up_settings_query_condition(user: str | None = None) -> str:
+	return _condition_for("AI Fresh Follow Up Settings", user)
+
+
+def ai_fresh_follow_up_workflow_query_condition(user: str | None = None) -> str:
+	return _condition_for("AI Fresh Follow Up Workflow", user)
 
 
 def ai_knowledge_category_query_condition(user: str | None = None) -> str:

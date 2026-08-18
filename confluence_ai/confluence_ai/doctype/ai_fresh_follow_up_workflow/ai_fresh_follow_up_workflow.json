@@ -1,0 +1,253 @@
+{
+ "actions": [],
+ "autoname": "format:ffu-{##}",
+ "creation": "2026-08-18 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "enabled",
+  "status",
+  "settings",
+  "idempotency_key",
+  "customer_section",
+  "customer_name",
+  "customer_phone",
+  "source_reference_type",
+  "source_reference_name",
+  "state_section",
+  "current_agent_no",
+  "next_agent_no",
+  "next_call_time",
+  "active_call_timeout_at",
+  "timer_status",
+  "final_reason",
+  "agents_section",
+  "agents",
+  "config_section",
+  "voice_task_template",
+  "livekit_channel_account_fallback",
+  "voice_call_timeout_minutes",
+  "json_section",
+  "source_payload_json",
+  "context_json",
+  "task_history_json",
+  "result_json",
+  "extra_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "AI Company",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nScheduled\nQueued\nCompleted\nPending Config\nMissed After Attempts\nFailed\nCancelled"
+  },
+  {
+   "fieldname": "settings",
+   "fieldtype": "Link",
+   "label": "Settings",
+   "options": "AI Fresh Follow Up Settings"
+  },
+  {
+   "fieldname": "idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "unique": 1
+  },
+  {
+   "fieldname": "customer_section",
+   "fieldtype": "Section Break",
+   "label": "Customer"
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Name"
+  },
+  {
+   "fieldname": "customer_phone",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Customer Phone",
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_reference_type",
+   "fieldtype": "Data",
+   "label": "Source Reference Type"
+  },
+  {
+   "fieldname": "source_reference_name",
+   "fieldtype": "Data",
+   "label": "Source Reference Name"
+  },
+  {
+   "fieldname": "state_section",
+   "fieldtype": "Section Break",
+   "label": "State"
+  },
+  {
+   "fieldname": "current_agent_no",
+   "fieldtype": "Int",
+   "label": "Current Agent No",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_agent_no",
+   "fieldtype": "Int",
+   "label": "Next Agent No",
+   "read_only": 1
+  },
+  {
+   "fieldname": "next_call_time",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Next Call Time",
+   "read_only": 1
+  },
+  {
+   "fieldname": "active_call_timeout_at",
+   "fieldtype": "Datetime",
+   "label": "Active Call Timeout At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "timer_status",
+   "fieldtype": "Small Text",
+   "label": "Timer Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "final_reason",
+   "fieldtype": "Small Text",
+   "label": "Final Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agents_section",
+   "fieldtype": "Section Break",
+   "label": "Agents"
+  },
+  {
+   "fieldname": "agents",
+   "fieldtype": "Table",
+   "label": "Agents",
+   "options": "AI Fresh Follow Up Workflow Agent"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "config_section",
+   "fieldtype": "Section Break",
+   "label": "Copied Config"
+  },
+  {
+   "fieldname": "voice_task_template",
+   "fieldtype": "Link",
+   "label": "Voice Task Template",
+   "options": "AI Task Template",
+   "read_only": 1
+  },
+  {
+   "fieldname": "livekit_channel_account_fallback",
+   "fieldtype": "Link",
+   "label": "LiveKit Channel Account Fallback",
+   "options": "AI Channel Account",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voice_call_timeout_minutes",
+   "fieldtype": "Int",
+   "label": "Voice Call Timeout Minutes",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "json_section",
+   "fieldtype": "Section Break",
+   "label": "Payloads"
+  },
+  {
+   "fieldname": "source_payload_json",
+   "fieldtype": "Code",
+   "label": "Source Payload JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "context_json",
+   "fieldtype": "Code",
+   "label": "Context JSON",
+   "options": "JSON"
+  },
+  {
+   "default": "[]",
+   "fieldname": "task_history_json",
+   "fieldtype": "Code",
+   "label": "Task History JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "result_json",
+   "fieldtype": "Code",
+   "label": "Result JSON",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "extra_json",
+   "fieldtype": "Code",
+   "label": "Extra JSON",
+   "options": "JSON"
+  }
+ ],
+ "indexes": [
+  [
+   "status",
+   "next_call_time"
+  ]
+ ],
+ "modified": "2026-08-18 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Fresh Follow Up Workflow",
+ "naming_rule": "Expression",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "read": 1,
+   "role": "Confluence AI Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Confluence AI Operator"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

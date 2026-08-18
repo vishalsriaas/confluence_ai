@@ -1,0 +1,79 @@
+{
+ "actions": [],
+ "creation": "2026-08-18 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "agent",
+  "followup_after_value",
+  "followup_after_unit",
+  "max_attempts",
+  "retry_after_value",
+  "retry_after_unit"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Agent",
+   "options": "AI Agent",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "For row 1 this is normally 0. For later rows this is counted after previous agent is completed.",
+   "fieldname": "followup_after_value",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Follow Up After"
+  },
+  {
+   "default": "Minutes",
+   "fieldname": "followup_after_unit",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Follow Up Unit",
+   "options": "Minutes\nHours\nDays"
+  },
+  {
+   "default": "3",
+   "fieldname": "max_attempts",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Max Attempts"
+  },
+  {
+   "default": "3",
+   "fieldname": "retry_after_value",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Retry After"
+  },
+  {
+   "default": "Hours",
+   "fieldname": "retry_after_unit",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Retry Unit",
+   "options": "Minutes\nHours\nDays"
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-08-18 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Fresh Follow Up Agent",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
