@@ -72,8 +72,8 @@ def _ambient_sound_value(value: object) -> str:
 
 def _ambient_volume_value(value: object) -> float:
     volume = flt(value or 5)
-    if volume <= 0 or volume > 20:
-        frappe.throw("Background Volume % must be greater than 0 and no more than 20.")
+    if volume <= 0 or volume > 100:
+        frappe.throw("Background Volume % must be greater than 0 and no more than 100.")
     return volume
 
 

@@ -230,7 +230,7 @@ def _voice_environment_metadata(agent) -> dict:
     return {
         "ambient_sound_enabled": 1,
         "ambient_sound": sound,
-        "ambient_sound_volume": max(0.0, min(volume, 20.0)),
+        "ambient_sound_volume": max(0.0, min(volume, 100.0)),
     }
 
 
