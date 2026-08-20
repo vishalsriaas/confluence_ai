@@ -249,6 +249,7 @@ def handle_callback(payload: dict) -> dict:
     frappe.db.commit()
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
     repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
+    fresh_followup_result = _handle_fresh_followup_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
@@ -258,6 +259,7 @@ def handle_callback(payload: dict) -> dict:
         "processed_event": event_type,
         "order_confirmation": order_confirmation_result,
         "repeat_followup": repeat_followup_result,
+        "fresh_followup": fresh_followup_result,
     }
 
 
@@ -354,6 +356,59 @@ def _handle_repeat_followup_callback(task, payload: dict, event_type_lower: str)
 
         create_error("Repeat Follow Up Voice Callback", str(exc), source="vobiz", task=task.name, exc=exc)
         return {"status": "failed", "error": str(exc)}
+
+
+def _handle_fresh_followup_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice":
+        return None
+    if event_type_lower not in {"status", "hangup", "completed", "failed", "busy", "no_answer", "timeout", "cancel", "transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
+        return None
+    workflow_name = _fresh_followup_workflow_for_task(task)
+    if not workflow_name:
+        return None
+    try:
+        from confluence_ai.services import fresh_followup
+
+        status = str(payload.get("CallStatus") or payload.get("Status") or payload.get("status") or "").lower()
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcription_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or payload.get("transcription_text")
+            or ""
+        )
+        outcome = payload.get("fresh_followup_outcome") or payload.get("outcome")
+        if status in {"failed", "busy", "no_answer", "timeout", "cancel", "cancelled", "canceled"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("Reason") or payload.get("hangup_cause") or "Fresh follow-up voice call did not complete."
+        elif not notes and event_type_lower in {"status", "hangup", "completed"} and status in {"completed", "hangup"}:
+            return fresh_followup.wait_for_voice_transcript(
+                workflow_name,
+                "Voice call ended; waiting for Vobiz transcript before scheduling the next fresh follow-up agent.",
+            )
+
+        return fresh_followup.handle_voice_result(
+            workflow=workflow_name,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+            result=payload,
+        )
+    except Exception as exc:
+        from confluence_ai.services.utils import create_error
+
+        create_error("Fresh Follow Up Voice Callback", str(exc), source="vobiz", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
+
+
+def _fresh_followup_workflow_for_task(task) -> str | None:
+    if task.external_record_type == "AI Fresh Follow Up Workflow" and task.external_record_id:
+        return task.external_record_id
+    return frappe.db.get_value("AI Fresh Follow Up Workflow Agent", {"task": task.name}, "parent")
 
 
 def _payload_call_ids(payload: dict) -> list[str]:

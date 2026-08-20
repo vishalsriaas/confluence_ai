@@ -195,6 +195,7 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
         "context_json": as_json(context),
     })
     task.insert(ignore_permissions=True)
+    fresh_followup_result = _maybe_start_fresh_followup_from_task(task, payload, context)
 
     refresh_batch_counts(batch.name)
     enqueue_task_execution(task.name, task.channel)
@@ -205,6 +206,7 @@ def _dispatch_immediate(route: "frappe.Document", payload: dict) -> dict:
         "batch": batch.name,
         "task": task.name,
         "priority": effective_priority,
+        "fresh_followup": fresh_followup_result,
     }
 
 
@@ -306,6 +308,16 @@ def _create_batch(
     })
     batch.insert(ignore_permissions=True)
     return batch
+
+
+def _maybe_start_fresh_followup_from_task(task, payload: dict, context: dict) -> dict | None:
+    try:
+        from confluence_ai.services import fresh_followup
+
+        return fresh_followup.maybe_start_from_task(task, payload=payload, context=context)
+    except Exception as exc:
+        create_error("Fresh Follow Up Attach", str(exc), source="event_router", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _resolve_task_company(route: "frappe.Document", payload: dict, target_agent: str | None = None) -> str:

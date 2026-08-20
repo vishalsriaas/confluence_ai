@@ -758,6 +758,7 @@ def handle_callback(payload: dict) -> dict:
     frappe.db.commit()
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
     repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
+    fresh_followup_result = _handle_fresh_followup_callback(task, payload, event_type_lower)
 
     return {
         "status": "success",
@@ -766,6 +767,7 @@ def handle_callback(payload: dict) -> dict:
         "processed_event": event_type,
         "order_confirmation": order_confirmation_result,
         "repeat_followup": repeat_followup_result,
+        "fresh_followup": fresh_followup_result,
     }
 
 
@@ -849,6 +851,55 @@ def _handle_repeat_followup_callback(task, payload: dict, event_type_lower: str)
     except Exception as exc:
         create_error("Repeat Follow Up Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
         return {"status": "failed", "error": str(exc)}
+
+
+def _handle_fresh_followup_callback(task, payload: dict, event_type_lower: str) -> dict | None:
+    if task.channel != "Voice":
+        return None
+    if event_type_lower not in {"room_finished", "call_ended", "participant_left", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
+        return None
+    workflow_name = _fresh_followup_workflow_for_task(task)
+    if not workflow_name:
+        return None
+    try:
+        from confluence_ai.services import fresh_followup
+
+        notes = (
+            payload.get("outcome")
+            or payload.get("notes")
+            or payload.get("summary")
+            or payload.get("transcript_summary")
+            or payload.get("transcript")
+            or payload.get("text")
+            or payload.get("transcript_text")
+            or ""
+        )
+        outcome = payload.get("fresh_followup_outcome") or payload.get("outcome")
+        if event_type_lower in {"failed", "room_failed", "call_failed"}:
+            outcome = outcome or "missed"
+            notes = notes or payload.get("error") or payload.get("error_message") or "Fresh follow-up voice call failed."
+        elif not notes and event_type_lower in {"room_finished", "call_ended", "participant_left", "completed"}:
+            return fresh_followup.wait_for_voice_transcript(
+                workflow_name,
+                "Voice call ended; waiting for transcript before scheduling the next fresh follow-up agent.",
+            )
+
+        return fresh_followup.handle_voice_result(
+            workflow=workflow_name,
+            task=task.name,
+            outcome=outcome,
+            notes=notes,
+            result=payload,
+        )
+    except Exception as exc:
+        create_error("Fresh Follow Up Voice Callback", str(exc), source="livekit", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
+
+
+def _fresh_followup_workflow_for_task(task) -> str | None:
+    if task.external_record_type == "AI Fresh Follow Up Workflow" and task.external_record_id:
+        return task.external_record_id
+    return frappe.db.get_value("AI Fresh Follow Up Workflow Agent", {"task": task.name}, "parent")
 
 
 def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enabled: bool = False) -> None:

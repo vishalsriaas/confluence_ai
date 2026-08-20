@@ -81,6 +81,116 @@ def start_from_event(payload: dict | list | None) -> dict:
     return queue_agent_call(workflow.name, 1)
 
 
+def maybe_start_from_task(task, payload: dict | None = None, context: dict | None = None) -> dict | None:
+    """Attach a normal voice task as Agent 1 of a fresh follow-up workflow.
+
+    This keeps the first call on the normal Vobiz/LiveKit start path and only
+    uses Fresh Follow Up to schedule the later agents after Agent 1 completes.
+    """
+    if isinstance(task, str):
+        if not frappe.db.exists("AI Task", task):
+            return None
+        task = frappe.get_doc("AI Task", task)
+
+    if not task or task.channel != "Voice":
+        return None
+
+    if task.external_record_type in {WORKFLOW, "AI Repeat Follow Up Workflow", "Order Confirmation Workflow"}:
+        return None
+
+    agent_name = task.assigned_agent or task.target_agent
+    if not agent_name or not frappe.db.exists("AI Agent", agent_name):
+        return None
+
+    company = task.company or frappe.db.get_value("AI Agent", agent_name, "company")
+    if not company:
+        return None
+
+    settings = _settings_for_payload({"company": company})
+    if not settings:
+        return None
+
+    plan = _settings_agent_plan(settings)
+    if not plan or plan[0].get("agent") != agent_name:
+        return None
+
+    existing_parent = frappe.db.get_value(WORKFLOW_AGENT, {"task": task.name}, "parent")
+    if existing_parent:
+        return {"status": "duplicate", "workflow": existing_parent, "task": task.name}
+
+    task_context = parse_json_object(task.context_json, "Task Context JSON") if task.context_json else {}
+    source_payload = {}
+    for item in (payload or {}, context or {}, task_context):
+        if isinstance(item, dict):
+            source_payload.update(item)
+    source_payload["company"] = company
+    source_payload.setdefault("task", task.name)
+    source_payload.setdefault("source_reference_type", task.external_record_type or "AI Task")
+    source_payload.setdefault("source_reference_name", task.external_record_id or task.name)
+    if task.call_uuid:
+        source_payload.setdefault("call_uuid", task.call_uuid)
+
+    normalized = _normalize_payload(source_payload, settings)
+    if not normalized.get("phone"):
+        return {"status": "ignored", "reason": "missing_phone", "task": task.name}
+
+    base_idem = task.idempotency_key or task.call_uuid or task.name
+    idem_key = f"fresh-followup:{base_idem}"
+    existing = frappe.db.exists(WORKFLOW, {"idempotency_key": idem_key})
+    if existing:
+        return {"status": "duplicate", "workflow": existing, "idempotency_key": idem_key, "task": task.name}
+
+    workflow = frappe.new_doc(WORKFLOW)
+    deadline = task.deadline or add_to_date(now_datetime(), minutes=_safe_int(settings.voice_call_timeout_minutes, 5), as_datetime=True)
+    workflow.update(
+        {
+            "company": settings.company,
+            "enabled": 1,
+            "status": "Queued",
+            "settings": settings.name,
+            "idempotency_key": idem_key,
+            "customer_name": normalized.get("customer_name"),
+            "customer_phone": normalized.get("phone"),
+            "source_reference_type": normalized.get("source_reference_type") or task.external_record_type or "AI Task",
+            "source_reference_name": normalized.get("source_reference_name") or task.external_record_id or task.name,
+            "current_agent_no": 1,
+            "next_agent_no": 1,
+            "next_call_time": deadline,
+            "active_call_timeout_at": deadline,
+            "timer_status": "Agent 1 running from normal Vobiz/LiveKit task.",
+            "voice_task_template": settings.voice_task_template,
+            "livekit_channel_account_fallback": settings.livekit_channel_account_fallback,
+            "voice_call_timeout_minutes": _safe_int(settings.voice_call_timeout_minutes, 5),
+            "source_payload_json": as_json(source_payload),
+            "context_json": as_json(normalized),
+            "task_history_json": "[]",
+        }
+    )
+
+    for agent_no, row in enumerate(plan, start=1):
+        workflow.append(
+            "agents",
+            {
+                "enabled": 1,
+                "agent_no": agent_no,
+                "agent": row["agent"],
+                "status": "Queued" if agent_no == 1 else "Pending",
+                "task": task.name if agent_no == 1 else None,
+                "scheduled_at": now_datetime() if agent_no == 1 else None,
+                "attempt_count": 1 if agent_no == 1 else 0,
+                "followup_after_value": row["followup_after_value"],
+                "followup_after_unit": row["followup_after_unit"],
+                "max_attempts": row["max_attempts"],
+                "retry_after_value": row["retry_after_value"],
+                "retry_after_unit": row["retry_after_unit"],
+            },
+        )
+
+    _append_task_history(workflow, 1, 1, task.name, "attached")
+    workflow.insert(ignore_permissions=True)
+    return {"status": "attached", "workflow": workflow.name, "agent_no": 1, "task": task.name}
+
+
 def queue_agent_call(workflow_name: str, agent_no: int | None = None) -> dict:
     with _workflow_lock(workflow_name):
         workflow = frappe.get_doc(WORKFLOW, workflow_name)
@@ -221,6 +331,19 @@ def handle_voice_result(
     doc.save(ignore_permissions=True)
     frappe.db.commit()
     return {"status": "completed", "workflow": doc.name, "agent_no": agent_no, "next": next_result}
+
+
+def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> dict:
+    doc = frappe.get_doc(WORKFLOW, workflow_name)
+    if doc.status in FINAL_STATES:
+        return {"status": "ignored", "reason": "final_state", "workflow": doc.name}
+    if notes:
+        doc.timer_status = notes
+    doc.active_call_timeout_at = None
+    doc.timer_status = doc.timer_status or "Call completed; waiting for provider transcript/outcome."
+    doc.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"status": "waiting_for_transcript", "workflow": doc.name}
 
 
 def mark_call_missed(workflow: str, notes: str | None = None, task: str | None = None) -> dict:

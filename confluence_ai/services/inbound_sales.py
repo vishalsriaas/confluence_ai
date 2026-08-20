@@ -8,7 +8,7 @@ from confluence_ai.services.dispatcher import refresh_batch_counts
 from confluence_ai.services.livekit import build_voice_metadata
 from confluence_ai.services.sales_disease_router import apply_sales_route_context, resolve_inbound_sales_route
 from confluence_ai.services.sales_context import enrich_sales_context
-from confluence_ai.services.utils import as_json, now
+from confluence_ai.services.utils import as_json, create_error, now
 
 
 INBOUND_EVENT = "inbound-sales-call"
@@ -102,6 +102,7 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
     context.pop("inbound_sales_context_deferred", None)
     task.context_json = as_json(context)
     task.save(ignore_permissions=True)
+    fresh_followup_result = _maybe_start_fresh_followup_from_task(task, payload, context)
 
     attempt = frappe.new_doc("AI Task Attempt")
     attempt.update(
@@ -143,7 +144,18 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
         "channel_account": selection.get("channel_account"),
         "call_log": call_log,
         "metadata": metadata,
+        "fresh_followup": fresh_followup_result,
     }
+
+
+def _maybe_start_fresh_followup_from_task(task, payload: dict, context: dict) -> dict | None:
+    try:
+        from confluence_ai.services import fresh_followup
+
+        return fresh_followup.maybe_start_from_task(task, payload=payload, context=context)
+    except Exception as exc:
+        create_error("Fresh Follow Up Attach", str(exc), source="inbound_sales", task=task.name, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _attach_vobiz_payload_to_existing_task(task, payload: dict, selection: dict, idem_key: str | None = None) -> None:
