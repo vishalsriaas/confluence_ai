@@ -404,6 +404,7 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
         doc_data = {}
         for m in tool.fields_to_write:
             doc_data[m.client_field] = resolve_mapping_value(m, arguments)
+        doc_data = resolve_patient_for_encounter_create(tool, doc_data, arguments)
 
         url = urljoin(server_url.rstrip("/") + "/", f"api/resource/{client_doctype}")
         response = requests.post(url, headers=headers, json=doc_data, timeout=30)
@@ -832,6 +833,62 @@ def resolve_mapping_value(mapping: "frappe.Document", arguments: dict):
             return frappe.utils.now()
         return mapping.source_value
     return None
+
+
+def resolve_patient_for_encounter_create(tool: "frappe.Document", doc_data: dict, arguments: dict) -> dict:
+    """Resolve/create remote Patient before creating Patient Encounter.
+
+    Some ERPs require the mandatory `patient` link even when the caller only
+    provides a mobile number. Keep this generic MCP behavior local to Patient
+    Encounter create tools so the agent still calls only one MCP.
+    """
+    if (tool.operation_type or "Read") != "Create" or tool.client_doctype != "Patient Encounter":
+        return doc_data
+    if doc_data.get("patient"):
+        return doc_data
+    if not tool.server:
+        return doc_data
+
+    phone = (
+        arguments.get("phone")
+        or arguments.get("customer_phone")
+        or arguments.get("mobile")
+        or doc_data.get("sr_pe_mobile")
+        or doc_data.get("mobile")
+        or doc_data.get("phone")
+    )
+    customer_name = (
+        arguments.get("customer_name")
+        or arguments.get("patient_name")
+        or arguments.get("name")
+        or doc_data.get("patient_name")
+        or "Unknown"
+    )
+    concern = (
+        arguments.get("disease_or_concern")
+        or arguments.get("concern")
+        or arguments.get("interest")
+        or doc_data.get("sr_notes")
+        or ""
+    )
+
+    from confluence_ai.services import sales_context
+
+    patient_result = sales_context._remote_find_or_create_patient(
+        tool.server,
+        customer_name=customer_name,
+        phone=phone,
+        concern=concern,
+        patient=arguments.get("patient") or arguments.get("patient_id"),
+    )
+    if not patient_result.get("ok"):
+        frappe.throw(patient_result.get("error") or "Could not resolve Patient before Patient Encounter create.")
+
+    patient = patient_result.get("patient")
+    if not patient:
+        frappe.throw("Could not resolve Patient before Patient Encounter create.")
+    doc_data["patient"] = patient
+    return doc_data
 
 
 def log_mcp_error(
