@@ -341,6 +341,11 @@ def handle_voice_result(
     if not row:
         frappe.throw("Fresh follow-up agent row not found.")
 
+    agent_no = int(row.agent_no or row.idx or 1)
+    attempt_no = _safe_int(row.attempt_count, 0)
+    transcript_text = transcript or _task_transcript(task) or notes or ""
+    _store_row_transcript(row, agent_no, attempt_no, transcript_text)
+
     outcome_key = str(outcome or "").strip().lower()
     if outcome_key in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or transcript or outcome, task=task)
@@ -352,15 +357,11 @@ def handle_voice_result(
             task=task,
         )
 
-    transcript_text = transcript or notes or _task_transcript(task) or ""
-    if transcript_text:
-        row.transcript = transcript_text
     row.status = "Completed"
     row.last_notes = notes or ""
     if task and frappe.db.exists("AI Task", task):
         frappe.db.set_value("AI Task", task, {"status": "Completed", "last_error": ""}, update_modified=True)
 
-    agent_no = int(row.agent_no or row.idx or 1)
     doc.active_call_timeout_at = None
     doc.timer_status = f"Agent {agent_no} completed."
     decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
@@ -411,6 +412,7 @@ def mark_call_missed(workflow: str, notes: str | None = None, task: str | None =
 
     agent_no = int(row.agent_no or row.idx or 1)
     attempts = _safe_int(row.attempt_count, 0)
+    _store_row_transcript(row, agent_no, attempts, _task_transcript(task_name))
     max_attempts = max(1, _safe_int(row.max_attempts, 1))
     row.last_notes = notes or ""
     _append_task_history(doc, agent_no, attempts, task_name, "missed", notes=notes)
@@ -559,6 +561,11 @@ def _workflow_context(workflow, agent_no: int) -> dict:
         for row in workflow.agents
         if row.enabled and _safe_int(row.agent_no or row.idx, 0) < agent_no and row.transcript
     }
+    prior_call_transcripts = {
+        f"agent_{int(row.agent_no or row.idx)}": row.transcript
+        for row in workflow.agents
+        if row.enabled and _safe_int(row.agent_no or row.idx, 0) <= agent_no and row.transcript
+    }
     base_context.update(
         {
             "event": "fresh_followup",
@@ -572,7 +579,8 @@ def _workflow_context(workflow, agent_no: int) -> dict:
             "source_reference_type": workflow.source_reference_type,
             "source_reference_name": workflow.source_reference_name,
             "previous_agent_transcripts": previous_transcripts,
-            "previous_transcript_summary": _compact_transcripts(previous_transcripts),
+            "prior_call_transcripts": prior_call_transcripts,
+            "previous_transcript_summary": _compact_transcripts(prior_call_transcripts),
             "fresh_followup_outcome_contract": _fresh_followup_outcome_contract(),
             "minimum_connected_seconds": workflow.get("minimum_connected_seconds") or 20,
             "voice_channel_account": "",
@@ -876,6 +884,18 @@ def _task_transcript(task_name: str | None) -> str:
         return task.transcript
     result = parse_json_object(task.result_json, "Task Result JSON") if task.result_json else {}
     return _clean_text(result.get("transcript") or result.get("notes") or result.get("summary"))
+
+
+def _store_row_transcript(row, agent_no: int, attempt: int, transcript: str | None) -> None:
+    text = _clean_text(transcript)
+    if not text:
+        return
+    existing = str(row.transcript or "")
+    if text in existing:
+        return
+    header = f"Agent {agent_no} attempt {attempt or 1} transcript"
+    entry = f"{header}:\n{text}"
+    row.transcript = f"{existing.rstrip()}\n\n{entry}".strip() if existing else entry
 
 
 def _append_task_history(workflow, agent_no: int, attempt: int, task: str | None, status: str, notes: str | None = None) -> None:
