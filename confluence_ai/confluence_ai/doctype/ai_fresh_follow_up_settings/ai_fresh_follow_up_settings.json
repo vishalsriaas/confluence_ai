@@ -12,6 +12,7 @@
   "voice_task_template",
   "livekit_channel_account_fallback",
   "voice_call_timeout_minutes",
+  "minimum_connected_seconds",
   "agents_section",
   "agents",
   "payload_mapping_section",
@@ -62,6 +63,13 @@
    "fieldname": "voice_call_timeout_minutes",
    "fieldtype": "Int",
    "label": "Voice Call Timeout Minutes"
+  },
+  {
+   "default": "20",
+   "description": "If a call connects but ends before this many seconds, it is treated as not enough conversation and the same agent retries instead of moving to the next follow-up agent.",
+   "fieldname": "minimum_connected_seconds",
+   "fieldtype": "Int",
+   "label": "Minimum Connected Seconds"
   },
   {
    "fieldname": "agents_section",

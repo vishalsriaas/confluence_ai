@@ -28,6 +28,7 @@
   "voice_task_template",
   "livekit_channel_account_fallback",
   "voice_call_timeout_minutes",
+  "minimum_connected_seconds",
   "json_section",
   "source_payload_json",
   "context_json",
@@ -177,6 +178,12 @@
    "fieldname": "voice_call_timeout_minutes",
    "fieldtype": "Int",
    "label": "Voice Call Timeout Minutes",
+   "read_only": 1
+  },
+  {
+   "fieldname": "minimum_connected_seconds",
+   "fieldtype": "Int",
+   "label": "Minimum Connected Seconds",
    "read_only": 1
   },
   {

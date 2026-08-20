@@ -7,6 +7,7 @@
  "field_order": [
   "enabled",
   "agent",
+  "followup_timing_mode",
   "followup_after_value",
   "followup_after_unit",
   "max_attempts",
@@ -28,6 +29,15 @@
    "label": "Agent",
    "options": "AI Agent",
    "reqd": 1
+  },
+  {
+   "default": "Manual",
+   "description": "Manual uses the fixed Follow Up After value. Agent uses the structured next_follow_up_at returned by the completed agent, with manual value as fallback.",
+   "fieldname": "followup_timing_mode",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Follow Up Timing",
+   "options": "Manual\nAgent"
   },
   {
    "default": "0",

@@ -12,8 +12,10 @@
   "task",
   "scheduled_at",
   "attempt_count",
+  "followup_timing_mode",
   "followup_after_value",
   "followup_after_unit",
+  "suggested_next_call_time",
   "max_attempts",
   "retry_after_value",
   "retry_after_unit",
@@ -49,7 +51,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Pending\nScheduled\nQueued\nCompleted\nMissed\nPending Config\nSkipped"
+   "options": "Pending\nScheduled\nQueued\nCompleted\nMissed\nPending Config\nSkipped\nCancelled"
   },
   {
    "fieldname": "task",
@@ -75,6 +77,14 @@
    "read_only": 1
   },
   {
+   "default": "Manual",
+   "fieldname": "followup_timing_mode",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Follow Up Timing",
+   "read_only": 1
+  },
+  {
    "default": "0",
    "fieldname": "followup_after_value",
    "fieldtype": "Int",
@@ -87,6 +97,13 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Follow Up Unit",
+   "read_only": 1
+  },
+  {
+   "fieldname": "suggested_next_call_time",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Suggested Next Call Time",
    "read_only": 1
   },
   {

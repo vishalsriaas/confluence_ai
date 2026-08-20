@@ -30,6 +30,14 @@ FOLLOWUP_REASON_KEYS = {
     "fresh_followup_reason",
     "reason",
 }
+FOLLOWUP_NEXT_TIME_KEYS = {
+    "next_follow_up_at",
+    "next_followup_at",
+    "next_call_time",
+    "next_follow_up_time",
+    "follow_up_at",
+    "followup_at",
+}
 ENCOUNTER_CREATE_OPERATIONS = {
     "create_draft_patient_encounter_from_sales",
     "mcp_create_draft_patient_encounter_from_sales",
@@ -72,6 +80,7 @@ def start_from_event(payload: dict | list | None) -> dict:
             "voice_task_template": settings.voice_task_template,
             "livekit_channel_account_fallback": settings.livekit_channel_account_fallback,
             "voice_call_timeout_minutes": _safe_int(settings.voice_call_timeout_minutes, 5),
+            "minimum_connected_seconds": _safe_int(settings.get("minimum_connected_seconds"), 20),
             "source_payload_json": as_json(payload),
             "context_json": as_json(context),
             "task_history_json": "[]",
@@ -85,6 +94,7 @@ def start_from_event(payload: dict | list | None) -> dict:
                 "agent_no": agent_no,
                 "agent": row["agent"],
                 "status": "Pending",
+                "followup_timing_mode": row["followup_timing_mode"],
                 "followup_after_value": row["followup_after_value"],
                 "followup_after_unit": row["followup_after_unit"],
                 "max_attempts": row["max_attempts"],
@@ -179,6 +189,7 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
             "voice_task_template": settings.voice_task_template,
             "livekit_channel_account_fallback": settings.livekit_channel_account_fallback,
             "voice_call_timeout_minutes": _safe_int(settings.voice_call_timeout_minutes, 5),
+            "minimum_connected_seconds": _safe_int(settings.get("minimum_connected_seconds"), 20),
             "source_payload_json": as_json(source_payload),
             "context_json": as_json(normalized),
             "task_history_json": "[]",
@@ -196,6 +207,7 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
                 "task": task.name if agent_no == 1 else None,
                 "scheduled_at": now_datetime() if agent_no == 1 else None,
                 "attempt_count": 1 if agent_no == 1 else 0,
+                "followup_timing_mode": row["followup_timing_mode"],
                 "followup_after_value": row["followup_after_value"],
                 "followup_after_unit": row["followup_after_unit"],
                 "max_attempts": row["max_attempts"],
@@ -333,6 +345,13 @@ def handle_voice_result(
     if outcome_key in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or transcript or outcome, task=task)
 
+    if _call_was_too_short(doc, task=task, result=result):
+        return mark_call_missed(
+            doc.name,
+            f"Connected call was shorter than minimum {doc.get('minimum_connected_seconds') or 20} seconds; retry same agent.",
+            task=task,
+        )
+
     transcript_text = transcript or notes or _task_transcript(task) or ""
     if transcript_text:
         row.transcript = transcript_text
@@ -356,7 +375,7 @@ def handle_voice_result(
     )
     _append_task_history(doc, agent_no, _safe_int(row.attempt_count, 0), task, "completed")
     if decision.get("follow_up_required"):
-        next_result = _schedule_next_agent(doc, agent_no)
+        next_result = _schedule_next_agent(doc, agent_no, decision=decision)
     else:
         next_result = _complete_without_next_followup(doc, agent_no, decision)
     doc.save(ignore_permissions=True)
@@ -468,6 +487,7 @@ def _settings_agent_plan(settings) -> list[dict]:
         plan.append(
             {
                 "agent": row.agent,
+                "followup_timing_mode": row.get("followup_timing_mode") or "Manual",
                 "followup_after_value": _safe_int(row.followup_after_value, 0),
                 "followup_after_unit": row.followup_after_unit or "Minutes",
                 "max_attempts": max(1, _safe_int(row.max_attempts, 1)),
@@ -478,7 +498,7 @@ def _settings_agent_plan(settings) -> list[dict]:
     return plan
 
 
-def _schedule_next_agent(workflow, completed_agent_no: int) -> dict:
+def _schedule_next_agent(workflow, completed_agent_no: int, decision: dict | None = None) -> dict:
     next_row = _next_agent_row(workflow, completed_agent_no)
     if not next_row:
         workflow.status = "Completed"
@@ -496,13 +516,15 @@ def _schedule_next_agent(workflow, completed_agent_no: int) -> dict:
         next_row.status = "Pending Config"
         return {"status": "pending_config", "agent_no": next_agent_no}
 
-    scheduled_at = _add_duration(now_datetime(), next_row.followup_after_value, next_row.followup_after_unit, default_value=0, default_unit="Minutes")
+    scheduled_at = _resolve_next_call_time(next_row, decision)
     workflow.status = "Scheduled"
     workflow.next_agent_no = next_agent_no
     workflow.next_call_time = scheduled_at
     workflow.timer_status = f"Agent {next_agent_no} scheduled for {scheduled_at}."
     next_row.status = "Scheduled"
     next_row.scheduled_at = scheduled_at
+    if decision and decision.get("next_follow_up_at"):
+        next_row.suggested_next_call_time = decision.get("next_follow_up_at")
     return {"status": "scheduled", "agent_no": next_agent_no, "scheduled_at": scheduled_at}
 
 
@@ -552,6 +574,7 @@ def _workflow_context(workflow, agent_no: int) -> dict:
             "previous_agent_transcripts": previous_transcripts,
             "previous_transcript_summary": _compact_transcripts(previous_transcripts),
             "fresh_followup_outcome_contract": _fresh_followup_outcome_contract(),
+            "minimum_connected_seconds": workflow.get("minimum_connected_seconds") or 20,
             "voice_channel_account": "",
             "livekit_channel_account_fallback": workflow.livekit_channel_account_fallback,
         }
@@ -605,6 +628,20 @@ def _complete_without_next_followup(workflow, completed_agent_no: int, decision:
     return {"status": "completed", "reason": reason}
 
 
+def _resolve_next_call_time(next_row, decision: dict | None):
+    mode = str(next_row.get("followup_timing_mode") or "Manual").strip().lower()
+    suggested = _parse_next_call_time((decision or {}).get("next_follow_up_at")) if mode == "agent" else None
+    if suggested:
+        return suggested
+    return _add_duration(
+        now_datetime(),
+        next_row.followup_after_value,
+        next_row.followup_after_unit,
+        default_value=0,
+        default_unit="Minutes",
+    )
+
+
 def _fresh_followup_decision(result: dict | None, task: str | None = None, outcome: str | None = None) -> dict:
     structured = _extract_structured_followup_decision(result if isinstance(result, dict) else {})
     if structured is None and task:
@@ -644,9 +681,11 @@ def _extract_structured_followup_decision(source: Any) -> dict | None:
         if required_marker is None:
             continue
         reason = _clean_text(_first_existing_value(found, FOLLOWUP_REASON_KEYS))
+        next_follow_up_at = _parse_next_call_time(_first_existing_value(found, FOLLOWUP_NEXT_TIME_KEYS))
         return {
             "follow_up_required": _truthy(required_marker),
             "reason": reason or ("follow_up_required" if _truthy(required_marker) else "follow_up_not_required"),
+            "next_follow_up_at": next_follow_up_at,
             "source": "structured_outcome",
         }
     return None
@@ -707,9 +746,58 @@ def _fresh_followup_outcome_contract() -> dict:
             "follow_up_required": "boolean",
             "follow_up_reason": "later_requested|encounter_not_created|issue|completed",
             "follow_up_summary": "short customer-safe reason",
+            "next_follow_up_at": "required only when follow_up_required is true and customer gave a time; use site timezone datetime like YYYY-MM-DD HH:mm:ss",
         },
         "rule": "Set follow_up_required true only when the next follow-up call is needed. If work is completed, set false.",
     }
+
+
+def _call_was_too_short(workflow, *, task: str | None = None, result: dict | None = None) -> bool:
+    minimum = max(0, _safe_int(workflow.get("minimum_connected_seconds"), 20))
+    if not minimum:
+        return False
+    duration = _duration_seconds_from_result(result)
+    if duration is None and task and frappe.db.exists("AI Task", task):
+        task_doc = frappe.get_doc("AI Task", task)
+        duration = _safe_int(task_doc.get("duration"), 0) or None
+        if duration is None and task_doc.result_json:
+            duration = _duration_seconds_from_result(parse_json_object(task_doc.result_json, "Task Result JSON"))
+    return duration is not None and 0 < duration < minimum
+
+
+def _duration_seconds_from_result(result: Any) -> int | None:
+    if not isinstance(result, dict):
+        return None
+    value = (
+        result.get("duration_sec")
+        or result.get("duration_seconds")
+        or result.get("Duration")
+        or result.get("duration")
+        or result.get("duration_ms")
+    )
+    if value is None and isinstance(result.get("last_vobiz_payload"), dict):
+        return _duration_seconds_from_result(result["last_vobiz_payload"])
+    if value is None and isinstance(result.get("last_livekit_payload"), dict):
+        return _duration_seconds_from_result(result["last_livekit_payload"])
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if "ms" in str(value).lower() or number > 5000:
+        return int(number / 1000)
+    return int(number)
+
+
+def _parse_next_call_time(value: Any):
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+    try:
+        return get_datetime(cleaned)
+    except Exception:
+        return None
 
 
 def _task_result_json(task: str | None) -> dict:
