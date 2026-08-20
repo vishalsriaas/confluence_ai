@@ -14,6 +14,15 @@
   "system_prompt",
   "language",
   "audio_name",
+  "voice_environment_section",
+  "ambient_sound_enabled",
+  "ambient_sound",
+  "ambient_sound_volume",
+  "applied_voice_environment_section",
+  "applied_ambient_sound_enabled",
+  "applied_ambient_sound",
+  "applied_ambient_sound_volume",
+  "ambient_sound_last_applied_at",
   "primary_provider",
   "fallback_provider",
   "agent_type",
@@ -92,6 +101,66 @@
    "fieldname": "audio_name",
    "fieldtype": "Data",
    "label": "Audio Name"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "voice_environment_section",
+   "fieldtype": "Section Break",
+   "label": "Voice Environment Draft"
+  },
+  {
+   "default": "0",
+   "description": "Add a low-volume ambience track behind the agent voice. Keep disabled unless tested for this agent.",
+   "fieldname": "ambient_sound_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Background Sound"
+  },
+  {
+   "default": "Quiet office",
+   "depends_on": "ambient_sound_enabled",
+   "fieldname": "ambient_sound",
+   "fieldtype": "Select",
+   "label": "Background Sound",
+   "options": "Quiet office\nCall center\nCity traffic"
+  },
+  {
+   "default": "5",
+   "depends_on": "ambient_sound_enabled",
+   "description": "Recommended 3 to 8. Higher volume can make telephony calls less clear.",
+   "fieldname": "ambient_sound_volume",
+   "fieldtype": "Float",
+   "label": "Background Volume %"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "applied_voice_environment_section",
+   "fieldtype": "Section Break",
+   "label": "Applied Voice Environment"
+  },
+  {
+   "default": "0",
+   "fieldname": "applied_ambient_sound_enabled",
+   "fieldtype": "Check",
+   "label": "Applied Background Sound Enabled",
+   "read_only": 1
+  },
+  {
+   "fieldname": "applied_ambient_sound",
+   "fieldtype": "Data",
+   "label": "Applied Background Sound",
+   "read_only": 1
+  },
+  {
+   "fieldname": "applied_ambient_sound_volume",
+   "fieldtype": "Float",
+   "label": "Applied Background Volume %",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ambient_sound_last_applied_at",
+   "fieldtype": "Datetime",
+   "label": "Background Sound Last Applied At",
+   "read_only": 1
   },
   {
    "default": "Gemini",

@@ -219,6 +219,21 @@ def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
     )
 
 
+def _voice_environment_metadata(agent) -> dict:
+    if not agent or not agent.get("applied_ambient_sound_enabled"):
+        return {"ambient_sound_enabled": 0}
+    sound = str(agent.get("applied_ambient_sound") or "Quiet office").strip() or "Quiet office"
+    try:
+        volume = float(agent.get("applied_ambient_sound_volume") or 5)
+    except Exception:
+        volume = 5.0
+    return {
+        "ambient_sound_enabled": 1,
+        "ambient_sound": sound,
+        "ambient_sound_volume": max(0.0, min(volume, 20.0)),
+    }
+
+
 def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
 
@@ -354,11 +369,13 @@ def build_voice_metadata(task_name: str, payload: dict | None = None) -> dict:
     voice_context = _voice_metadata_context(payload)
     voice_context["livekit_diagnostics_enabled"] = 1 if _livekit_diagnostics_enabled() else 0
     voice_context["livekit_diagnostics_max_events"] = _livekit_diagnostics_max_events()
+    voice_context["voice_environment"] = _voice_environment_metadata(agent)
 
     metadata = {
         "task": task.name,
         "agent": agent_name,
         "audio_name": audio_name,
+        "voice_environment": voice_context["voice_environment"],
         "system_prompt": system_prompt,
         "personality": personality,
         "context": voice_context,

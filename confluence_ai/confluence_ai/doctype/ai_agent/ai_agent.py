@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import frappe
 from frappe.model.document import Document
+from frappe.utils import flt, now_datetime
 
 from confluence_ai.services.utils import parse_json_object
+
+AMBIENT_SOUND_OPTIONS = {"Quiet office", "Call center", "City traffic"}
 
 
 class AIAgent(Document):
@@ -58,3 +61,44 @@ class AIAgent(Document):
             instructions.append(tool_info)
             
         return base_prompt + "\n".join(instructions)
+
+
+def _ambient_sound_value(value: object) -> str:
+    sound = str(value or "Quiet office").strip() or "Quiet office"
+    if sound not in AMBIENT_SOUND_OPTIONS:
+        frappe.throw(f"Background Sound must be one of: {', '.join(sorted(AMBIENT_SOUND_OPTIONS))}")
+    return sound
+
+
+def _ambient_volume_value(value: object) -> float:
+    volume = flt(value or 5)
+    if volume <= 0 or volume > 20:
+        frappe.throw("Background Volume % must be greater than 0 and no more than 20.")
+    return volume
+
+
+@frappe.whitelist()
+def apply_voice_environment_settings(agent_name: str) -> dict:
+    if not agent_name:
+        frappe.throw("AI Agent is required.")
+    if not frappe.has_permission("AI Agent", "write", doc=agent_name):
+        frappe.throw("Not permitted to apply voice environment settings.", frappe.PermissionError)
+
+    doc = frappe.get_doc("AI Agent", agent_name)
+    enabled = 1 if doc.get("ambient_sound_enabled") else 0
+    sound = _ambient_sound_value(doc.get("ambient_sound"))
+    volume = _ambient_volume_value(doc.get("ambient_sound_volume"))
+
+    doc.applied_ambient_sound_enabled = enabled
+    doc.applied_ambient_sound = sound if enabled else ""
+    doc.applied_ambient_sound_volume = volume if enabled else 0
+    doc.ambient_sound_last_applied_at = now_datetime()
+    doc.save()
+
+    return {
+        "agent": doc.name,
+        "enabled": bool(enabled),
+        "background_sound": doc.applied_ambient_sound,
+        "background_volume": doc.applied_ambient_sound_volume,
+        "applied_at": doc.ambient_sound_last_applied_at,
+    }

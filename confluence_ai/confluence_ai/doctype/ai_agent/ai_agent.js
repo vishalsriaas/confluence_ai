@@ -3,6 +3,37 @@
 
 frappe.ui.form.on('AI Agent', {
 	refresh: function(frm) {
+		if (!frm.is_new()) {
+			frm.add_custom_button(__('Apply Voice Settings'), function() {
+				const apply_settings = () => {
+					frappe.call({
+						method: 'confluence_ai.confluence_ai.doctype.ai_agent.ai_agent.apply_voice_environment_settings',
+						args: {
+							agent_name: frm.doc.name
+						},
+						freeze: true,
+						freeze_message: __('Applying voice settings...'),
+						callback: function(r) {
+							const result = r.message || {};
+							frappe.show_alert({
+								message: result.enabled
+									? __('Voice settings applied: {0} at {1}%', [result.background_sound, result.background_volume])
+									: __('Voice background sound disabled for this agent'),
+								indicator: 'green'
+							});
+							frm.reload_doc();
+						}
+					});
+				};
+
+				if (frm.is_dirty()) {
+					frm.save().then(apply_settings);
+				} else {
+					apply_settings();
+				}
+			}, __('Voice'));
+		}
+
 		if (frm.is_new()) {
 			frm.add_custom_button(__('Clone from Existing'), function() {
 				const dialog = new frappe.ui.Dialog({
