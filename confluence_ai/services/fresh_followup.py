@@ -357,6 +357,14 @@ def handle_voice_result(
             task=task,
         )
 
+    decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
+    if decision.get("reason") == "no_structured_followup_outcome":
+        return mark_call_missed(
+            doc.name,
+            "Fresh follow-up outcome was not captured; retry same agent.",
+            task=task,
+        )
+
     row.status = "Completed"
     row.last_notes = notes or ""
     if task and frappe.db.exists("AI Task", task):
@@ -364,7 +372,6 @@ def handle_voice_result(
 
     doc.active_call_timeout_at = None
     doc.timer_status = f"Agent {agent_no} completed."
-    decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
     doc.result_json = as_json(
         {
             "outcome": outcome,
@@ -779,9 +786,15 @@ def _duration_seconds_from_result(result: Any) -> int | None:
     value = (
         result.get("duration_sec")
         or result.get("duration_seconds")
+        or result.get("transcription_duration_sec")
+        or result.get("transcription_duration_seconds")
+        or result.get("recording_duration_sec")
+        or result.get("recording_duration_seconds")
         or result.get("Duration")
+        or result.get("Billsec")
         or result.get("duration")
         or result.get("duration_ms")
+        or result.get("recording_duration_ms")
     )
     if value is None and isinstance(result.get("last_vobiz_payload"), dict):
         return _duration_seconds_from_result(result["last_vobiz_payload"])
