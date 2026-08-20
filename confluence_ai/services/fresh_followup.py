@@ -17,6 +17,23 @@ SETTINGS = "AI Fresh Follow Up Settings"
 
 FINAL_STATES = {"Completed", "Missed After Attempts", "Failed", "Cancelled"}
 MISSED_OUTCOMES = {"missed", "no_answer", "no answer", "busy", "failed", "timeout", "cancelled", "canceled"}
+FOLLOWUP_REQUIRED_KEYS = {
+    "follow_up_required",
+    "followup_required",
+    "fresh_followup_required",
+    "requires_follow_up",
+    "requires_followup",
+}
+FOLLOWUP_REASON_KEYS = {
+    "follow_up_reason",
+    "followup_reason",
+    "fresh_followup_reason",
+    "reason",
+}
+ENCOUNTER_CREATE_OPERATIONS = {
+    "create_draft_patient_encounter_from_sales",
+    "mcp_create_draft_patient_encounter_from_sales",
+}
 
 
 def start_from_event(payload: dict | list | None) -> dict:
@@ -133,6 +150,7 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
     normalized = _normalize_payload(source_payload, settings)
     if not normalized.get("phone"):
         return {"status": "ignored", "reason": "missing_phone", "task": task.name}
+    normalized["fresh_followup_outcome_contract"] = _fresh_followup_outcome_contract()
 
     base_idem = task.idempotency_key or task.call_uuid or task.name
     idem_key = f"fresh-followup:{base_idem}"
@@ -188,6 +206,7 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
 
     _append_task_history(workflow, 1, 1, task.name, "attached")
     workflow.insert(ignore_permissions=True)
+    _attach_outcome_contract_to_task(task.name, workflow.name)
     return {"status": "attached", "workflow": workflow.name, "agent_no": 1, "task": task.name}
 
 
@@ -325,9 +344,21 @@ def handle_voice_result(
     agent_no = int(row.agent_no or row.idx or 1)
     doc.active_call_timeout_at = None
     doc.timer_status = f"Agent {agent_no} completed."
-    doc.result_json = as_json(result or {"outcome": outcome, "notes": notes, "transcript": transcript_text})
+    decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
+    doc.result_json = as_json(
+        {
+            "outcome": outcome,
+            "notes": notes,
+            "transcript": transcript_text,
+            "raw_result": result or {},
+            "fresh_followup_decision": decision,
+        }
+    )
     _append_task_history(doc, agent_no, _safe_int(row.attempt_count, 0), task, "completed")
-    next_result = _schedule_next_agent(doc, agent_no)
+    if decision.get("follow_up_required"):
+        next_result = _schedule_next_agent(doc, agent_no)
+    else:
+        next_result = _complete_without_next_followup(doc, agent_no, decision)
     doc.save(ignore_permissions=True)
     frappe.db.commit()
     return {"status": "completed", "workflow": doc.name, "agent_no": agent_no, "next": next_result}
@@ -520,6 +551,7 @@ def _workflow_context(workflow, agent_no: int) -> dict:
             "source_reference_name": workflow.source_reference_name,
             "previous_agent_transcripts": previous_transcripts,
             "previous_transcript_summary": _compact_transcripts(previous_transcripts),
+            "fresh_followup_outcome_contract": _fresh_followup_outcome_contract(),
             "voice_channel_account": "",
             "livekit_channel_account_fallback": workflow.livekit_channel_account_fallback,
         }
@@ -557,6 +589,160 @@ def _next_agent_row(workflow, after_agent_no: int):
         if row.enabled and _safe_int(row.agent_no or row.idx, 0) > after_agent_no
     ]
     return sorted(candidates, key=lambda row: _safe_int(row.agent_no or row.idx, 0))[0] if candidates else None
+
+
+def _complete_without_next_followup(workflow, completed_agent_no: int, decision: dict) -> dict:
+    workflow.status = "Completed"
+    workflow.next_agent_no = 0
+    workflow.next_call_time = None
+    workflow.active_call_timeout_at = None
+    reason = decision.get("reason") or "follow_up_not_required"
+    workflow.final_reason = f"Agent {completed_agent_no} completed; no next follow-up scheduled ({reason})."
+    workflow.timer_status = workflow.final_reason
+    for row in workflow.get("agents") or []:
+        if row.enabled and _safe_int(row.agent_no or row.idx, 0) > completed_agent_no and row.status in {"Pending", "Scheduled"}:
+            row.status = "Cancelled"
+    return {"status": "completed", "reason": reason}
+
+
+def _fresh_followup_decision(result: dict | None, task: str | None = None, outcome: str | None = None) -> dict:
+    structured = _extract_structured_followup_decision(result if isinstance(result, dict) else {})
+    if structured is None and task:
+        structured = _extract_structured_followup_decision(_task_result_json(task))
+    if structured is None and task:
+        structured = _latest_structured_outcome_event(task)
+    if structured is not None:
+        return structured
+
+    encounter_status = _encounter_create_status(task)
+    if encounter_status == "Succeeded":
+        return {
+            "follow_up_required": False,
+            "reason": "encounter_created",
+            "source": "provider_event",
+        }
+    if encounter_status in {"Failed", "Timeout", "Rate Limited"}:
+        return {
+            "follow_up_required": True,
+            "reason": "encounter_not_created",
+            "source": "provider_event",
+        }
+
+    return {
+        "follow_up_required": False,
+        "reason": "no_structured_followup_outcome",
+        "source": "default",
+        "outcome": outcome or "",
+    }
+
+
+def _extract_structured_followup_decision(source: Any) -> dict | None:
+    if not isinstance(source, dict):
+        return None
+    for found in _walk_dicts(source):
+        required_marker = _first_existing_value(found, FOLLOWUP_REQUIRED_KEYS)
+        if required_marker is None:
+            continue
+        reason = _clean_text(_first_existing_value(found, FOLLOWUP_REASON_KEYS))
+        return {
+            "follow_up_required": _truthy(required_marker),
+            "reason": reason or ("follow_up_required" if _truthy(required_marker) else "follow_up_not_required"),
+            "source": "structured_outcome",
+        }
+    return None
+
+
+def _latest_structured_outcome_event(task: str) -> dict | None:
+    if not task:
+        return None
+    rows = frappe.get_all(
+        "AI Provider Event",
+        filters={"task": task, "operation": ["in", ["log_sales_call_outcome", "mcp_log_sales_call_outcome"]]},
+        fields=["request_json", "response_json"],
+        order_by="modified desc",
+        limit=3,
+    )
+    for row in rows:
+        for raw in (row.get("request_json"), row.get("response_json")):
+            parsed = parse_json_object(raw, "Fresh Follow Up Outcome Event") if raw else {}
+            decision = _extract_structured_followup_decision(parsed)
+            if decision:
+                decision["source"] = "provider_event_structured_outcome"
+                return decision
+    return None
+
+
+def _encounter_create_status(task: str | None) -> str:
+    if not task:
+        return ""
+    return (
+        frappe.db.get_value(
+            "AI Provider Event",
+            {"task": task, "operation": ["in", list(ENCOUNTER_CREATE_OPERATIONS)]},
+            "status",
+            order_by="modified desc",
+        )
+        or ""
+    )
+
+
+def _attach_outcome_contract_to_task(task_name: str, workflow_name: str) -> None:
+    if not task_name or not frappe.db.exists("AI Task", task_name):
+        return
+    task = frappe.get_doc("AI Task", task_name)
+    context = parse_json_object(task.context_json, "Task Context JSON") if task.context_json else {}
+    if not isinstance(context, dict):
+        context = {}
+    context["fresh_followup_workflow"] = workflow_name
+    context["fresh_followup_agent_no"] = 1
+    context["fresh_followup_outcome_contract"] = _fresh_followup_outcome_contract()
+    task.context_json = as_json(context)
+    task.save(ignore_permissions=True)
+
+
+def _fresh_followup_outcome_contract() -> dict:
+    return {
+        "required": True,
+        "fields": {
+            "follow_up_required": "boolean",
+            "follow_up_reason": "later_requested|encounter_not_created|issue|completed",
+            "follow_up_summary": "short customer-safe reason",
+        },
+        "rule": "Set follow_up_required true only when the next follow-up call is needed. If work is completed, set false.",
+    }
+
+
+def _task_result_json(task: str | None) -> dict:
+    if not task or not frappe.db.exists("AI Task", task):
+        return {}
+    raw = frappe.db.get_value("AI Task", task, "result_json")
+    parsed = parse_json_object(raw, "Task Result JSON") if raw else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_dicts(item)
+
+
+def _first_existing_value(source: dict, keys: set[str]) -> Any:
+    for key in keys:
+        if key in source:
+            return source.get(key)
+    return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _agent_row_for_task_or_status(workflow, task: str | None = None):
