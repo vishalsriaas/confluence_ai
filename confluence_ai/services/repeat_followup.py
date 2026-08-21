@@ -1185,7 +1185,13 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     doc = _find_workflow(workflow=workflow, task=task)
     if not doc:
         return {"status": "ignored", "reason": "no_active_workflow"}
+    transcript_sync = _sync_voice_call_context_from_task(doc, task, notes=notes)
+    notes = notes or transcript_sync.get("notes") or ""
     if doc.status in FINAL_STATES:
+        if transcript_sync.get("changed"):
+            doc.save(ignore_permissions=True)
+            frappe.db.commit()
+            return {"status": "synced_transcript", "workflow": doc.name, "call_log": doc.call_log}
         return {"status": "ignored", "reason": "final_state", "workflow": doc.name}
 
     normalized = _normalize_outcome(outcome)
@@ -1211,6 +1217,101 @@ def handle_voice_result(workflow: str | None = None, task: str | None = None, ou
     frappe.db.commit()
     schedule_result = schedule_agent_2(doc.name, real_conversation=True)
     return {"status": "unclear_logged", "workflow": doc.name, "agent_2": schedule_result}
+
+
+def _sync_voice_call_context_from_task(workflow, task_name: str | None = None, notes: str | None = None) -> dict:
+    task_name = task_name or workflow.voice_task
+    artifacts = _voice_task_artifacts(task_name)
+    call_log = artifacts.get("call_log") or ""
+    transcript = artifacts.get("transcript") or ""
+    summary = artifacts.get("summary") or ""
+    fallback_notes = _clean_text(notes)
+    notes_text = summary or _clean_text(transcript) or fallback_notes
+    changed = False
+
+    if call_log and workflow.call_log != call_log:
+        workflow.call_log = call_log
+        changed = True
+    if notes_text and not workflow.customer_summary:
+        workflow.customer_summary = notes_text[:4000]
+        changed = True
+
+    context_changed = _merge_previous_call_context(
+        workflow,
+        call_log=call_log,
+        summary=summary or workflow.customer_summary or fallback_notes,
+        transcript=transcript,
+    )
+    changed = changed or context_changed
+    return {"changed": changed, "notes": notes_text, "call_log": call_log}
+
+
+def _voice_task_artifacts(task_name: str | None) -> dict:
+    artifacts = {"call_log": "", "summary": "", "transcript": ""}
+    if not task_name:
+        return artifacts
+
+    if frappe.db.exists("AI Task", task_name):
+        task_doc = frappe.get_doc("AI Task", task_name)
+        artifacts["transcript"] = _clean_transcript_text(task_doc.get("transcript"))
+        result = parse_json_object(task_doc.result_json, "Task Result JSON") if task_doc.get("result_json") else {}
+        artifacts["summary"] = _clean_text(
+            result.get("transcript_summary")
+            or result.get("summary")
+            or result.get("notes")
+        )
+        if not artifacts["transcript"]:
+            artifacts["transcript"] = _clean_transcript_text(result.get("transcript") or result.get("transcript_text"))
+
+    call_logs = frappe.get_all(
+        "AI Call Log",
+        filters={"task": task_name},
+        fields=["name", "transcript_summary", "transcript"],
+        order_by="modified desc",
+        limit=1,
+    )
+    if call_logs:
+        row = call_logs[0]
+        artifacts["call_log"] = row.name
+        artifacts["summary"] = _clean_text(row.get("transcript_summary")) or artifacts["summary"]
+        artifacts["transcript"] = _clean_transcript_text(row.get("transcript")) or artifacts["transcript"]
+    return artifacts
+
+
+def _merge_previous_call_context(workflow, *, call_log: str = "", summary: str = "", transcript: str = "") -> bool:
+    summary = _clean_text(summary)
+    transcript = _clean_transcript_text(transcript)
+    if not (call_log or summary or transcript):
+        return False
+
+    context = parse_json_object(workflow.context_json, "Workflow Context JSON") if workflow.context_json else {}
+    previous = context.get("previous_agent_1_call")
+    if not isinstance(previous, dict):
+        previous = {}
+
+    changed = False
+    updates = {
+        "call_log": call_log or previous.get("call_log") or "",
+        "summary": summary or previous.get("summary") or "",
+        "transcript": (transcript or previous.get("transcript") or "")[:6000],
+    }
+    if previous != updates:
+        context["previous_agent_1_call"] = updates
+        changed = True
+
+    flat_updates = {
+        "previous_call_log": updates["call_log"],
+        "previous_call_summary": updates["summary"],
+        "previous_call_transcript": updates["transcript"],
+    }
+    for key, value in flat_updates.items():
+        if value and context.get(key) != value:
+            context[key] = value
+            changed = True
+
+    if changed:
+        workflow.context_json = as_json(context)
+    return changed
 
 
 def _is_simple_followup_mode(workflow) -> bool:
@@ -3431,6 +3532,9 @@ def _workflow_context(workflow) -> dict:
             "tracking_summary": _tracking_summary(parse_json_object(workflow.shipkia_result_json, "Shipkia Result JSON") if workflow.shipkia_result_json else {}),
             "medicine_summary": parse_json_object(workflow.medicine_summary_json, "Medicine Summary JSON") if workflow.medicine_summary_json else {},
             "diet_chart_summary": diet_summary,
+            "previous_call_log": workflow.call_log or context.get("previous_call_log") or "",
+            "previous_call_summary": workflow.customer_summary or context.get("previous_call_summary") or "",
+            "previous_call_transcript": context.get("previous_call_transcript") or "",
             "required_diet_script": _required_diet_script(department=patient_department, diet_summary=diet_summary),
             "voice_channel_account": workflow.voice_channel_account,
             "livekit_channel_account_fallback": workflow.livekit_channel_account_fallback,
@@ -4031,6 +4135,17 @@ def _clean_text(value: Any) -> str:
     if value in (None, [], {}):
         return ""
     return " ".join(str(value).strip().split())
+
+
+def _clean_transcript_text(value: Any) -> str:
+    if value in (None, [], {}):
+        return ""
+    lines = []
+    for line in str(value).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        compact = " ".join(line.strip().split())
+        if compact:
+            lines.append(compact)
+    return "\n".join(lines)
 
 
 def _normalize_outcome(value: Any) -> str:

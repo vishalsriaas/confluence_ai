@@ -219,6 +219,10 @@ def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:
     )
 
 
+def _outbound_sip_trunk_id(account, endpoints: dict) -> str:
+    return endpoints.get("outbound_sip_trunk_id") or endpoints.get("sip_trunk_id") or account.trunk_id
+
+
 def _voice_environment_metadata(agent) -> dict:
     if not agent or not agent.get("applied_ambient_sound_enabled"):
         return {"ambient_sound_enabled": 0}
@@ -435,9 +439,9 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         # 2. If it's a SIP call, place the participant before dispatching the agent.
         if operation == "outbound_call":
             phone = payload.get("phone") or payload.get("to")
-            sip_trunk_id = account.trunk_id or endpoints.get("sip_trunk_id")
+            sip_trunk_id = _outbound_sip_trunk_id(account, endpoints)
             if not sip_trunk_id:
-                raise ValueError("Missing SIP trunk ID. Configure AI Channel Account.trunk_id or endpoint_paths_json.sip_trunk_id.")
+                raise ValueError("Missing outbound SIP trunk ID. Configure endpoint_paths_json.outbound_sip_trunk_id or AI Channel Account.trunk_id.")
             ringing_timeout_seconds = int(endpoints.get("ringing_timeout_seconds") or 45)
             sip_api_timeout_seconds = int(endpoints.get("sip_api_timeout_seconds") or 60)
 

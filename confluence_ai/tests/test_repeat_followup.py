@@ -69,6 +69,7 @@ class TestRepeatFollowUp(unittest.TestCase):
     def tearDown(self):
         frappe.db.delete("AI Repeat Follow Up Workflow", {"workflow_type": ["!=", "Scenario Config"]})
         frappe.db.delete("AI Repeat Follow Up Workflow", {"scenario_key": "medicine_delivery_config"})
+        frappe.db.delete("AI Call Log", {"event_type": "Unit Test Repeat Follow Up"})
         frappe.db.delete("AI Task", {"external_record_type": "AI Repeat Follow Up Workflow"})
         frappe.db.delete("AI Task Batch", {"source_system": "AI Repeat Follow Up"})
         if getattr(self, "_settings_snapshot", None):
@@ -724,6 +725,50 @@ class TestRepeatFollowUp(unittest.TestCase):
 
         self.assertEqual(handled["status"], "unclear_logged")
         self.assertIn(workflow.status, {"Agent 2 Scheduled", "Agent 2 Pending Config"})
+
+    @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
+    def test_late_call_log_transcript_syncs_after_agent_2_is_scheduled(self, _enqueue):
+        agent_2 = self._ensure_agent("Radha Repeat Agent Sriaas 2")
+        self.settings.agent_2 = agent_2
+        self.settings.save(ignore_permissions=True)
+        result = repeat_followup.start_from_event(self._payload("late-transcript-sync"))
+
+        first = repeat_followup.handle_voice_result(task=result["task"], outcome="completed")
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+        self.assertEqual(first["status"], "unclear_logged")
+        self.assertEqual(workflow.status, "Agent 2 Scheduled")
+        self.assertFalse(workflow.call_log)
+        self.assertFalse(workflow.customer_summary)
+
+        call_log = frappe.new_doc("AI Call Log")
+        call_log.update(
+            {
+                "company": "sriaas",
+                "status": "Completed",
+                "provider": "LiveKit",
+                "event_type": "Unit Test Repeat Follow Up",
+                "task": result["task"],
+                "transcript_summary": "Customer confirmed medicine was received and asked about dosage.",
+                "transcript": "[AGENT]: Medicine package receive ho gaya?\n[CUSTOMER]: Haan ji, receive ho gaya.",
+            }
+        )
+        call_log.insert(ignore_permissions=True)
+
+        synced = repeat_followup.handle_voice_result(task=result["task"], outcome="completed")
+        workflow = frappe.get_doc("AI Repeat Follow Up Workflow", result["workflow"])
+
+        self.assertEqual(synced["status"], "synced_transcript")
+        self.assertEqual(workflow.call_log, call_log.name)
+        self.assertIn("medicine was received", workflow.customer_summary)
+
+        workflow.agent_2_scheduled_at = now_datetime()
+        workflow.save(ignore_permissions=True)
+        queued = repeat_followup.queue_agent_2_call(workflow.name)
+        self.assertEqual(queued["status"], "queued")
+        agent_2_task = frappe.get_doc("AI Task", queued["task"])
+        agent_2_context = parse_json_object(agent_2_task.context_json)
+        self.assertEqual(agent_2_context["previous_call_log"], call_log.name)
+        self.assertIn("receive ho gaya", agent_2_context["previous_call_transcript"])
 
     @patch("confluence_ai.services.repeat_followup.enqueue_task_execution")
     def test_missed_call_uses_configured_retry_delay_and_max_attempts(self, _enqueue):
