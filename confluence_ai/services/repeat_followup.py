@@ -3194,6 +3194,9 @@ def _normalize_payload(payload: dict, settings) -> dict:
     payload = dict(payload or {})
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    workflow_config = payload.get("workflow_config") if isinstance(payload.get("workflow_config"), dict) else {}
+    if not workflow_config and isinstance(body.get("workflow_config"), dict):
+        workflow_config = body.get("workflow_config")
     encounter = _encounter_from_payload(payload)
     phone_paths = _field_names(settings.phone_field_names)
     awb_paths = _field_names(settings.awb_field_names)
@@ -3257,8 +3260,17 @@ def _normalize_payload(payload: dict, settings) -> dict:
     medicine_summary = _compact_medicine_summary(encounter, _field_names(settings.medicine_summary_field_names))
     order_script = _required_order_script(encounter=encounter, awb=awb, order_id=order_id)
     diet_script = _required_diet_script(department=department)
+    company = _resolve_repeat_followup_company(
+        payload.get("company"),
+        body.get("company"),
+        data.get("company"),
+        workflow_config.get("company"),
+        encounter.get("company"),
+        settings.company,
+        fallback="sriaas",
+    )
     return {
-        "company": payload.get("company") or body.get("company") or data.get("company") or encounter.get("company") or settings.company or "sriaas",
+        "company": company,
         "scenario_key": settings.get("scenario_key") or payload.get("scenario_key") or body.get("scenario_key") or data.get("scenario_key") or "",
         "phone": phone,
         "patient_name": patient_name,
@@ -3296,6 +3308,32 @@ def _encounter_from_payload(payload: dict) -> dict:
             if isinstance(value, str) and value.strip().startswith("{"):
                 return parse_json_object(value, f"body.{key} JSON")
     return {}
+
+
+def _resolve_repeat_followup_company(*values, fallback: str = "sriaas") -> str:
+    for value in values:
+        company = _match_ai_company(value)
+        if company:
+            return company
+    return _match_ai_company(fallback) or fallback
+
+
+def _match_ai_company(value) -> str:
+    company = _clean_text(value)
+    if not company:
+        return ""
+    if frappe.db.exists("AI Company", company):
+        return company
+    company_key = company.lower()
+    if frappe.db.exists("AI Company", company_key):
+        return company_key
+    by_key = frappe.db.get_value("AI Company", {"company_key": company_key}, "name")
+    if by_key:
+        return by_key
+    by_name = frappe.db.get_value("AI Company", {"company_name": company}, "name")
+    if by_name:
+        return by_name
+    return ""
 
 
 def _voice_bootstrap_context(workflow, context: dict) -> dict:
