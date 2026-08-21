@@ -162,7 +162,7 @@ def start_from_event(payload: dict | list) -> dict:
             "status": "Draft",
             "workflow_type": "Call Instance",
             "enabled": 1,
-            "company": start_config.company or context.get("company") or "sriaas",
+            "company": context.get("company") or start_config.company or "sriaas",
             "idempotency_key": idem_key,
             "patient_encounter": context.get("encounter_id"),
             "patient_name": context.get("patient_name"),
