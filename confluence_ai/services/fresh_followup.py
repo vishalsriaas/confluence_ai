@@ -359,11 +359,18 @@ def handle_voice_result(
 
     decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
     if decision.get("reason") == "no_structured_followup_outcome":
-        return mark_call_missed(
-            doc.name,
-            "Fresh follow-up outcome was not captured; retry same agent.",
-            task=task,
-        )
+        if _has_conversation_transcript(transcript_text):
+            decision = {
+                "follow_up_required": True,
+                "reason": "outcome_missing_after_connected_call",
+                "source": "transcript_fallback",
+            }
+        else:
+            return mark_call_missed(
+                doc.name,
+                "Fresh follow-up outcome was not captured; retry same agent.",
+                task=task,
+            )
 
     row.status = "Completed"
     row.last_notes = notes or ""
@@ -897,6 +904,16 @@ def _task_transcript(task_name: str | None) -> str:
         return task.transcript
     result = parse_json_object(task.result_json, "Task Result JSON") if task.result_json else {}
     return _clean_text(result.get("transcript") or result.get("notes") or result.get("summary"))
+
+
+def _has_conversation_transcript(value: str | None) -> bool:
+    text = _clean_text(value)
+    if not text:
+        return False
+    lowered = text.lower()
+    if "voice call timed out" in lowered or "outcome was not captured" in lowered:
+        return False
+    return "[agent]" in lowered or "[customer]" in lowered or "agent:" in lowered or "customer:" in lowered
 
 
 def _store_row_transcript(row, agent_no: int, attempt: int, transcript: str | None) -> None:
