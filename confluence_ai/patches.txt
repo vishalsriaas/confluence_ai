@@ -1,1 +1,2 @@
 confluence_ai.patches.set_start_context_mcp_flags
+confluence_ai.patches.enable_related_messages_for_start_context

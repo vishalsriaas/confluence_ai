@@ -207,7 +207,7 @@ def _voice_metadata_context(payload: dict) -> dict:
 
     whatsapp_summary = str(payload.get("whatsapp_conversation_summary") or "")
     if whatsapp_summary:
-        compact["whatsapp_conversation_summary"] = whatsapp_summary[:700]
+        compact["whatsapp_conversation_summary"] = whatsapp_summary[:1800]
 
     compact["voice_context_compacted"] = 1
     return compact

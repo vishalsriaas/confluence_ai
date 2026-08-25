@@ -393,7 +393,10 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
         response = requests.get(url, headers=headers, params=params, timeout=30)
         
         # Log response
-        result = {"status_code": response.status_code, "ok": response.ok, "body": response.json().get("data", []) if response.ok else response.text[:4000]}
+        body = response.json().get("data", []) if response.ok else response.text[:4000]
+        if response.ok:
+            body = attach_related_messages_to_records(tool, body, server=server, headers=headers)
+        result = {"status_code": response.status_code, "ok": response.ok, "body": body}
         record_mcp_event(tool.tool_name, arguments, result, task_id)
         
         if not response.ok:
@@ -467,6 +470,95 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
         return {"status": "success", "updated": len(names), "records": names}
 
     raise ValueError(f"Operation {op_type} not supported.")
+
+
+def attach_related_messages_to_records(tool, records, *, server=None, headers=None):
+    """Optionally attach related message rows for read tools.
+
+    The mapping stays tool-configured: DocType, link field, read fields, and
+    limit are all stored on AI MCP Tool so no company/account is hardcoded here.
+    """
+    if not tool.get("include_related_messages"):
+        return records
+    if not isinstance(records, list) or not records:
+        return records
+
+    related_doctype = (tool.get("related_message_doctype") or "Chat Message").strip()
+    conversation_field = (tool.get("related_message_conversation_field") or "conversation").strip()
+    body_field = (tool.get("related_message_body_field") or "body").strip()
+    direction_field = (tool.get("related_message_direction_field") or "direction").strip()
+    sender_field = (tool.get("related_message_sender_field") or "sender_type").strip()
+    time_field = (tool.get("related_message_time_field") or "creation").strip()
+    limit = _safe_int(tool.get("related_message_limit"), 20)
+    limit = max(1, min(limit, 100))
+
+    read_fields = []
+    for field in ("name", conversation_field, direction_field, sender_field, "content_type", body_field, "delivery_status", time_field):
+        if field and field not in read_fields:
+            read_fields.append(field)
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        conversation_name = record.get("name")
+        if conversation_name in (None, ""):
+            continue
+        try:
+            if server:
+                messages = _fetch_remote_related_messages(
+                    server.server_url,
+                    headers or {},
+                    related_doctype,
+                    conversation_field,
+                    conversation_name,
+                    read_fields,
+                    time_field,
+                    limit,
+                )
+            else:
+                messages = _fetch_local_related_messages(
+                    related_doctype,
+                    conversation_field,
+                    conversation_name,
+                    read_fields,
+                    time_field,
+                    limit,
+                )
+            record["related_messages"] = messages
+        except Exception as exc:
+            record["related_messages_error"] = str(exc)[:300]
+    return records
+
+
+def _fetch_remote_related_messages(server_url, headers, doctype, conversation_field, conversation_name, fields, time_field, limit):
+    url = urljoin((server_url or "").rstrip("/") + "/", f"api/resource/{doctype}")
+    params = {
+        "filters": json.dumps([[conversation_field, "=", str(conversation_name)]]),
+        "fields": json.dumps(fields),
+        "order_by": f"{time_field} asc" if time_field else "creation asc",
+        "limit_page_length": limit,
+    }
+    response = requests.get(url, headers=headers, params=params, timeout=30)
+    if not response.ok:
+        frappe.throw(f"Related message read failed: {response.text[:200]}")
+    return response.json().get("data", [])
+
+
+def _fetch_local_related_messages(doctype, conversation_field, conversation_name, fields, time_field, limit):
+    return frappe.get_all(
+        doctype,
+        filters={conversation_field: str(conversation_name)},
+        fields=fields,
+        order_by=f"{time_field} asc" if time_field else "creation asc",
+        limit=limit,
+    )
+
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 def sanitize_issue_email_arguments(tool: "frappe.Document", arguments: dict) -> dict:

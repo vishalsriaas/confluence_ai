@@ -1568,7 +1568,34 @@ def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
             parts.append(f"{label}: {text[:180]}")
         if parts:
             lines.append(f"{index}. " + "; ".join(parts))
-    return "\n".join(lines)[:1000]
+        related_messages = record.get("related_messages") or []
+        message_lines = _summarize_related_messages(related_messages)
+        if message_lines:
+            lines.append("   WhatsApp messages: " + message_lines)
+    return "\n".join(lines)[:1800]
+
+
+def _summarize_related_messages(messages: list[dict[str, Any]]) -> str:
+    if not isinstance(messages, list) or not messages:
+        return ""
+    lines: list[str] = []
+    for message in messages[-20:]:
+        if not isinstance(message, dict):
+            continue
+        body = message.get("body") or message.get("message") or message.get("content") or message.get("text")
+        if body in (None, "", [], {}):
+            continue
+        direction = str(message.get("direction") or "").lower()
+        sender = str(message.get("sender_type") or "").lower()
+        if direction == "inbound" or sender == "customer":
+            speaker = "Customer"
+        elif direction == "outbound" or sender in {"ai", "agent", "system"}:
+            speaker = "Business"
+        else:
+            speaker = "Message"
+        text = _stringify(body).replace("\n", " ").strip()
+        lines.append(f"{speaker}: {text[:220]}")
+    return " | ".join(lines)[:1300]
 
 
 def _looks_like_whatsapp_context_tool(tool: "frappe.Document") -> bool:

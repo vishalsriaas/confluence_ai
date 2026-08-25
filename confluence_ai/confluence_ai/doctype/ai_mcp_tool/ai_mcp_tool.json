@@ -19,6 +19,15 @@
   "operation_type",
   "match_filters",
   "fields_to_read",
+  "related_context_section",
+  "include_related_messages",
+  "related_message_doctype",
+  "related_message_conversation_field",
+  "related_message_body_field",
+  "related_message_direction_field",
+  "related_message_sender_field",
+  "related_message_time_field",
+  "related_message_limit",
   "fields_to_write",
   "endpoint_url",
   "http_method",
@@ -111,6 +120,60 @@
    "label": "Fields to Retrieve",
    "options": "AI MCP Tool Read Field",
    "description": "Select fields to read and return to the agent."
+  },
+  {
+   "fieldname": "related_context_section",
+   "fieldtype": "Section Break",
+   "label": "Related Context"
+  },
+  {
+   "default": "0",
+   "fieldname": "include_related_messages",
+   "fieldtype": "Check",
+   "label": "Include Related Messages",
+   "description": "For read tools, also fetch related message rows for each returned record."
+  },
+  {
+   "default": "Chat Message",
+   "fieldname": "related_message_doctype",
+   "fieldtype": "Autocomplete",
+   "label": "Related Message DocType"
+  },
+  {
+   "default": "conversation",
+   "fieldname": "related_message_conversation_field",
+   "fieldtype": "Data",
+   "label": "Related Conversation Field"
+  },
+  {
+   "default": "body",
+   "fieldname": "related_message_body_field",
+   "fieldtype": "Data",
+   "label": "Related Message Body Field"
+  },
+  {
+   "default": "direction",
+   "fieldname": "related_message_direction_field",
+   "fieldtype": "Data",
+   "label": "Related Direction Field"
+  },
+  {
+   "default": "sender_type",
+   "fieldname": "related_message_sender_field",
+   "fieldtype": "Data",
+   "label": "Related Sender Field"
+  },
+  {
+   "default": "creation",
+   "fieldname": "related_message_time_field",
+   "fieldtype": "Data",
+   "label": "Related Time Field"
+  },
+  {
+   "default": "20",
+   "fieldname": "related_message_limit",
+   "fieldtype": "Int",
+   "label": "Related Message Limit"
   },
   {
    "fieldname": "fields_to_write",
