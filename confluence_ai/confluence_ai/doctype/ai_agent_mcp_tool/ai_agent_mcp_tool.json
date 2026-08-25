@@ -5,6 +5,7 @@
  "engine": "InnoDB",
  "field_order": [
   "tool",
+  "run_at_call_start",
   "expected_json",
   "calling_condition"
  ],
@@ -19,12 +20,21 @@
    "columns": 3
   },
   {
+   "columns": 2,
+   "default": "0",
+   "description": "Run this read-only MCP once while preparing call context, before LiveKit dispatch.",
+   "fieldname": "run_at_call_start",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Run At Call Start"
+  },
+  {
    "fieldname": "expected_json",
    "fieldtype": "Code",
    "label": "Required JSON Payload",
    "options": "JSON",
    "read_only": 1,
-   "columns": 5
+   "columns": 4
   },
   {
    "fieldname": "calling_condition",
@@ -32,7 +42,7 @@
    "in_list_view": 1,
    "label": "Calling Condition",
    "description": "Under what conditions can the agent call this tool?",
-   "columns": 4
+   "columns": 3
   }
  ],
  "istable": 1,

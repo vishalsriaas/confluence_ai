@@ -7,7 +7,7 @@ import frappe
 from confluence_ai.services.dispatcher import refresh_batch_counts
 from confluence_ai.services.livekit import build_voice_metadata
 from confluence_ai.services.sales_disease_router import apply_sales_route_context, resolve_inbound_sales_route
-from confluence_ai.services.sales_context import enrich_sales_context
+from confluence_ai.services.sales_context import enrich_sales_context, enrich_start_context_tools
 from confluence_ai.services.utils import as_json, create_error, now
 
 
@@ -97,6 +97,7 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
     )
     task.insert(ignore_permissions=True)
 
+    context = enrich_start_context_tools(context, agent=agent, task_id=task.name)
     context = enrich_sales_context(context, agent=agent, task_id=task.name)
     context["sales_context_mode"] = "prepared_for_inbound"
     context.pop("inbound_sales_context_deferred", None)
@@ -170,6 +171,8 @@ def _attach_vobiz_payload_to_existing_task(task, payload: dict, selection: dict,
     incoming_context = _context_from_vobiz_payload(payload, selection)
     context.update({key: value for key, value in incoming_context.items() if value not in (None, "", [], {})})
     context = apply_sales_route_context(context, selection)
+    agent = frappe.get_doc("AI Agent", selection.get("target_agent")) if selection.get("target_agent") else None
+    context = enrich_start_context_tools(context, agent=agent, task_id=task.name)
 
     call_uuid = _payload_call_uuid(payload)
     values = {

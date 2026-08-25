@@ -165,6 +165,83 @@ def enrich_sales_context(
     return enriched
 
 
+def enrich_start_context_tools(
+    context: dict,
+    *,
+    agent: "frappe.Document | None" = None,
+    task_id: str | None = None,
+) -> dict:
+    """Run per-agent read-only start-context MCP tools before voice dispatch.
+
+    This keeps start-of-call context deterministic while still letting the UI
+    decide which tool runs through the agent's Allowed MCP Tools table.
+    """
+    if not agent:
+        return context
+
+    enriched = dict(context or {})
+    start_context = enriched.get("start_context_tools")
+    if not isinstance(start_context, dict):
+        start_context = {}
+
+    for row in agent.get("allowed_mcp_tools") or []:
+        if not row.get("run_at_call_start"):
+            continue
+        tool_name = row.get("tool")
+        if not tool_name or not frappe.db.exists("AI MCP Tool", tool_name):
+            continue
+        tool = frappe.get_doc("AI MCP Tool", tool_name)
+        if not tool.enabled or (tool.operation_type or "Read") != "Read":
+            continue
+        if tool.tool_name in start_context:
+            continue
+
+        arguments = _start_context_tool_arguments(tool, enriched)
+        missing = [
+            p.parameter_name
+            for p in (tool.input_parameters or [])
+            if p.required and arguments.get(p.parameter_name) in (None, "")
+        ]
+        if missing:
+            start_context[tool.tool_name] = {
+                "status": "skipped",
+                "reason": f"missing required arguments: {', '.join(missing)}",
+            }
+            continue
+
+        try:
+            from confluence_ai.api.mcp import execute_mcp_tool
+
+            result = execute_mcp_tool(tool, arguments, task_id)
+            records = _extract_records(result)
+            summary = _summarize_start_context_records(records)
+            start_context[tool.tool_name] = {
+                "status": "success",
+                "found": bool(records),
+                "summary": summary,
+                "records": records[:3],
+            }
+            if _looks_like_whatsapp_context_tool(tool):
+                enriched["whatsapp_conversation_found"] = 1 if records else 0
+                if summary:
+                    enriched["whatsapp_conversation_summary"] = summary
+        except Exception as exc:
+            start_context[tool.tool_name] = {"status": "failed", "error": str(exc)[:500]}
+            create_error(
+                "Start Context MCP Failed",
+                str(exc),
+                source="sales_start_context",
+                task=task_id,
+                agent=agent.name,
+                payload={"tool": tool.tool_name, "arguments": arguments},
+                exc=exc,
+            )
+
+    if start_context:
+        enriched["start_context_tools"] = start_context
+    return enriched
+
+
 def lookup_patient_sales_context(arguments: dict, *, agent: str | None = None) -> dict:
     phone = _clean_phone(arguments.get("phone") or arguments.get("customer_phone") or arguments.get("mobile"))
     encounter = arguments.get("patient_encounter")
@@ -1410,6 +1487,99 @@ def _summarize_record_for_voice(record: dict[str, Any]) -> str:
             text = text[:100]
         parts.append(f"{label}: {text}")
     return "; ".join(parts)[:500]
+
+
+def _start_context_tool_arguments(tool: "frappe.Document", context: dict) -> dict:
+    arguments: dict[str, Any] = {}
+    for param in tool.input_parameters or []:
+        name = param.parameter_name
+        if not name:
+            continue
+        value = context.get(name)
+        if value in (None, ""):
+            value = _value_for_start_context_parameter(name, context)
+        if value not in (None, ""):
+            arguments[name] = value
+    return arguments
+
+
+def _value_for_start_context_parameter(name: str, context: dict) -> str | None:
+    lowered = name.lower()
+    phone = _first_value(
+        context,
+        name,
+        "customer_phone",
+        "phone",
+        "mobile",
+        "raw_customer_phone",
+        "payload_json.From",
+        "payload_json.from",
+        "payload_json.customer_phone",
+    )
+    if "phone" not in lowered and "mobile" not in lowered and "contact" not in lowered:
+        return _first_value(context, name)
+    if not phone:
+        return None
+    if "91" in lowered and "e164" not in lowered and "plus" not in lowered:
+        return _phone_digits_with_india_code(phone)
+    cleaned = _clean_phone(phone)
+    if "10" in lowered or "ten" in lowered:
+        digits = re.sub(r"\D", "", cleaned or str(phone))
+        return digits[-10:] if len(digits) >= 10 else digits
+    return cleaned or str(phone)
+
+
+def _phone_digits_with_india_code(phone: Any) -> str | None:
+    cleaned = _clean_phone(phone) or str(phone or "")
+    digits = re.sub(r"\D", "", cleaned)
+    if digits.startswith("00") and len(digits) > 10:
+        digits = digits[2:]
+    if len(digits) >= 10:
+        return "91" + digits[-10:]
+    return digits or None
+
+
+def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return ""
+    lines: list[str] = []
+    fields = [
+        ("Summary", "ai_summary", "summary"),
+        ("Last Message", "last_message_preview", "last_message"),
+        ("Last Message Time", "last_message_time", "modified", "creation"),
+        ("Status", "status"),
+        ("Lead Temperature", "lead_temperature"),
+        ("Lead Score", "lead_score"),
+        ("Language", "lead_lan", "language"),
+        ("Linked Lead", "linked_crm_lead", "lead"),
+        ("Linked Reference", "linked_reference_name", "reference_name"),
+    ]
+    for index, record in enumerate(records[:3], start=1):
+        parts: list[str] = []
+        for label, *keys in fields:
+            value = None
+            for key in keys:
+                value = record.get(key)
+                if value not in (None, "", [], {}):
+                    break
+            if value in (None, "", [], {}):
+                continue
+            text = _stringify(value).replace("\n", " ").strip()
+            parts.append(f"{label}: {text[:180]}")
+        if parts:
+            lines.append(f"{index}. " + "; ".join(parts))
+    return "\n".join(lines)[:1000]
+
+
+def _looks_like_whatsapp_context_tool(tool: "frappe.Document") -> bool:
+    haystack = " ".join(
+        [
+            str(tool.tool_name or ""),
+            str(tool.description or ""),
+            str(tool.client_doctype or ""),
+        ]
+    ).lower()
+    return "whatsapp" in haystack or "chat conversation" in haystack or "wa chat" in haystack
 
 
 def _first_value(data: dict, *paths: str):

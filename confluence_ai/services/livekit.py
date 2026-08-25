@@ -185,6 +185,8 @@ def _voice_metadata_context(payload: dict) -> dict:
         "campaign",
         "customer_type",
         "repeat_customer_details",
+        "whatsapp_conversation_found",
+        "whatsapp_conversation_summary",
         "profile_key",
         "outbound_phone_number",
     ]
@@ -202,6 +204,10 @@ def _voice_metadata_context(payload: dict) -> dict:
     repeat_details = str(payload.get("repeat_customer_details") or "")
     if repeat_details:
         compact["repeat_customer_details"] = repeat_details[:380]
+
+    whatsapp_summary = str(payload.get("whatsapp_conversation_summary") or "")
+    if whatsapp_summary:
+        compact["whatsapp_conversation_summary"] = whatsapp_summary[:700]
 
     compact["voice_context_compacted"] = 1
     return compact

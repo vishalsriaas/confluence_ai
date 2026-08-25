@@ -366,7 +366,7 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
     server = frappe.get_doc("AI MCP Server", tool.server) if tool.server else None
     if not server:
         # Fallback to local DB execution if no server links
-        return execute_local_db_tool(tool, arguments)
+        return execute_local_db_tool(tool, arguments, task_id=task_id)
 
     server_url = server.server_url or ""
     headers = get_server_headers(server)
@@ -553,7 +553,7 @@ def validate_order_confirmation_update_arguments(tool: "frappe.Document", argume
     )
 
 
-def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
+def execute_local_db_tool(tool: "frappe.Document", arguments: dict, task_id: str | None = None) -> dict:
     """Fallback database logic if no server connection is configured."""
     validate_filter_arguments(tool, arguments)
     
@@ -570,7 +570,9 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
             fields = ["*"]
 
         data = frappe.get_all(client_doctype, filters=filters, fields=fields)
-        return {"status": "success", "data": data}
+        result = {"status": "success", "data": data, "ok": True}
+        record_mcp_event(tool.tool_name, arguments, result, task_id)
+        return result
 
     elif op_type == "Create":
         doc_data = {}
@@ -581,7 +583,9 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
         doc.update(doc_data)
         doc.insert(ignore_permissions=True)
         frappe.db.commit()
-        return {"status": "success", "data": doc.as_dict()}
+        result = {"status": "success", "data": doc.as_dict(), "ok": True}
+        record_mcp_event(tool.tool_name, arguments, result, task_id)
+        return result
 
     elif op_type == "Update":
         filters = {}
@@ -592,12 +596,12 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
         if not names:
             message = f"No matching {client_doctype} records found to update"
             result = {"ok": False, "message": message, "filters": filters}
-            record_mcp_event(tool.tool_name, arguments, result, None, error=message)
+            record_mcp_event(tool.tool_name, arguments, result, task_id, error=message)
             log_mcp_error(
                 tool.tool_name,
                 message,
                 arguments,
-                None,
+                task_id,
                 error_type="MCP Update No Matching Records",
                 response=result,
             )
@@ -611,7 +615,9 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict) -> dict:
             frappe.db.set_value(client_doctype, name_id, doc_data, update_modified=True)
         
         frappe.db.commit()
-        return {"status": "success", "updated": len(names), "records": names}
+        result = {"status": "success", "updated": len(names), "records": names, "ok": True}
+        record_mcp_event(tool.tool_name, arguments, result, task_id)
+        return result
 
     raise ValueError(f"Operation {op_type} not supported locally.")
 
