@@ -2,6 +2,7 @@ import frappe
 
 
 def execute():
+    frappe.reload_doc("confluence_ai", "doctype", "ai_agent_mcp_tool", force=True)
     if not frappe.db.has_column("AI Agent MCP Tool", "run_at_call_start"):
         return
 
