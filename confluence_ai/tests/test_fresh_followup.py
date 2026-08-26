@@ -11,6 +11,7 @@ from confluence_ai.services.utils import parse_json_object
 
 class TestFreshFollowUp(unittest.TestCase):
     def tearDown(self):
+        frappe.db.delete("AI Do Not Follow Up", {"normalized_phone": "+919999999999"})
         frappe.db.delete("AI Fresh Follow Up Workflow", {"idempotency_key": ["like", "unit-fresh-followup-%"]})
         frappe.db.delete("AI Task", {"external_record_type": "AI Fresh Follow Up Workflow"})
         frappe.db.delete("AI Task Batch", {"source_system": "AI Fresh Follow Up"})
@@ -33,6 +34,59 @@ class TestFreshFollowUp(unittest.TestCase):
         self.assertIn("Agent 2 scheduled", workflow.timer_status)
         agent_1_context = parse_json_object(frappe.db.get_value("AI Task", task.name, "context_json"))
         self.assertEqual(agent_1_context["fresh_followup_workflow"], workflow.name)
+
+    def test_do_not_follow_up_blocks_scheduled_workflow(self):
+        agent_1 = self._ensure_agent("Unit Fresh Follow Up Agent 1")
+        workflow = frappe.new_doc("AI Fresh Follow Up Workflow")
+        workflow.update(
+            {
+                "company": "sriaas",
+                "enabled": 1,
+                "status": "Scheduled",
+                "idempotency_key": f"unit-fresh-followup-dnfu-{frappe.generate_hash(length=10)}",
+                "customer_phone": "+919999999999",
+                "current_agent_no": 1,
+                "next_agent_no": 1,
+                "minimum_connected_seconds": 10,
+                "context_json": frappe.as_json({"phone": "+919999999999"}),
+                "task_history_json": "[]",
+            }
+        )
+        workflow.append(
+            "agents",
+            {
+                "enabled": 1,
+                "agent_no": 1,
+                "agent": agent_1,
+                "status": "Scheduled",
+                "max_attempts": 3,
+                "retry_after_value": 30,
+                "retry_after_unit": "Minutes",
+                "followup_timing_mode": "Manual",
+                "followup_after_value": 0,
+                "followup_after_unit": "Minutes",
+            },
+        )
+        workflow.insert(ignore_permissions=True)
+
+        do_not_follow_up = frappe.new_doc("AI Do Not Follow Up")
+        do_not_follow_up.update(
+            {
+                "company": "sriaas",
+                "enabled": 1,
+                "phone": "9999999999",
+                "reason": "Do Not Follow Up",
+            }
+        )
+        do_not_follow_up.insert(ignore_permissions=True)
+
+        result = fresh_followup.queue_agent_call(workflow.name, 1)
+        workflow.reload()
+
+        self.assertEqual(result["status"], "no_follow_up")
+        self.assertEqual(workflow.status, "No Follow Up")
+        self.assertEqual(workflow.agents[0].status, "Skipped")
+        self.assertIn("No follow-up calls allowed", workflow.final_reason)
 
     def _ensure_agent(self, label: str) -> str:
         existing = frappe.db.get_value("AI Agent", {"agent_name": label}, "name")

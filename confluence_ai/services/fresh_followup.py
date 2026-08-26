@@ -14,8 +14,10 @@ from confluence_ai.services.utils import as_json, create_error, parse_json_objec
 WORKFLOW = "AI Fresh Follow Up Workflow"
 WORKFLOW_AGENT = "AI Fresh Follow Up Workflow Agent"
 SETTINGS = "AI Fresh Follow Up Settings"
+DO_NOT_FOLLOW_UP = "AI Do Not Follow Up"
+NO_FOLLOW_UP_STATUS = "No Follow Up"
 
-FINAL_STATES = {"Completed", "Missed After Attempts", "Failed", "Cancelled"}
+FINAL_STATES = {"Completed", "Missed After Attempts", "Failed", "Cancelled", NO_FOLLOW_UP_STATUS}
 MISSED_OUTCOMES = {"missed", "no_answer", "no answer", "busy", "failed", "timeout", "cancelled", "canceled"}
 FOLLOWUP_REQUIRED_KEYS = {
     "follow_up_required",
@@ -102,6 +104,14 @@ def start_from_event(payload: dict | list | None) -> dict:
                 "retry_after_unit": row["retry_after_unit"],
             },
         )
+
+    block = _do_not_follow_up_match(settings.company, context.get("phone"))
+    if block:
+        _mark_no_follow_up_values(workflow, block)
+        _append_task_history(workflow, 0, 0, None, "no_follow_up", workflow.final_reason)
+        workflow.insert(ignore_permissions=True)
+        frappe.db.commit()
+        return {"status": "no_follow_up", "workflow": workflow.name, "matched": block.get("name")}
 
     workflow.insert(ignore_permissions=True)
     frappe.db.commit()
@@ -216,6 +226,17 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
             },
         )
 
+    block = _do_not_follow_up_match(settings.company, normalized.get("phone"))
+    if block:
+        _mark_no_follow_up_values(workflow, block)
+        for row in workflow.get("agents") or []:
+            if _safe_int(row.agent_no or row.idx, 0) == 1:
+                row.task = task.name
+                row.scheduled_at = now_datetime()
+        _append_task_history(workflow, 1, 1, task.name, "no_follow_up", workflow.final_reason)
+        workflow.insert(ignore_permissions=True)
+        return {"status": "no_follow_up", "workflow": workflow.name, "matched": block.get("name"), "task": task.name}
+
     _append_task_history(workflow, 1, 1, task.name, "attached")
     workflow.insert(ignore_permissions=True)
     _attach_outcome_contract_to_task(task.name, workflow.name)
@@ -229,6 +250,9 @@ def queue_agent_call(workflow_name: str, agent_no: int | None = None) -> dict:
             return {"status": "skipped", "reason": "disabled", "workflow": workflow.name}
         if workflow.status in FINAL_STATES:
             return {"status": "skipped", "reason": "final_state", "workflow": workflow.name}
+        block = _do_not_follow_up_match(workflow.company, workflow.customer_phone)
+        if block:
+            return _mark_no_follow_up(workflow, block)
 
         row = _agent_row(workflow, agent_no or workflow.next_agent_no or 1)
         if not row:
@@ -346,6 +370,10 @@ def handle_voice_result(
     transcript_text = transcript or _task_transcript(task) or notes or ""
     _store_row_transcript(row, agent_no, attempt_no, transcript_text)
 
+    block = _do_not_follow_up_match(doc.company, doc.customer_phone)
+    if block:
+        return _mark_no_follow_up(doc, block)
+
     outcome_key = str(outcome or "").strip().lower()
     if outcome_key in MISSED_OUTCOMES:
         return mark_call_missed(doc.name, notes or transcript or outcome, task=task)
@@ -419,6 +447,10 @@ def mark_call_missed(workflow: str, notes: str | None = None, task: str | None =
     row = _agent_row_for_task_or_status(doc, task)
     if not row:
         frappe.throw("Fresh follow-up agent row not found.")
+
+    block = _do_not_follow_up_match(doc.company, doc.customer_phone)
+    if block:
+        return _mark_no_follow_up(doc, block)
 
     task_name = task or row.task
     if task_name and frappe.db.exists("AI Task", task_name):
@@ -1006,6 +1038,51 @@ def _normalize_phone(value: object) -> str:
     if text.startswith("+") and digits:
         return f"+{digits}"
     return text
+
+
+def _do_not_follow_up_match(company: str | None, phone: object) -> dict | None:
+    if not company or not phone or not frappe.db.table_exists(DO_NOT_FOLLOW_UP):
+        return None
+    normalized = _normalize_phone(phone)
+    if not normalized:
+        return None
+    row = frappe.db.get_value(
+        DO_NOT_FOLLOW_UP,
+        {"company": company, "enabled": 1, "normalized_phone": normalized},
+        ["name", "reason"],
+        as_dict=True,
+    )
+    return dict(row) if row else None
+
+
+def _mark_no_follow_up_values(workflow, block: dict) -> None:
+    reason = block.get("reason") or "Number is marked Do Not Follow Up."
+    message = f"No follow-up calls allowed for this number. Reason: {reason}"
+    workflow.status = NO_FOLLOW_UP_STATUS
+    workflow.final_reason = message
+    workflow.timer_status = message
+    workflow.next_agent_no = 0
+    workflow.next_call_time = None
+    workflow.active_call_timeout_at = None
+    for row in workflow.get("agents") or []:
+        if row.status in {"Pending", "Scheduled", "Queued", "Pending Config"}:
+            row.status = "Skipped"
+            row.last_notes = message
+
+
+def _mark_no_follow_up(workflow, block: dict) -> dict:
+    _mark_no_follow_up_values(workflow, block)
+    _append_task_history(
+        workflow,
+        _safe_int(workflow.current_agent_no or workflow.next_agent_no, 0),
+        0,
+        None,
+        "no_follow_up",
+        workflow.final_reason,
+    )
+    workflow.save(ignore_permissions=True)
+    frappe.db.commit()
+    return {"status": "no_follow_up", "workflow": workflow.name, "matched": block.get("name")}
 
 
 def _add_duration(base, value, unit, *, default_value: int, default_unit: str):

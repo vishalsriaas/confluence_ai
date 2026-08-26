@@ -59,7 +59,7 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Draft\nScheduled\nQueued\nCompleted\nPending Config\nMissed After Attempts\nFailed\nCancelled"
+   "options": "Draft\nScheduled\nQueued\nCompleted\nNo Follow Up\nPending Config\nMissed After Attempts\nFailed\nCancelled"
   },
   {
    "fieldname": "settings",
