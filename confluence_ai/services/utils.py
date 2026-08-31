@@ -145,6 +145,7 @@ def record_provider_event(
     response: dict | None = None,
     error: str | None = None,
     external_id: str | None = None,
+    chat_summary: str | None = None,
 ) -> str | None:
     try:
         if not company and task:
@@ -157,22 +158,54 @@ def record_provider_event(
             company = frappe.db.get_value("AI Agent", agent, "company")
 
         doc = frappe.new_doc("AI Provider Event")
-        doc.update(
-            {
-                "company": company,
-                "status": status,
-                "provider": provider,
-                "operation": operation,
-                "agent": agent,
-                "task": task,
-                "external_id": external_id,
-                "request_json": as_json(request or {}),
-                "response_json": as_json(response or {}),
-                "error_message": error,
-            }
-        )
+        values = {
+            "company": company,
+            "status": status,
+            "provider": provider,
+            "operation": operation,
+            "agent": agent,
+            "task": task,
+            "external_id": external_id,
+            "request_json": as_json(request or {}),
+            "response_json": as_json(response or {}),
+            "error_message": error,
+        }
+        summary = chat_summary or _extract_provider_chat_summary(response or {})
+        if summary and doc.meta.has_field("chat_summary"):
+            values["chat_summary"] = summary[:1800]
+        doc.update(values)
         doc.insert(ignore_permissions=True)
         return doc.name
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Confluence AI Provider Event Failed")
         return None
+
+
+def _extract_provider_chat_summary(response: dict) -> str:
+    if not isinstance(response, dict):
+        return ""
+
+    for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary"):
+        value = response.get(key)
+        if value not in (None, "", [], {}):
+            return str(value)
+
+    body = response.get("body") or response.get("data")
+    if isinstance(body, list):
+        summaries = []
+        for row in body[:3]:
+            if not isinstance(row, dict):
+                continue
+            for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary", "ai_summary"):
+                value = row.get(key)
+                if value not in (None, "", [], {}):
+                    summaries.append(str(value))
+                    break
+        return "\n".join(summaries)[:1800]
+
+    if isinstance(body, dict):
+        for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary", "ai_summary"):
+            value = body.get(key)
+            if value not in (None, "", [], {}):
+                return str(value)
+    return ""

@@ -13,6 +13,7 @@
   "external_id",
   "latency_ms",
   "cost",
+  "chat_summary",
   "request_json",
   "response_json",
   "error_message"
@@ -72,6 +73,12 @@
    "fieldname": "cost",
    "fieldtype": "Currency",
    "label": "Cost"
+  },
+  {
+   "description": "Compact chat/conversation summary extracted from provider response for quick review and voice prompt context.",
+   "fieldname": "chat_summary",
+   "fieldtype": "Small Text",
+   "label": "Chat Summary"
   },
   {
    "fieldname": "request_json",

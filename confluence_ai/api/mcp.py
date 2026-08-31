@@ -1,6 +1,7 @@
 import json
 import re
 import requests
+from typing import Any
 from urllib.parse import quote, urljoin
 import frappe
 from confluence_ai.services.auth import require_access
@@ -525,9 +526,79 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
                     limit,
                 )
             record["related_messages"] = messages
+            chat_summary = summarize_related_messages_for_prompt(record, messages)
+            if chat_summary:
+                record["chat_summary"] = chat_summary
         except Exception as exc:
             record["related_messages_error"] = str(exc)[:300]
     return records
+
+
+def summarize_related_messages_for_prompt(record: dict[str, Any], messages: list[dict[str, Any]]) -> str:
+    """Build a compact customer-history summary from related chat messages.
+
+    This keeps voice prompts small while still carrying the useful WhatsApp context.
+    """
+    if not isinstance(messages, list) or not messages:
+        return ""
+
+    customer_messages: list[str] = []
+    business_messages: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        body = message.get("body") or message.get("message") or message.get("content") or message.get("text")
+        text = _compact_chat_text(body)
+        if not text:
+            continue
+        direction = str(message.get("direction") or "").lower()
+        sender = str(message.get("sender_type") or "").lower()
+        if direction == "inbound" or sender == "customer":
+            customer_messages.append(text)
+        elif direction == "outbound" or sender in {"ai", "agent", "system", "business"}:
+            business_messages.append(text)
+
+    lines: list[str] = []
+    channel_account = _compact_chat_text(record.get("channel_account"))
+    if channel_account:
+        lines.append(f"WhatsApp account: {channel_account}.")
+
+    linked_reference = _compact_chat_text(record.get("linked_reference_name") or record.get("linked_crm_lead"))
+    if linked_reference:
+        lines.append(f"Linked record: {linked_reference}.")
+
+    lead_context = []
+    for label, key in (("temperature", "lead_temperature"), ("score", "lead_score"), ("language", "lead_lan")):
+        value = _compact_chat_text(record.get(key))
+        if value:
+            lead_context.append(f"{label} {value}")
+    if lead_context:
+        lines.append("Lead context: " + ", ".join(lead_context) + ".")
+
+    if customer_messages:
+        lines.append("Customer said on WhatsApp: " + "; ".join(customer_messages[-10:]) + ".")
+    if business_messages:
+        lines.append("Business already replied/asked: " + "; ".join(business_messages[-6:]) + ".")
+
+    last_message = messages[-1] if isinstance(messages[-1], dict) else {}
+    last_text = _compact_chat_text(
+        last_message.get("body") or last_message.get("message") or last_message.get("content") or last_message.get("text")
+    )
+    if last_text:
+        last_time = _compact_chat_text(last_message.get("creation") or last_message.get("modified"))
+        suffix = f" at {last_time}" if last_time else ""
+        lines.append(f"Last WhatsApp message{suffix}: {last_text}.")
+
+    return " ".join(lines)[:1800]
+
+
+def _compact_chat_text(value: Any, max_chars: int = 180) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    text = str(value)
+    text = re.sub(r"\*+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
 
 
 def _fetch_remote_related_messages(server_url, headers, doctype, conversation_field, conversation_name, fields, time_field, limit):

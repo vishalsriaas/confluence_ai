@@ -1544,6 +1544,7 @@ def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
         return ""
     lines: list[str] = []
     fields = [
+        ("Chat Summary", "chat_summary", "conversation_summary", "whatsapp_summary"),
         ("Summary", "ai_summary", "summary"),
         ("Last Message", "last_message_preview", "last_message"),
         ("Last Message Time", "last_message_time", "modified", "creation"),
@@ -1556,6 +1557,7 @@ def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
     ]
     for index, record in enumerate(records[:3], start=1):
         parts: list[str] = []
+        has_chat_summary = False
         for label, *keys in fields:
             value = None
             for key in keys:
@@ -1565,11 +1567,14 @@ def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
             if value in (None, "", [], {}):
                 continue
             text = _stringify(value).replace("\n", " ").strip()
-            parts.append(f"{label}: {text[:180]}")
+            max_chars = 1200 if label == "Chat Summary" else 180
+            parts.append(f"{label}: {text[:max_chars]}")
+            if label == "Chat Summary":
+                has_chat_summary = True
         if parts:
             lines.append(f"{index}. " + "; ".join(parts))
         related_messages = record.get("related_messages") or []
-        message_lines = _summarize_related_messages(related_messages)
+        message_lines = "" if has_chat_summary else _summarize_related_messages(related_messages)
         if message_lines:
             lines.append("   WhatsApp messages: " + message_lines)
     return "\n".join(lines)[:1800]
