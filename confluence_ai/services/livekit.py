@@ -5,6 +5,7 @@ import json
 import os
 import re
 import frappe
+from frappe.exceptions import TimestampMismatchError
 from google.protobuf import duration_pb2
 from livekit import api
 from livekit.protocol import room as proto_room
@@ -710,8 +711,10 @@ def handle_callback(payload: dict) -> dict:
     elif event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed", "failed", "room_failed", "call_failed"}:
         if event_type_lower in {"room_finished", "call_ended", "participant_left", "recording_ready", "transcript_ready", "completed"}:
             task.status = "Completed"
+            task.last_error = ""
             if attempt:
                 attempt.status = "Succeeded"
+                attempt.error_message = ""
                 from confluence_ai.services.utils import now
                 attempt.ended_at = now()
         else:
@@ -929,14 +932,130 @@ def _fresh_followup_workflow_for_task(task) -> str | None:
     return frappe.db.get_value("AI Fresh Follow Up Workflow Agent", {"task": task.name}, "parent")
 
 
+def _livekit_call_log_name(payload: dict, task, call_uuid: str | None) -> str | None:
+    if task.name:
+        existing = frappe.db.exists("AI Call Log", {"task": task.name})
+        if existing:
+            return existing
+
+    for fieldname, value in (
+        ("call_uuid", call_uuid),
+        ("sip_call_id", payload.get("sip_call_id") or payload.get("room_name") or payload.get("room")),
+    ):
+        if value:
+            existing = frappe.db.exists("AI Call Log", {fieldname: value})
+            if existing:
+                return existing
+    return None
+
+
+def _apply_livekit_call_log_payload(
+    doc,
+    payload: dict,
+    task,
+    attempt,
+    *,
+    diagnostics_enabled: bool,
+    context: dict,
+    livekit_event: str,
+    event_type_lower: str,
+    call_uuid: str | None,
+) -> None:
+    from confluence_ai.services.utils import now
+
+    doc.provider = "LiveKit"
+    doc.event_type = livekit_event
+    doc.direction = context.get("direction") or "Inbound"
+    doc.agent = task.assigned_agent or task.target_agent or doc.agent
+    doc.task = task.name
+    doc.company = task.company or doc.company
+    if not doc.company and doc.agent:
+        doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
+    if attempt:
+        doc.attempt = attempt.name
+        doc.company = doc.company or attempt.company
+    doc.customer_name = context.get("customer_name") or context.get("patient_name") or doc.customer_name
+    doc.customer_phone = (
+        payload.get("caller_phone")
+        or payload.get("from")
+        or context.get("customer_phone")
+        or context.get("phone")
+        or doc.customer_phone
+    )
+    doc.from_number = (
+        payload.get("from")
+        or payload.get("caller_phone")
+        or context.get("customer_phone")
+        or context.get("phone")
+        or doc.from_number
+    )
+    doc.to_number = (
+        payload.get("to")
+        or payload.get("called_number")
+        or context.get("called_number")
+        or context.get("inbound_phone_number")
+        or context.get("outbound_phone_number")
+        or doc.to_number
+    )
+    doc.call_uuid = doc.call_uuid or call_uuid
+    doc.sip_call_id = payload.get("sip_call_id") or payload.get("room_name") or payload.get("room") or doc.sip_call_id
+    doc.trunk_id = payload.get("trunk_id") or context.get("trunk_id") or task.trunk_id or doc.trunk_id
+    doc.domain = payload.get("domain") or context.get("vobiz_domain") or doc.domain
+    doc.reason = payload.get("reason") or doc.reason
+    doc.last_payload_json = as_json(payload)
+    if diagnostics_enabled and doc.meta.has_field("livekit_diagnostic_timeline_json"):
+        doc.livekit_diagnostic_timeline_json = as_json(
+            _append_livekit_diagnostic_timeline(
+                doc.livekit_diagnostic_timeline_json,
+                payload,
+            )
+        )
+
+    status = str(payload.get("status") or livekit_event or "").lower()
+    if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
+        doc.status = "Completed"
+    elif status in {"failed", "room_failed", "call_failed"}:
+        doc.status = "Failed"
+    elif status in {"running", "room_started", "participant_joined", "initiated"}:
+        doc.status = "In Progress"
+    elif not doc.status:
+        doc.status = "Unknown"
+
+    if event_type_lower in {"room_started", "participant_joined", "initiated"}:
+        doc.initiated_payload_json = as_json(payload)
+        doc.started_at = payload.get("started_at") or doc.started_at or now()
+    elif event_type_lower in {"room_finished", "call_ended", "participant_left", "completed", "failed", "room_failed", "call_failed"}:
+        doc.status_payload_json = as_json(payload)
+        doc.started_at = payload.get("started_at") or doc.started_at
+        doc.ended_at = payload.get("ended_at") or doc.ended_at or now()
+
+    duration = payload.get("duration_sec") or payload.get("duration") or payload.get("duration_ms")
+    if duration is not None:
+        try:
+            value = float(duration)
+            doc.duration_sec = int(value / 1000) if value > 5000 else int(value)
+        except (TypeError, ValueError):
+            pass
+
+    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
+    if transcript:
+        doc.transcript = transcript
+        doc.transcript_summary = payload.get("summary") or payload.get("transcript_summary") or str(transcript)[:1000]
+        doc.transcript_payload_json = as_json(payload)
+
+    recording_url = payload.get("recording_url") or payload.get("url") or payload.get("recording")
+    if recording_url:
+        doc.recording_url = recording_url
+        doc.external_recording_url = recording_url
+        doc.recording_payload_json = as_json(payload)
+
+
 def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enabled: bool = False) -> None:
     """Create/update the human-facing call log from LiveKit callbacks."""
     if not frappe.db.exists("DocType", "AI Call Log"):
         return
 
     try:
-        from confluence_ai.services.utils import now
-
         context = parse_json_object(task.context_json)
         livekit_event = payload.get("event") or payload.get("event_type") or payload.get("status") or "status_update"
         event_type_lower = str(livekit_event or "").lower()
@@ -949,98 +1068,28 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
             or payload.get("room")
         )
 
-        existing = None
-        if task.name:
-            existing = frappe.db.exists("AI Call Log", {"task": task.name})
-        for fieldname, value in (
-            ("call_uuid", call_uuid),
-            ("sip_call_id", payload.get("sip_call_id") or payload.get("room_name") or payload.get("room")),
-        ):
-            if not existing and value:
-                existing = frappe.db.exists("AI Call Log", {fieldname: value})
-
-        doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
-        doc.provider = "LiveKit"
-        doc.event_type = livekit_event
-        doc.direction = context.get("direction") or "Inbound"
-        doc.agent = task.assigned_agent or task.target_agent or doc.agent
-        doc.task = task.name
-        doc.company = task.company or doc.company
-        if not doc.company and doc.agent:
-            doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
-        if attempt:
-            doc.attempt = attempt.name
-            doc.company = doc.company or attempt.company
-        doc.customer_name = context.get("customer_name") or context.get("patient_name") or doc.customer_name
-        doc.customer_phone = (
-            payload.get("caller_phone")
-            or payload.get("from")
-            or context.get("customer_phone")
-            or context.get("phone")
-            or doc.customer_phone
-        )
-        doc.from_number = payload.get("from") or payload.get("caller_phone") or context.get("customer_phone") or context.get("phone") or doc.from_number
-        doc.to_number = (
-            payload.get("to")
-            or payload.get("called_number")
-            or context.get("called_number")
-            or context.get("inbound_phone_number")
-            or context.get("outbound_phone_number")
-            or doc.to_number
-        )
-        doc.call_uuid = doc.call_uuid or call_uuid
-        doc.sip_call_id = payload.get("sip_call_id") or payload.get("room_name") or payload.get("room") or doc.sip_call_id
-        doc.trunk_id = payload.get("trunk_id") or context.get("trunk_id") or task.trunk_id or doc.trunk_id
-        doc.domain = payload.get("domain") or context.get("vobiz_domain") or doc.domain
-        doc.reason = payload.get("reason") or doc.reason
-        doc.last_payload_json = as_json(payload)
-        if diagnostics_enabled and doc.meta.has_field("livekit_diagnostic_timeline_json"):
-            doc.livekit_diagnostic_timeline_json = as_json(
-                _append_livekit_diagnostic_timeline(
-                    doc.livekit_diagnostic_timeline_json,
-                    payload,
-                )
+        for save_attempt in range(3):
+            existing = _livekit_call_log_name(payload, task, call_uuid)
+            doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
+            _apply_livekit_call_log_payload(
+                doc,
+                payload,
+                task,
+                attempt,
+                diagnostics_enabled=diagnostics_enabled,
+                context=context,
+                livekit_event=livekit_event,
+                event_type_lower=event_type_lower,
+                call_uuid=call_uuid,
             )
-
-        status = str(payload.get("status") or livekit_event or "").lower()
-        if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
-            doc.status = "Completed"
-        elif status in {"failed", "room_failed", "call_failed"}:
-            doc.status = "Failed"
-        elif status in {"running", "room_started", "participant_joined", "initiated"}:
-            doc.status = "In Progress"
-        elif not doc.status:
-            doc.status = "Unknown"
-
-        if event_type_lower in {"room_started", "participant_joined", "initiated"}:
-            doc.initiated_payload_json = as_json(payload)
-            doc.started_at = payload.get("started_at") or doc.started_at or now()
-        elif event_type_lower in {"room_finished", "call_ended", "participant_left", "completed", "failed", "room_failed", "call_failed"}:
-            doc.status_payload_json = as_json(payload)
-            doc.started_at = payload.get("started_at") or doc.started_at
-            doc.ended_at = payload.get("ended_at") or doc.ended_at or now()
-
-        duration = payload.get("duration_sec") or payload.get("duration") or payload.get("duration_ms")
-        if duration is not None:
             try:
-                value = float(duration)
-                doc.duration_sec = int(value / 1000) if value > 5000 else int(value)
-            except (TypeError, ValueError):
-                pass
-
-        transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
-        if transcript:
-            doc.transcript = transcript
-            doc.transcript_summary = payload.get("summary") or payload.get("transcript_summary") or str(transcript)[:1000]
-            doc.transcript_payload_json = as_json(payload)
-
-        recording_url = payload.get("recording_url") or payload.get("url") or payload.get("recording")
-        if recording_url:
-            doc.recording_url = recording_url
-            doc.external_recording_url = recording_url
-            doc.recording_payload_json = as_json(payload)
-
-        doc.save(ignore_permissions=True)
+                doc.save(ignore_permissions=True)
+                return
+            except TimestampMismatchError:
+                if hasattr(frappe, "clear_messages"):
+                    frappe.clear_messages()
+                if save_attempt == 2:
+                    raise
     except Exception as exc:
         create_error("LiveKit Call Log", str(exc), source="livekit", task=task.name, exc=exc)
 
