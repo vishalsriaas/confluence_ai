@@ -175,6 +175,9 @@ def _voice_metadata_context(payload: dict) -> dict:
     if not is_sales_flow:
         return payload
 
+    start_context_whatsapp_summary = _extract_start_context_whatsapp_summary(payload)
+    start_context_whatsapp_found = bool(start_context_whatsapp_summary)
+
     allowed_keys = [
         "event",
         "customer_name",
@@ -192,6 +195,11 @@ def _voice_metadata_context(payload: dict) -> dict:
         "outbound_phone_number",
     ]
     compact = {key: payload.get(key) for key in allowed_keys if payload.get(key) not in (None, "", [], {})}
+
+    if start_context_whatsapp_summary and not compact.get("whatsapp_conversation_summary"):
+        compact["whatsapp_conversation_summary"] = start_context_whatsapp_summary[:1800]
+    if start_context_whatsapp_found and compact.get("whatsapp_conversation_found") in (None, "", [], {}):
+        compact["whatsapp_conversation_found"] = True
 
     sales_brief = str(payload.get("sales_brief") or "")
     if sales_brief:
@@ -212,6 +220,54 @@ def _voice_metadata_context(payload: dict) -> dict:
 
     compact["voice_context_compacted"] = 1
     return compact
+
+
+def _extract_start_context_whatsapp_summary(payload: dict) -> str:
+    start_context = payload.get("start_context_tools")
+    if not isinstance(start_context, dict):
+        return ""
+
+    summaries: list[str] = []
+    for tool_name, result in start_context.items():
+        if not isinstance(result, dict):
+            continue
+        haystack = f"{tool_name} {result.get('summary') or ''}".lower()
+        if not any(marker in haystack for marker in ("whatsapp", "wa chat", "chat summary", "conversation summary")):
+            continue
+
+        tool_summaries: list[str] = []
+        for record in result.get("records") or []:
+            if isinstance(record, dict):
+                summary = str(
+                    record.get("chat_summary")
+                    or record.get("conversation_summary")
+                    or record.get("whatsapp_conversation_summary")
+                    or ""
+                ).strip()
+                if summary:
+                    tool_summaries.append(" ".join(summary.split()))
+
+        fallback_summary = str(
+            result.get("chat_summary")
+            or result.get("conversation_summary")
+            or result.get("whatsapp_conversation_summary")
+            or result.get("summary")
+            or ""
+        ).strip()
+        if tool_summaries:
+            summaries.extend(tool_summaries)
+        elif fallback_summary:
+            summaries.append(" ".join(fallback_summary.split()))
+
+    deduped: list[str] = []
+    seen = set()
+    for summary in summaries:
+        key = summary.lower()
+        if key and key not in seen:
+            deduped.append(summary)
+            seen.add(key)
+
+    return " ".join(deduped)[:1800]
 
 
 def _livekit_dispatch_name(agent, endpoints: dict, payload: dict) -> str:

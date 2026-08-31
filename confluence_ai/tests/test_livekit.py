@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import frappe
 from frappe.exceptions import TimestampMismatchError
 
-from confluence_ai.services.livekit import _outbound_sip_trunk_id, _upsert_livekit_call_log
+from confluence_ai.services.livekit import _outbound_sip_trunk_id, _upsert_livekit_call_log, _voice_metadata_context
 
 
 class TestLiveKit(unittest.TestCase):
@@ -76,3 +76,32 @@ class TestLiveKit(unittest.TestCase):
         self.assertEqual(second_doc.status, "Completed")
         self.assertEqual(second_doc.duration_sec, 31)
         create_error.assert_not_called()
+
+    def test_voice_metadata_promotes_start_context_whatsapp_summary(self):
+        context = {
+            "event": "inbound-sales-call",
+            "customer_phone": "9582005503",
+            "selected_sales_route": {"route": "sales-route"},
+            "start_context_tools": {
+                "GLOBIFIT_whatsapp_conversation_summary": {
+                    "status": "success",
+                    "found": True,
+                    "summary": "1. Chat Summary: fallback should not be preferred.",
+                    "records": [
+                        {
+                            "channel_account": "GLOBIFIT_MI",
+                            "chat_summary": "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+                        }
+                    ],
+                }
+            },
+        }
+
+        metadata = _voice_metadata_context(context)
+
+        self.assertTrue(metadata["whatsapp_conversation_found"])
+        self.assertEqual(
+            metadata["whatsapp_conversation_summary"],
+            "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+        )
+        self.assertNotIn("start_context_tools", metadata)
