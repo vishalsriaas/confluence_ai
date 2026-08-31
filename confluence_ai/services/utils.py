@@ -185,7 +185,7 @@ def _extract_provider_chat_summary(response: dict) -> str:
     if not isinstance(response, dict):
         return ""
 
-    for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary"):
+    for key in ("ai_summary", "whatsapp_conversation_summary", "conversation_summary", "chat_summary"):
         value = response.get(key)
         if value not in (None, "", [], {}):
             return str(value)
@@ -196,7 +196,7 @@ def _extract_provider_chat_summary(response: dict) -> str:
         for row in body[:3]:
             if not isinstance(row, dict):
                 continue
-            for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary", "ai_summary"):
+            for key in ("ai_summary", "whatsapp_conversation_summary", "conversation_summary", "chat_summary"):
                 value = row.get(key)
                 if value not in (None, "", [], {}):
                     summaries.append(str(value))
@@ -204,7 +204,7 @@ def _extract_provider_chat_summary(response: dict) -> str:
         return "\n".join(summaries)[:1800]
 
     if isinstance(body, dict):
-        for key in ("chat_summary", "conversation_summary", "whatsapp_conversation_summary", "ai_summary"):
+        for key in ("ai_summary", "whatsapp_conversation_summary", "conversation_summary", "chat_summary"):
             value = body.get(key)
             if value not in (None, "", [], {}):
                 return str(value)

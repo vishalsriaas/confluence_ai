@@ -164,10 +164,14 @@ def _summary_request_payload(
     instructions = (
         "Create a compact WhatsApp conversation summary for a voice agent. "
         "Use only the provided chat messages and record context. Do not invent. "
-        "Keep Hinglish/Hindi customer wording where useful. Include customer concern, "
-        "symptoms, name/age/location if shared, intent, objections, promised follow-up, "
-        "last useful customer message, and what the business already asked/replied. "
-        "Return only the summary text, no markdown heading."
+        "Summarize the useful customer/business context the next voice agent should know and can safely mention. "
+        "Keep Hinglish/Hindi customer wording where useful. Include customer name, age, city/address/phone only if shared, "
+        "concern, symptoms, duration, intent, objections, promised follow-up, order/payment/status details, "
+        "last useful customer message, and the exact current pending point. "
+        "Ignore automation noise such as repeated duplicate bot prompts, wrong confirmation-code loops, generic fallback lines, "
+        "and accidental partial confirmations unless they changed the real customer state. "
+        "Do not treat short replies like yes/ok as a name when a name was already known. "
+        "Return one concise paragraph, no markdown heading."
     )
     content = {
         "record_context": context,

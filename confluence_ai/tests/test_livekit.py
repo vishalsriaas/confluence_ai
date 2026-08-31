@@ -90,7 +90,8 @@ class TestLiveKit(unittest.TestCase):
                     "records": [
                         {
                             "channel_account": "GLOBIFIT_MI",
-                            "chat_summary": "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+                            "ai_summary": "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+                            "chat_summary": "Old/noisy summary should not be preferred.",
                         }
                     ],
                 }

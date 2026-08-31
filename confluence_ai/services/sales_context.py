@@ -223,8 +223,9 @@ def enrich_start_context_tools(
             }
             if _looks_like_whatsapp_context_tool(tool):
                 enriched["whatsapp_conversation_found"] = 1 if records else 0
-                if summary:
-                    enriched["whatsapp_conversation_summary"] = summary
+                prompt_summary = _first_record_chat_summary(records) or summary
+                if prompt_summary:
+                    enriched["whatsapp_conversation_summary"] = prompt_summary
         except Exception as exc:
             start_context[tool.tool_name] = {"status": "failed", "error": str(exc)[:500]}
             create_error(
@@ -1578,6 +1579,21 @@ def _summarize_start_context_records(records: list[dict[str, Any]]) -> str:
         if message_lines:
             lines.append("   WhatsApp messages: " + message_lines)
     return "\n".join(lines)[:1800]
+
+
+def _first_record_chat_summary(records: list[dict[str, Any]]) -> str:
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        value = (
+            record.get("ai_summary")
+            or record.get("whatsapp_conversation_summary")
+            or record.get("conversation_summary")
+            or record.get("chat_summary")
+        )
+        if value not in (None, "", [], {}):
+            return _stringify(value).replace("\n", " ").strip()[:1800]
+    return ""
 
 
 def _summarize_related_messages(messages: list[dict[str, Any]]) -> str:

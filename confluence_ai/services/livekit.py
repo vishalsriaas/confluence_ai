@@ -239,18 +239,20 @@ def _extract_start_context_whatsapp_summary(payload: dict) -> str:
         for record in result.get("records") or []:
             if isinstance(record, dict):
                 summary = str(
-                    record.get("chat_summary")
-                    or record.get("conversation_summary")
+                    record.get("ai_summary")
                     or record.get("whatsapp_conversation_summary")
+                    or record.get("conversation_summary")
+                    or record.get("chat_summary")
                     or ""
                 ).strip()
                 if summary:
                     tool_summaries.append(" ".join(summary.split()))
 
         fallback_summary = str(
-            result.get("chat_summary")
-            or result.get("conversation_summary")
+            result.get("ai_summary")
             or result.get("whatsapp_conversation_summary")
+            or result.get("conversation_summary")
+            or result.get("chat_summary")
             or result.get("summary")
             or ""
         ).strip()

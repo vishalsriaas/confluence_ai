@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import frappe
 from confluence_ai.services.utils import as_json, now
 
@@ -200,7 +201,9 @@ def handle_callback(payload: dict) -> dict:
         task.vobiz_transcript_payload = as_json(payload)
         if attempt:
             attempt.vobiz_transcript_payload = as_json(payload)
-        transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+        transcript = normalize_vobiz_ai_transcript_labels(
+            payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+        )
         if transcript:
             task_result["transcript"] = transcript
             task.transcript = transcript
@@ -678,7 +681,9 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
         except (TypeError, ValueError):
             pass
 
-    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+    transcript = normalize_vobiz_ai_transcript_labels(
+        payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+    )
     if event_type_lower in {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
         doc.transcript_payload_json = as_json(payload)
         if transcript:
@@ -695,6 +700,18 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
 
     doc.save(ignore_permissions=True)
     return doc.name
+
+
+def normalize_vobiz_ai_transcript_labels(transcript: object) -> str:
+    text = str(transcript or "")
+    if "[AGENT]:" not in text or "[CUSTOMER]:" not in text:
+        return text
+    # In Vobiz bridged AI calls, the PSTN caller can arrive as AGENT and the
+    # AI audio as CUSTOMER. Normalize logs to Confluence meaning.
+    text = re.sub(r"\[AGENT\]\s*:", "[CALLER_TMP]:", text)
+    text = re.sub(r"\[CUSTOMER\]\s*:", "[AGENT]:", text)
+    text = re.sub(r"\[CALLER_TMP\]\s*:", "[CUSTOMER]:", text)
+    return text
 
 
 def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:

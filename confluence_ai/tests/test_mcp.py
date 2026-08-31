@@ -6,7 +6,7 @@ import frappe
 
 from confluence_ai.api.mcp import summarize_related_messages_for_prompt
 from confluence_ai.services.mcp import assert_tool_allowed
-from confluence_ai.services.sales_context import _summarize_start_context_records
+from confluence_ai.services.sales_context import _first_record_chat_summary, _summarize_start_context_records
 from confluence_ai.services.utils import _extract_provider_chat_summary
 
 
@@ -62,7 +62,8 @@ class TestMCPPermissions(unittest.TestCase):
             {
                 "body": [
                     {
-                        "chat_summary": "Customer discussed erection concern and shared age 32.",
+                        "ai_summary": "Customer discussed erection concern and shared age 32.",
+                        "chat_summary": "Old/noisy summary should not win.",
                         "related_messages": [{"body": "raw row should not be needed"}],
                     }
                 ]
@@ -85,3 +86,19 @@ class TestMCPPermissions(unittest.TestCase):
 
         self.assertIn("Chat Summary: Customer discussed erection concern", summary)
         self.assertNotIn("raw chat row", summary)
+
+    def test_prompt_summary_prefers_ai_chat_summary_only(self):
+        summary = _first_record_chat_summary(
+            [
+                {
+                    "ai_summary": "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+                    "chat_summary": "Old/noisy summary should not win.",
+                    "last_message_preview": "Debug-only last message should not be part of prompt summary.",
+                }
+            ]
+        )
+
+        self.assertEqual(
+            summary,
+            "Customer discussed erection concern, shared age 32, and asked to confirm order.",
+        )

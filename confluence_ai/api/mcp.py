@@ -547,6 +547,8 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
             )
             if chat_summary:
                 record["chat_summary"] = chat_summary
+                record["ai_summary"] = chat_summary
+                record["whatsapp_conversation_summary"] = chat_summary
         except Exception as exc:
             record["related_messages_error"] = str(exc)[:300]
     return records
