@@ -57,6 +57,10 @@ def execute_task(task_name: str) -> dict:
 
     try:
         payload = parse_json_object(task.context_json, "Task Context JSON")
+        payload = _prepare_voice_start_context(task, payload)
+        if task.channel == "Voice" and attempt.request_json != task.context_json:
+            attempt.request_json = task.context_json
+            attempt.save(ignore_permissions=True)
         result = _run_channel(task, payload)
         
         # Reload docs to get any potential updates from concurrent callbacks
@@ -127,6 +131,24 @@ def _run_channel(task, payload: dict) -> dict:
     return {"status": "completed", "channel": task.channel or "API", "payload": payload}
 
 
+def _prepare_voice_start_context(task, payload: dict) -> dict:
+    if task.channel != "Voice":
+        return payload
+
+    agent_name = task.assigned_agent or task.target_agent
+    if not agent_name or not frappe.db.exists("AI Agent", agent_name):
+        return payload
+
+    from confluence_ai.services.sales_context import enrich_start_context_tools
+
+    agent = frappe.get_doc("AI Agent", agent_name)
+    enriched = enrich_start_context_tools(payload, agent=agent, task_id=task.name)
+    if enriched != payload:
+        task.context_json = as_json(enriched)
+        task.save(ignore_permissions=True)
+    return enriched
+
+
 def run_task_5():
     tasks = frappe.get_all("AI Task", filters={"name": ["like", "%5"]})
     if not tasks:
@@ -138,4 +160,3 @@ def run_task_5():
     frappe.db.commit()
     result = execute_task(task_name)
     print(f"Result: {result}")
-
