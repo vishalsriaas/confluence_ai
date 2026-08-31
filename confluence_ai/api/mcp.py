@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import quote, urljoin
 import frappe
 from confluence_ai.services.auth import require_access
+from confluence_ai.services.chat_summary import get_chat_summary_config, summarize_whatsapp_chat_with_ai
 from confluence_ai.services.utils import as_json, create_error, get_request_json, parse_json_object, record_provider_event
 from confluence_ai.services.mcp import assert_tool_allowed
 
@@ -396,7 +397,7 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
         # Log response
         body = response.json().get("data", []) if response.ok else response.text[:4000]
         if response.ok:
-            body = attach_related_messages_to_records(tool, body, server=server, headers=headers)
+            body = attach_related_messages_to_records(tool, body, server=server, headers=headers, task_id=task_id)
         result = {"status_code": response.status_code, "ok": response.ok, "body": body}
         record_mcp_event(tool.tool_name, arguments, result, task_id)
         
@@ -473,7 +474,7 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
     raise ValueError(f"Operation {op_type} not supported.")
 
 
-def attach_related_messages_to_records(tool, records, *, server=None, headers=None):
+def attach_related_messages_to_records(tool, records, *, server=None, headers=None, task_id: str | None = None):
     """Optionally attach related message rows for read tools.
 
     The mapping stays tool-configured: DocType, link field, read fields, and
@@ -484,6 +485,11 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
     if not isinstance(records, list) or not records:
         return records
 
+    agent = frappe.db.get_value("AI Task", task_id, "assigned_agent") if task_id else None
+    if not agent and task_id:
+        agent = frappe.db.get_value("AI Task", task_id, "target_agent")
+    company = frappe.db.get_value("AI Task", task_id, "company") if task_id else None
+
     related_doctype = (tool.get("related_message_doctype") or "Chat Message").strip()
     conversation_field = (tool.get("related_message_conversation_field") or "conversation").strip()
     body_field = (tool.get("related_message_body_field") or "body").strip()
@@ -491,7 +497,13 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
     sender_field = (tool.get("related_message_sender_field") or "sender_type").strip()
     time_field = (tool.get("related_message_time_field") or "creation").strip()
     limit = _safe_int(tool.get("related_message_limit"), 20)
-    limit = max(1, min(limit, 100))
+    try:
+        summary_config = get_chat_summary_config()
+        if summary_config.enabled:
+            limit = max(limit, summary_config.max_messages)
+    except Exception:
+        pass
+    limit = max(1, min(limit, 500))
 
     read_fields = []
     for field in ("name", conversation_field, direction_field, sender_field, "content_type", body_field, "delivery_status", time_field):
@@ -526,7 +538,13 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
                     limit,
                 )
             record["related_messages"] = messages
-            chat_summary = summarize_related_messages_for_prompt(record, messages)
+            chat_summary = summarize_related_messages_for_prompt(
+                record,
+                messages,
+                task_id=task_id,
+                agent=agent,
+                company=company,
+            )
             if chat_summary:
                 record["chat_summary"] = chat_summary
         except Exception as exc:
@@ -534,13 +552,30 @@ def attach_related_messages_to_records(tool, records, *, server=None, headers=No
     return records
 
 
-def summarize_related_messages_for_prompt(record: dict[str, Any], messages: list[dict[str, Any]]) -> str:
+def summarize_related_messages_for_prompt(
+    record: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    task_id: str | None = None,
+    agent: str | None = None,
+    company: str | None = None,
+) -> str:
     """Build a compact customer-history summary from related chat messages.
 
     This keeps voice prompts small while still carrying the useful WhatsApp context.
     """
     if not isinstance(messages, list) or not messages:
         return ""
+
+    ai_summary = summarize_whatsapp_chat_with_ai(
+        record,
+        messages,
+        task_id=task_id,
+        agent=agent,
+        company=company,
+    )
+    if ai_summary:
+        return ai_summary
 
     customer_messages: list[str] = []
     business_messages: list[str] = []

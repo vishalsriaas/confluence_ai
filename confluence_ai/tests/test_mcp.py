@@ -39,6 +39,24 @@ class TestMCPPermissions(unittest.TestCase):
         self.assertIn("Ramy 32 age", summary)
         self.assertLessEqual(len(summary), 1800)
 
+    @patch("confluence_ai.api.mcp.summarize_whatsapp_chat_with_ai")
+    def test_related_messages_prefers_ai_chat_summary(self, fake_ai_summary):
+        fake_ai_summary.return_value = "AI summary: customer shared erection concern and age 32."
+
+        summary = summarize_related_messages_for_prompt(
+            {"channel_account": "GLOBIFIT_MI"},
+            [
+                {"direction": "Inbound", "sender_type": "Customer", "body": "erection"},
+                {"direction": "Inbound", "sender_type": "Customer", "body": "Ramy 32 age"},
+            ],
+            task_id="task-1",
+            agent="agent-1",
+            company="globifit",
+        )
+
+        self.assertEqual(summary, "AI summary: customer shared erection concern and age 32.")
+        fake_ai_summary.assert_called_once()
+
     def test_provider_event_summary_extracts_from_mcp_body(self):
         summary = _extract_provider_chat_summary(
             {
