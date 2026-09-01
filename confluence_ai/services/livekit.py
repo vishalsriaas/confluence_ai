@@ -751,7 +751,7 @@ def handle_callback(payload: dict) -> dict:
                 payload,
             )
 
-    _upsert_livekit_call_log(payload, task, attempt, diagnostics_enabled=diagnostics_enabled)
+    call_log = _upsert_livekit_call_log(payload, task, attempt, diagnostics_enabled=diagnostics_enabled)
 
     # Update statuses
     if event_type_lower in {"room_started", "participant_joined", "initiated"}:
@@ -844,6 +844,7 @@ def handle_callback(payload: dict) -> dict:
         attempt.save(ignore_permissions=True)
 
     frappe.db.commit()
+    disposition_result = _enqueue_call_disposition_if_ready(call_log, event_type_lower)
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
     repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
     fresh_followup_result = _handle_fresh_followup_callback(task, payload, event_type_lower)
@@ -852,7 +853,9 @@ def handle_callback(payload: dict) -> dict:
         "status": "success",
         "task": task.name,
         "attempt": attempt.name if attempt else None,
+        "call_log": call_log,
         "processed_event": event_type,
+        "ai_disposition": disposition_result,
         "order_confirmation": order_confirmation_result,
         "repeat_followup": repeat_followup_result,
         "fresh_followup": fresh_followup_result,
@@ -1108,10 +1111,10 @@ def _apply_livekit_call_log_payload(
         doc.recording_payload_json = as_json(payload)
 
 
-def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enabled: bool = False) -> None:
+def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enabled: bool = False) -> str | None:
     """Create/update the human-facing call log from LiveKit callbacks."""
     if not frappe.db.exists("DocType", "AI Call Log"):
-        return
+        return None
 
     try:
         context = parse_json_object(task.context_json)
@@ -1142,7 +1145,7 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
             )
             try:
                 doc.save(ignore_permissions=True)
-                return
+                return doc.name
             except TimestampMismatchError:
                 if hasattr(frappe, "clear_messages"):
                     frappe.clear_messages()
@@ -1150,6 +1153,28 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
                     raise
     except Exception as exc:
         create_error("LiveKit Call Log", str(exc), source="livekit", task=task.name, exc=exc)
+    return None
+
+
+def _enqueue_call_disposition_if_ready(call_log: str | None, event_type_lower: str) -> dict | None:
+    if event_type_lower not in {
+        "room_finished",
+        "call_ended",
+        "participant_left",
+        "transcript_ready",
+        "completed",
+        "failed",
+        "room_failed",
+        "call_failed",
+    }:
+        return None
+    try:
+        from confluence_ai.services.call_disposition import enqueue_call_disposition
+
+        return enqueue_call_disposition(call_log)
+    except Exception as exc:
+        create_error("AI Call Disposition Queue", str(exc), source="livekit", payload={"call_log": call_log}, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def test_livekit_callback():

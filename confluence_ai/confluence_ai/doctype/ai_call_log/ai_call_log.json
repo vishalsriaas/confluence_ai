@@ -34,6 +34,13 @@
   "transcript_summary",
   "transcript",
   "sentiment",
+  "ai_disposition_section",
+  "ai_disposition",
+  "ai_disposition_reason",
+  "ai_disposition_confidence",
+  "ai_disposition_summary",
+  "erp_status_update_status",
+  "erp_status_update_response",
   "payload_section",
   "last_payload_json",
   "initiated_payload_json",
@@ -220,6 +227,46 @@
    "fieldname": "sentiment",
    "fieldtype": "Data",
    "label": "Sentiment"
+  },
+  {
+   "fieldname": "ai_disposition_section",
+   "fieldtype": "Section Break",
+   "label": "AI Disposition"
+  },
+  {
+   "fieldname": "ai_disposition",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "AI Disposition",
+   "options": "\nDuplicate\nExisting Patient\nFinancial Issue\nFollow up\nFresh\nNot Answered\nOrder Placed\nOther Disease\nNot Interested"
+  },
+  {
+   "fieldname": "ai_disposition_reason",
+   "fieldtype": "Small Text",
+   "label": "AI Disposition Reason"
+  },
+  {
+   "fieldname": "ai_disposition_confidence",
+   "fieldtype": "Float",
+   "label": "AI Disposition Confidence"
+  },
+  {
+   "fieldname": "ai_disposition_summary",
+   "fieldtype": "Long Text",
+   "label": "AI Disposition Summary"
+  },
+  {
+   "fieldname": "erp_status_update_status",
+   "fieldtype": "Select",
+   "label": "ERP Status Update Status",
+   "options": "\nPending\nSucceeded\nFailed\nSkipped"
+  },
+  {
+   "fieldname": "erp_status_update_response",
+   "fieldtype": "Code",
+   "label": "ERP Status Update Response",
+   "options": "JSON"
   },
   {
    "fieldname": "payload_section",

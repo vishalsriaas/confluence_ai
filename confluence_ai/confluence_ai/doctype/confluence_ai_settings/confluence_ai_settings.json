@@ -30,6 +30,15 @@
   "whatsapp_summary_max_messages",
   "whatsapp_summary_max_input_chars",
   "whatsapp_summary_max_output_chars",
+  "ai_disposition_section",
+  "enable_ai_disposition",
+  "ai_disposition_provider",
+  "ai_disposition_model",
+  "ai_disposition_api_key",
+  "ai_disposition_base_url",
+  "ai_disposition_path",
+  "ai_disposition_timeout_seconds",
+  "ai_disposition_update_mcp_tool_name",
   "rag_section",
   "embedding_provider",
   "embedding_model",
@@ -197,6 +206,62 @@
    "fieldname": "whatsapp_summary_max_output_chars",
    "fieldtype": "Int",
    "label": "WhatsApp Summary Max Output Chars"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "ai_disposition_section",
+   "fieldtype": "Section Break",
+   "label": "AI Call Disposition"
+  },
+  {
+   "default": "1",
+   "description": "After a voice transcript arrives, classify the call outcome and update the mapped CRM Lead status.",
+   "fieldname": "enable_ai_disposition",
+   "fieldtype": "Check",
+   "label": "Enable AI Disposition"
+  },
+  {
+   "default": "Gemini",
+   "fieldname": "ai_disposition_provider",
+   "fieldtype": "Select",
+   "label": "AI Disposition Provider",
+   "options": "Gemini\nOpenAI\nOpenAI Compatible"
+  },
+  {
+   "default": "gemini-2.5-flash",
+   "fieldname": "ai_disposition_model",
+   "fieldtype": "Data",
+   "label": "AI Disposition Model"
+  },
+  {
+   "description": "Optional if the key exists in site config as gemini_api_key/google_api_key/openai_api_key. Stored encrypted by Frappe.",
+   "fieldname": "ai_disposition_api_key",
+   "fieldtype": "Password",
+   "label": "AI Disposition API Key"
+  },
+  {
+   "default": "https://generativelanguage.googleapis.com/v1beta",
+   "fieldname": "ai_disposition_base_url",
+   "fieldtype": "Data",
+   "label": "AI Disposition Base URL"
+  },
+  {
+   "description": "Use /chat/completions for OpenAI/OpenAI Compatible. Gemini ignores this.",
+   "fieldname": "ai_disposition_path",
+   "fieldtype": "Data",
+   "label": "AI Disposition Path"
+  },
+  {
+   "default": "20",
+   "fieldname": "ai_disposition_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "AI Disposition Timeout Seconds"
+  },
+  {
+   "description": "Optional exact AI MCP Tool name. If blank, Confluence tries COMPANY_update_crm_lead_status, then update_crm_lead_status.",
+   "fieldname": "ai_disposition_update_mcp_tool_name",
+   "fieldtype": "Data",
+   "label": "AI Disposition Update MCP Tool Name"
   },
   {
    "collapsible": 1,

@@ -87,6 +87,7 @@ def handle_callback(payload: dict) -> dict:
         attempt = frappe.get_doc("AI Task Attempt", attempts[0]) if attempts else None
         call_log = upsert_call_log(payload, task=task, attempt=attempt)
         frappe.db.commit()
+        _enqueue_call_disposition_if_ready(call_log, payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update")
         inbound_result["call_log"] = call_log
         return inbound_result
 
@@ -250,6 +251,7 @@ def handle_callback(payload: dict) -> dict:
         attempt.save(ignore_permissions=True)
 
     frappe.db.commit()
+    disposition_result = _enqueue_call_disposition_if_ready(call_log, event_type_lower)
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
     repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
     fresh_followup_result = _handle_fresh_followup_callback(task, payload, event_type_lower)
@@ -260,10 +262,39 @@ def handle_callback(payload: dict) -> dict:
         "attempt": attempt.name if attempt else None,
         "call_log": call_log,
         "processed_event": event_type,
+        "ai_disposition": disposition_result,
         "order_confirmation": order_confirmation_result,
         "repeat_followup": repeat_followup_result,
         "fresh_followup": fresh_followup_result,
     }
+
+
+def _enqueue_call_disposition_if_ready(call_log: str | None, event_type: str) -> dict | None:
+    event_type_lower = str(event_type or "").lower()
+    if event_type_lower not in {
+        "status",
+        "hangup",
+        "completed",
+        "failed",
+        "busy",
+        "no_answer",
+        "timeout",
+        "cancel",
+        "transcript",
+        "call_transcript",
+        "transcript_ready",
+        "transcription.completed",
+    }:
+        return None
+    try:
+        from confluence_ai.services.call_disposition import enqueue_call_disposition
+
+        return enqueue_call_disposition(call_log)
+    except Exception as exc:
+        from confluence_ai.services.utils import create_error
+
+        create_error("AI Call Disposition Queue", str(exc), source="vobiz", payload={"call_log": call_log}, exc=exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _handle_order_confirmation_callback(task, payload: dict, event_type_lower: str) -> dict | None:
