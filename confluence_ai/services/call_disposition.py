@@ -31,6 +31,7 @@ DEFAULT_DISPOSITION_INSTRUCTIONS = (
     "Use only the transcript and context. Do not invent. "
     "Allowed statuses: Duplicate, Existing Patient, Financial Issue, Follow up, Fresh, Not Answered, Order Placed, Other Disease, Not Interested. "
     "Return JSON only with keys: ai_disposition, ai_disposition_reason, ai_disposition_confidence, ai_disposition_summary. "
+    "If company-specific rules ask for a custom ERP disposition field, also return custom_vobiz_disposition with the exact disposition label. "
     "Use Order Placed only if customer clearly agreed to order/treatment or payment/order was confirmed. "
     "Use Follow up if customer asked to call later, needs family discussion, is busy, or decision is pending. "
     "Use Financial Issue if price/payment is the main blocker. "
@@ -142,6 +143,9 @@ def classify_transcript(doc, transcript: str, config: DispositionConfig) -> dict
         "ai_disposition_confidence": confidence,
         "ai_disposition_summary": summary or transcript[:1000],
     }
+    custom_vobiz_disposition = _clean_text(decision.get("custom_vobiz_disposition"))
+    if custom_vobiz_disposition:
+        result["custom_vobiz_disposition"] = custom_vobiz_disposition
     record_provider_event(
         provider=config.provider,
         operation="ai_call_disposition",
@@ -169,21 +173,42 @@ def update_crm_lead_status(doc, decision: dict, config: DispositionConfig) -> di
     if not lead_id:
         lead_id = _find_remote_lead_id_by_phone(tool, phone)
 
+    if _tool_uses_lead_id_filter(tool) and not lead_id:
+        return {
+            "erp_status_update_status": "Skipped",
+            "reason": "No CRM lead id was available for the configured update filter.",
+            "phone": phone,
+        }
+
     if not lead_id and not phone:
         return {
             "erp_status_update_status": "Skipped",
             "reason": "No CRM lead id or phone was available for update.",
         }
 
+    phone_values = _phone_argument_values(phone)
+    custom_vobiz_disposition = _resolve_custom_vobiz_disposition(tool, decision)
+    if _tool_writes_custom_vobiz_disposition(tool) and not custom_vobiz_disposition:
+        return {
+            "erp_status_update_status": "Skipped",
+            "reason": "No valid SR Lead Disposition was available for custom_vobiz_disposition.",
+            "phone": phone,
+        }
     arguments = {
         "lead_id": lead_id,
         "name": lead_id,
         "crm_lead": lead_id,
         "phone": phone,
-        "mobile_no": phone,
+        "phone_e164": phone_values.get("phone_e164"),
+        "phone_last10": phone_values.get("phone_last10"),
+        "phone_91": phone_values.get("phone_91"),
+        "mobile_no": phone_values.get("mobile_no") or phone,
+        "normalized_phone": phone_values.get("phone_91") or phone,
         "customer_phone": phone,
         "status": decision.get("ai_disposition"),
         "ai_disposition": decision.get("ai_disposition"),
+        "custom_vobiz_disposition": custom_vobiz_disposition,
+        "custom_vobiz_disposition_label": _clean_text(decision.get("custom_vobiz_disposition")),
         "ai_disposition_reason": decision.get("ai_disposition_reason"),
         "ai_disposition_confidence": decision.get("ai_disposition_confidence"),
         "ai_disposition_summary": decision.get("ai_disposition_summary"),
@@ -200,6 +225,7 @@ def update_crm_lead_status(doc, decision: dict, config: DispositionConfig) -> di
         "tool_name": tool.tool_name,
         "lead_id": lead_id,
         "phone": phone,
+        "custom_vobiz_disposition": custom_vobiz_disposition,
         "result": result,
     }
 
@@ -429,6 +455,112 @@ def _find_remote_lead_id_by_phone(tool, phone: str | None) -> str | None:
     return None
 
 
+def _tool_uses_lead_id_filter(tool) -> bool:
+    for mapping in tool.match_filters or []:
+        if (mapping.value_source == "From Tool Arguments") and (
+            (mapping.source_value or mapping.client_field) in {"lead_id", "name", "crm_lead"}
+        ):
+            return True
+    return False
+
+
+def _resolve_custom_vobiz_disposition(tool, decision: dict) -> str:
+    if not _tool_writes_custom_vobiz_disposition(tool):
+        return ""
+
+    requested = _clean_text(decision.get("custom_vobiz_disposition"))
+    if requested:
+        resolved = _find_remote_disposition_id(tool, requested)
+        if resolved:
+            return resolved
+
+    fallback = _fallback_vobiz_disposition_label(decision)
+    if fallback:
+        resolved = _find_remote_disposition_id(tool, fallback)
+        if resolved:
+            return resolved
+    return ""
+
+
+def _tool_writes_custom_vobiz_disposition(tool) -> bool:
+    return any(mapping.client_field == "custom_vobiz_disposition" for mapping in (tool.fields_to_write or []))
+
+
+def _find_remote_disposition_id(tool, label: str) -> str:
+    label = _clean_text(label)
+    if not label or not tool.get("server"):
+        return ""
+
+    from confluence_ai.api.mcp import get_server_headers
+
+    try:
+        server = frappe.get_doc("AI MCP Server", tool.server)
+        headers = get_server_headers(server)
+        url = urljoin((server.server_url or "").rstrip() + "/", "api/resource/SR Lead Disposition")
+        for fieldname in ("name", "sr_disposition_name"):
+            response = requests.get(
+                url,
+                headers=headers,
+                params={
+                    "filters": json.dumps([[fieldname, "=", label]]),
+                    "fields": json.dumps(["name"]),
+                    "limit_page_length": 1,
+                },
+                timeout=15,
+            )
+            if not response.ok:
+                continue
+            rows = response.json().get("data") or []
+            if rows and rows[0].get("name"):
+                return rows[0].get("name")
+    except Exception:
+        return ""
+    return ""
+
+
+def _fallback_vobiz_disposition_label(decision: dict) -> str:
+    disposition = _clean_text(decision.get("ai_disposition")).lower()
+    reason = _clean_text(decision.get("ai_disposition_reason")).lower()
+    summary = _clean_text(decision.get("ai_disposition_summary")).lower()
+    text = f"{reason} {summary}"
+
+    if disposition == "follow up":
+        if "family" in text or "ghar" in text:
+            return "Family Discussion"
+        if "busy" in text:
+            return "Busy"
+        if "report" in text:
+            return "Reports Pending"
+        if "address" in text:
+            return "Address Pending"
+        if "payment" in text:
+            return "Payment Pending"
+        return "Call Back"
+    if disposition == "financial issue":
+        if "discount" in text:
+            return "Want Discount"
+        return "Can't Afford"
+    if disposition == "not answered":
+        if "switch" in text:
+            return "Switch Off"
+        if "reachable" in text or "out of service" in text:
+            return "Not Reachable"
+        if "busy" in text:
+            return "Busy"
+        return "Call Cut"
+    if disposition == "existing patient":
+        return "Existing Pt Query"
+    if disposition == "not interested":
+        return "Not Interested"
+    if disposition == "duplicate":
+        return "Fake Call"
+    if disposition == "other disease":
+        return "Non-treatable"
+    if disposition == "fresh":
+        return "General Queries"
+    return ""
+
+
 def _save_disposition(doc, decision: dict) -> None:
     doc.ai_disposition = decision.get("ai_disposition")
     doc.ai_disposition_reason = decision.get("ai_disposition_reason")
@@ -609,6 +741,20 @@ def _phone_variants(phone: str) -> list[str]:
         last10 = digits[-10:]
         values.extend([last10, f"91{last10}", f"+91{last10}", f"0{last10}"])
     return [value for index, value in enumerate(values) if value and value not in values[:index]]
+
+
+def _phone_argument_values(phone: str | None) -> dict[str, str]:
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) < 10:
+        return {"phone_e164": _clean_text(phone), "mobile_no": _clean_text(phone)}
+    last10 = digits[-10:]
+    phone_91 = f"91{last10}"
+    return {
+        "phone_e164": f"+{phone_91}",
+        "phone_91": phone_91,
+        "phone_last10": last10,
+        "mobile_no": phone_91,
+    }
 
 
 def _normalize_phone(value: Any) -> str | None:

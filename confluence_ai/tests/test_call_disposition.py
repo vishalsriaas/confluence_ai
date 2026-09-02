@@ -19,6 +19,24 @@ class TestCallDisposition(unittest.TestCase):
         self.assertIn("9873090386", variants)
         self.assertIn("919873090386", variants)
 
+    def test_phone_argument_values_use_crm_mobile_format(self):
+        values = call_disposition._phone_argument_values("+91 98730 90386")
+
+        self.assertEqual(values["phone_e164"], "+919873090386")
+        self.assertEqual(values["mobile_no"], "919873090386")
+        self.assertEqual(values["phone_last10"], "9873090386")
+
+    def test_fallback_vobiz_disposition_uses_specific_label(self):
+        label = call_disposition._fallback_vobiz_disposition_label(
+            {
+                "ai_disposition": "Follow up",
+                "ai_disposition_reason": "Customer needs family discussion.",
+                "ai_disposition_summary": "Caller will ask ghar par and confirm later.",
+            }
+        )
+
+        self.assertEqual(label, "Family Discussion")
+
     def test_lead_id_prefers_crm_lead_reference(self):
         class FakeDoc:
             def get(self, fieldname):
