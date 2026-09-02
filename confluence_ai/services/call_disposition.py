@@ -26,6 +26,21 @@ DISPOSITION_OPTIONS = {
 
 FINAL_NO_ANSWER_STATUSES = {"No Answer", "Busy", "Rejected", "Cancelled"}
 
+DEFAULT_DISPOSITION_INSTRUCTIONS = (
+    "Read the voice call transcript and choose exactly one CRM Lead status. "
+    "Use only the transcript and context. Do not invent. "
+    "Allowed statuses: Duplicate, Existing Patient, Financial Issue, Follow up, Fresh, Not Answered, Order Placed, Other Disease, Not Interested. "
+    "Return JSON only with keys: ai_disposition, ai_disposition_reason, ai_disposition_confidence, ai_disposition_summary. "
+    "Use Order Placed only if customer clearly agreed to order/treatment or payment/order was confirmed. "
+    "Use Follow up if customer asked to call later, needs family discussion, is busy, or decision is pending. "
+    "Use Financial Issue if price/payment is the main blocker. "
+    "Use Not Interested only if customer clearly refused. "
+    "Use Fresh for normal new enquiry without decision. "
+    "Use Existing Patient when the conversation is mainly with/about an old patient or previous order. "
+    "Use Other Disease when the concern is outside the configured campaign disease/department. "
+    "Confidence must be 0 to 1."
+)
+
 
 @dataclass(frozen=True)
 class DispositionConfig:
@@ -239,20 +254,7 @@ def get_disposition_config() -> DispositionConfig:
 
 def _classification_payload(doc, transcript: str) -> dict:
     context = _task_context(doc.get("task"))
-    instructions = (
-        "Read the voice call transcript and choose exactly one CRM Lead status. "
-        "Use only the transcript and context. Do not invent. "
-        "Allowed statuses: Duplicate, Existing Patient, Financial Issue, Follow up, Fresh, Not Answered, Order Placed, Other Disease, Not Interested. "
-        "Return JSON only with keys: ai_disposition, ai_disposition_reason, ai_disposition_confidence, ai_disposition_summary. "
-        "Use Order Placed only if customer clearly agreed to order/treatment or payment/order was confirmed. "
-        "Use Follow up if customer asked to call later, needs family discussion, is busy, or decision is pending. "
-        "Use Financial Issue if price/payment is the main blocker. "
-        "Use Not Interested only if customer clearly refused. "
-        "Use Fresh for normal new enquiry without decision. "
-        "Use Existing Patient when the conversation is mainly with/about an old patient or previous order. "
-        "Use Other Disease when the concern is outside the configured campaign disease/department. "
-        "Confidence must be 0 to 1."
-    )
+    instructions = _classification_instructions(doc)
     return {
         "instructions": instructions,
         "content": {
@@ -265,6 +267,44 @@ def _classification_payload(doc, transcript: str) -> dict:
             "transcript": transcript[:12000],
         },
     }
+
+
+def _classification_instructions(doc) -> str:
+    return _build_disposition_instructions(_company_disposition_prompt(doc.get("company")))
+
+
+def _build_disposition_instructions(company_prompt: str | None = None) -> str:
+    prompt = _clean_text(company_prompt)
+    if not prompt:
+        return DEFAULT_DISPOSITION_INSTRUCTIONS
+    return (
+        DEFAULT_DISPOSITION_INSTRUCTIONS
+        + "\n\nCompany-specific disposition rules:\n"
+        + prompt
+        + "\n\nWhen company-specific rules conflict with the default examples, follow the company-specific rules."
+    )
+
+
+def _company_disposition_prompt(company: str | None) -> str:
+    company = _clean_text(company)
+    if not company:
+        return ""
+    try:
+        settings = frappe.get_single("Confluence AI Settings")
+        if not settings.meta.has_field("ai_disposition_company_prompts"):
+            return ""
+
+        company_key = _company_key(company).lower()
+        for row in settings.get("ai_disposition_company_prompts") or []:
+            row_company = _clean_text(row.get("company"))
+            if not row_company:
+                continue
+            row_company_key = _company_key(row_company).lower()
+            if row_company.lower() == company.lower() or (company_key and row_company_key == company_key):
+                return _clean_text(row.get("ai_disposition_prompt"))
+    except Exception:
+        return ""
+    return ""
 
 
 def _classify_openai_compatible(payload: dict, config: DispositionConfig) -> str:

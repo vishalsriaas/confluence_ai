@@ -1,0 +1,36 @@
+{
+ "actions": [],
+ "creation": "2026-09-02 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "ai_disposition_prompt"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "AI Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "ai_disposition_prompt",
+   "fieldtype": "Long Text",
+   "in_list_view": 1,
+   "label": "AI Disposition Prompt",
+   "reqd": 1
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-09-02 00:00:00.000000",
+ "module": "Confluence AI",
+ "name": "AI Disposition Company Prompt",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

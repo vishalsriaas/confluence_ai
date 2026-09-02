@@ -39,6 +39,7 @@
   "ai_disposition_path",
   "ai_disposition_timeout_seconds",
   "ai_disposition_update_mcp_tool_name",
+  "ai_disposition_company_prompts",
   "rag_section",
   "embedding_provider",
   "embedding_model",
@@ -262,6 +263,13 @@
    "fieldname": "ai_disposition_update_mcp_tool_name",
    "fieldtype": "Data",
    "label": "AI Disposition Update MCP Tool Name"
+  },
+  {
+   "description": "Optional company-wise rules for deciding AI disposition from the call transcript.",
+   "fieldname": "ai_disposition_company_prompts",
+   "fieldtype": "Table",
+   "label": "AI Disposition Company Prompts",
+   "options": "AI Disposition Company Prompt"
   },
   {
    "collapsible": 1,

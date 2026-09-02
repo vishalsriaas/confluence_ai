@@ -36,3 +36,16 @@ class TestCallDisposition(unittest.TestCase):
 
         self.assertEqual(lead_id, "CRM-LEAD-2026-00119")
 
+    def test_company_prompt_is_added_to_disposition_instructions(self):
+        instructions = call_disposition._build_disposition_instructions(
+            "For Globifit, sperm fertility enquiry should be Fresh unless caller refuses."
+        )
+
+        self.assertIn("Company-specific disposition rules", instructions)
+        self.assertIn("sperm fertility enquiry should be Fresh", instructions)
+        self.assertIn("follow the company-specific rules", instructions)
+
+    def test_empty_company_prompt_uses_default_disposition_instructions(self):
+        instructions = call_disposition._build_disposition_instructions("")
+
+        self.assertEqual(instructions, call_disposition.DEFAULT_DISPOSITION_INSTRUCTIONS)
