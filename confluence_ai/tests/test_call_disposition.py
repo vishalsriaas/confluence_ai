@@ -37,6 +37,23 @@ class TestCallDisposition(unittest.TestCase):
 
         self.assertEqual(label, "Family Discussion")
 
+    def test_missing_transcript_fallback_marks_not_reachable(self):
+        class FakeDoc:
+            def get(self, fieldname):
+                return {
+                    "status": "Completed",
+                    "event_type": "Hangup",
+                }.get(fieldname)
+
+        decision = call_disposition._missing_transcript_fallback_decision(FakeDoc())
+
+        self.assertEqual(decision["ai_disposition"], "Not Answered")
+        self.assertEqual(decision["custom_vobiz_disposition"], "Not Reachable")
+        self.assertTrue(call_disposition._is_final_call_for_missing_transcript(FakeDoc()))
+        self.assertTrue(
+            call_disposition._is_waiting_for_transcript_response('{"reason":"waiting_for_transcript"}')
+        )
+
     def test_lead_id_prefers_crm_lead_reference(self):
         class FakeDoc:
             def get(self, fieldname):

@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urljoin
 
 import frappe
 import requests
+from frappe.utils import add_to_date, now_datetime
 
 from confluence_ai.services.utils import as_json, create_error, get_queue_name, parse_json_object, record_provider_event
 
@@ -25,6 +26,23 @@ DISPOSITION_OPTIONS = {
 }
 
 FINAL_NO_ANSWER_STATUSES = {"No Answer", "Busy", "Rejected", "Cancelled"}
+MISSING_TRANSCRIPT_FALLBACK_MINUTES = 10
+MISSING_TRANSCRIPT_FALLBACK_LIMIT = 50
+FINAL_CALL_STATUSES = {"completed", "failed", "no answer", "busy", "rejected", "cancelled", "timeout"}
+FINAL_CALL_EVENT_TYPES = {
+    "hangup",
+    "call_ended",
+    "room_finished",
+    "participant_left",
+    "completed",
+    "failed",
+    "room_failed",
+    "call_failed",
+    "no_answer",
+    "busy",
+    "cancel",
+    "timeout",
+}
 
 DEFAULT_DISPOSITION_INSTRUCTIONS = (
     "Read the voice call transcript and choose exactly one CRM Lead status. "
@@ -107,6 +125,96 @@ def process_call_log(call_log: str, force: bool = False) -> dict:
     except Exception as exc:
         create_error(
             "AI Call Disposition",
+            str(exc),
+            source="call_disposition",
+            task=doc.get("task"),
+            agent=doc.get("agent"),
+            company=doc.get("company"),
+            payload={"call_log": doc.name},
+            exc=exc,
+        )
+        _save_update_state(doc, "Failed", {"error": str(exc)[:1000]})
+        return {"status": "failed", "call_log": doc.name, "error": str(exc)}
+
+
+def process_stale_missing_transcript_dispositions(
+    minutes: int = MISSING_TRANSCRIPT_FALLBACK_MINUTES,
+    limit: int = MISSING_TRANSCRIPT_FALLBACK_LIMIT,
+) -> dict:
+    if not _call_log_has_disposition_fields():
+        return {"status": "skipped", "reason": "ai_call_log_fields_not_migrated"}
+
+    minutes = max(int(minutes or MISSING_TRANSCRIPT_FALLBACK_MINUTES), 1)
+    limit = max(min(int(limit or MISSING_TRANSCRIPT_FALLBACK_LIMIT), 200), 1)
+    cutoff = add_to_date(now_datetime(), minutes=-minutes)
+    rows = frappe.get_all(
+        "AI Call Log",
+        filters={
+            "erp_status_update_status": "Skipped",
+            "modified": ["<=", cutoff],
+        },
+        fields=[
+            "name",
+            "status",
+            "event_type",
+            "transcript",
+            "transcript_summary",
+            "ai_disposition",
+            "erp_status_update_response",
+        ],
+        order_by="modified asc",
+        limit_page_length=limit,
+    )
+
+    processed = []
+    skipped = 0
+    for row in rows:
+        if row.get("transcript") or row.get("transcript_summary") or row.get("ai_disposition"):
+            skipped += 1
+            continue
+        if not _is_waiting_for_transcript_response(row.get("erp_status_update_response")):
+            skipped += 1
+            continue
+        if not _is_final_call_for_missing_transcript(row):
+            skipped += 1
+            continue
+        processed.append(process_missing_transcript_fallback(row.get("name")))
+
+    return {"status": "success", "processed_count": len(processed), "skipped_count": skipped, "processed": processed}
+
+
+def process_missing_transcript_fallback(call_log: str, force: bool = False) -> dict:
+    if not call_log or not frappe.db.exists("AI Call Log", call_log):
+        return {"status": "skipped", "reason": "missing_call_log"}
+    if not _call_log_has_disposition_fields():
+        return {"status": "skipped", "reason": "ai_call_log_fields_not_migrated"}
+
+    doc = frappe.get_doc("AI Call Log", call_log)
+    if not force and doc.get("erp_status_update_status") == "Succeeded":
+        return {"status": "skipped", "reason": "already_updated", "call_log": doc.name}
+
+    transcript = _clean_text(doc.get("transcript") or doc.get("transcript_summary"))
+    if transcript:
+        return process_call_log(doc.name, force=force)
+    if not force and not _is_waiting_for_transcript_response(doc.get("erp_status_update_response")):
+        return {"status": "skipped", "reason": "not_waiting_for_transcript", "call_log": doc.name}
+    if not force and not _is_final_call_for_missing_transcript(doc):
+        return {"status": "skipped", "reason": "call_not_final", "call_log": doc.name}
+
+    try:
+        config = get_disposition_config()
+        if not config.enabled:
+            _save_update_state(doc, "Skipped", {"reason": "ai_disposition_disabled"})
+            return {"status": "skipped", "reason": "disabled", "call_log": doc.name}
+
+        decision = _missing_transcript_fallback_decision(doc)
+        _save_disposition(doc, decision)
+        update_result = update_crm_lead_status(doc, decision, config)
+        _save_update_state(doc, update_result.get("erp_status_update_status") or "Skipped", update_result)
+        return {"status": "success", "call_log": doc.name, "decision": decision, "erp_update": update_result}
+    except Exception as exc:
+        create_error(
+            "AI Call Disposition Missing Transcript Fallback",
             str(exc),
             source="call_disposition",
             task=doc.get("task"),
@@ -559,6 +667,38 @@ def _fallback_vobiz_disposition_label(decision: dict) -> str:
     if disposition == "fresh":
         return "General Queries"
     return ""
+
+
+def _missing_transcript_fallback_decision(doc) -> dict:
+    return {
+        "ai_disposition": "Not Answered",
+        "ai_disposition_reason": "No transcript was received within 10 minutes after the call ended.",
+        "ai_disposition_confidence": 0.95,
+        "ai_disposition_summary": "Call ended, but no usable transcript was received for disposition review.",
+        "custom_vobiz_disposition": "Not Reachable",
+    }
+
+
+def _is_waiting_for_transcript_response(value: Any) -> bool:
+    if isinstance(value, dict):
+        return value.get("reason") == "waiting_for_transcript"
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get("reason") == "waiting_for_transcript"
+
+
+def _is_final_call_for_missing_transcript(doc_or_row) -> bool:
+    status = _clean_text(_get_doc_value(doc_or_row, "status")).lower()
+    event_type = _clean_text(_get_doc_value(doc_or_row, "event_type")).lower()
+    return status in FINAL_CALL_STATUSES or event_type in FINAL_CALL_EVENT_TYPES
+
+
+def _get_doc_value(doc_or_row, fieldname: str) -> Any:
+    if hasattr(doc_or_row, "get"):
+        return doc_or_row.get(fieldname)
+    return getattr(doc_or_row, fieldname, None)
 
 
 def _save_disposition(doc, decision: dict) -> None:
