@@ -6,6 +6,10 @@ import frappe
 from confluence_ai.services.utils import as_json, now
 
 
+VOBIZ_TRANSCRIPT_EVENTS = {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}
+VOBIZ_RECORDING_EVENTS = {"recording", "call_recording", "recording_ready", "recording.completed"}
+
+
 def download_vobiz_recording(recording_url: str, task) -> str | None:
     if not recording_url:
         return None
@@ -66,6 +70,182 @@ def download_vobiz_recording(recording_url: str, task) -> str | None:
             message=f"Failed to download recording from {recording_url}. Error: {str(e)}"
         )
         return None
+
+
+def backfill_vobiz_recording_from_media(payload: dict, task=None, attempt=None, call_log: str | None = None) -> str | None:
+    """Recover a Vobiz recording URL when the recording.completed webhook is missing."""
+    call_log_doc = None
+    if call_log and frappe.db.exists("AI Call Log", call_log):
+        call_log_doc = frappe.get_doc("AI Call Log", call_log)
+        if call_log_doc.recording_url or call_log_doc.external_recording_url:
+            return call_log_doc.external_recording_url or call_log_doc.recording_url
+
+    recording_url = _expected_vobiz_recording_url(payload, task)
+    if not recording_url:
+        return None
+
+    account_id = _vobiz_account_id(payload, recording_url)
+    for headers in _vobiz_media_auth_candidates(payload, task, account_id):
+        if _vobiz_media_url_exists(recording_url, headers):
+            if call_log_doc:
+                backfill_payload = {
+                    "event": "recording.backfilled",
+                    "source": "vobiz_media_probe",
+                    "account_id": account_id,
+                    "call_uuid": _vobiz_recording_call_uuid(payload, task),
+                    "recording_url": recording_url,
+                    "reason": "recording.completed webhook was not received for this call",
+                }
+                call_log_doc.external_recording_url = recording_url
+                call_log_doc.recording_url = recording_url
+                call_log_doc.recording_payload_json = as_json(backfill_payload)
+                call_log_doc.save(ignore_permissions=True)
+            if task and not getattr(task, "recording_url", None):
+                task.recording_url = recording_url
+            if attempt and not getattr(attempt, "recording_url", None):
+                attempt.recording_url = recording_url
+            return recording_url
+
+    return None
+
+
+def _expected_vobiz_recording_url(payload: dict, task=None) -> str | None:
+    if payload.get("recording_url") or payload.get("url") or payload.get("recording"):
+        return payload.get("recording_url") or payload.get("url") or payload.get("recording")
+
+    account_id = _vobiz_account_id(payload)
+    call_uuid = _vobiz_recording_call_uuid(payload, task)
+    if not account_id or not call_uuid:
+        return None
+    return f"https://media.vobiz.ai/v1/Account/{account_id}/Recording/{call_uuid}.wav"
+
+
+def _vobiz_account_id(payload: dict, recording_url: str | None = None) -> str | None:
+    account_id = payload.get("AccountId") or payload.get("account_id") or payload.get("account")
+    if account_id:
+        return str(account_id).strip()
+    if recording_url:
+        parts = [part for part in recording_url.split("/") if part]
+        if "Account" in parts:
+            idx = parts.index("Account")
+            if len(parts) > idx + 1:
+                return parts[idx + 1]
+    return None
+
+
+def _vobiz_recording_call_uuid(payload: dict, task=None) -> str | None:
+    event_type = str(payload.get("event") or payload.get("event_type") or payload.get("Event") or "").lower()
+    if event_type in {"hangup", "completed", "call_ended"}:
+        value = payload.get("SIPCallID") or payload.get("sip_call_id")
+    else:
+        value = None
+    value = (
+        value
+        or payload.get("call_uuid")
+        or payload.get("CallUUID")
+        or payload.get("recording_id")
+        or payload.get("transcription_id")
+        or payload.get("SIPCallID")
+        or payload.get("sip_call_id")
+        or getattr(task, "call_uuid", None)
+    )
+    return str(value).strip() if value else None
+
+
+def _vobiz_media_auth_candidates(payload: dict, task=None, account_id: str | None = None) -> list[dict[str, str]]:
+    channel_names = []
+
+    for name in (
+        getattr(task, "channel_account", None),
+        _task_agent_channel_account(task),
+    ):
+        if name:
+            channel_names.append(name)
+
+    if account_id:
+        channel_names.extend(
+            frappe.get_all(
+                "AI Channel Account",
+                filters={"enabled": 1, "vobiz_auth_id": account_id},
+                pluck="name",
+            )
+        )
+
+    trunk_id = payload.get("TrunkID") or payload.get("trunk_id")
+    if trunk_id:
+        channel_names.extend(
+            frappe.get_all(
+                "AI Channel Account",
+                filters={"enabled": 1, "trunk_id": trunk_id},
+                pluck="name",
+            )
+        )
+
+    candidates = []
+    seen_channels = set()
+    for channel_name in channel_names:
+        if channel_name in seen_channels or not frappe.db.exists("AI Channel Account", channel_name):
+            continue
+        seen_channels.add(channel_name)
+        try:
+            channel = frappe.get_doc("AI Channel Account", channel_name)
+        except Exception:
+            continue
+
+        auth_id = str(channel.get("vobiz_auth_id") or "").strip()
+        auth_token = _get_password(channel, "vobiz_auth_token")
+        if auth_id and auth_token:
+            candidates.append({"X-Auth-ID": auth_id, "X-Auth-Token": auth_token})
+        if account_id and auth_token and account_id != auth_id:
+            candidates.append({"X-Auth-ID": account_id, "X-Auth-Token": auth_token})
+
+        api_key = _get_password(channel, "api_key")
+        api_secret = _get_password(channel, "api_secret")
+        if api_key and api_secret and api_key.startswith("MA_"):
+            candidates.append({"X-Auth-ID": api_key, "X-Auth-Token": api_secret})
+        if account_id and api_secret:
+            candidates.append({"X-Auth-ID": account_id, "X-Auth-Token": api_secret})
+
+    unique = []
+    seen = set()
+    for headers in candidates:
+        key = (headers.get("X-Auth-ID"), headers.get("X-Auth-Token"))
+        if key[0] and key[1] and key not in seen:
+            seen.add(key)
+            unique.append(headers)
+    return unique
+
+
+def _task_agent_channel_account(task) -> str | None:
+    agent_name = getattr(task, "assigned_agent", None) or getattr(task, "target_agent", None)
+    if not agent_name or not frappe.db.exists("AI Agent", agent_name):
+        return None
+    return frappe.db.get_value("AI Agent", agent_name, "allowed_channel_account")
+
+
+def _get_password(doc, fieldname: str) -> str:
+    try:
+        return str(doc.get_password(fieldname, raise_exception=False) or "").strip()
+    except TypeError:
+        return str(doc.get_password(fieldname) or "").strip()
+    except Exception:
+        return ""
+
+
+def _vobiz_media_url_exists(recording_url: str, headers: dict[str, str]) -> bool:
+    import requests
+
+    try:
+        response = requests.get(
+            recording_url,
+            headers={**headers, "Range": "bytes=0-0"},
+            stream=True,
+            timeout=8,
+        )
+        response.close()
+        return 200 <= response.status_code < 300
+    except Exception:
+        return False
 
 
 def handle_callback(payload: dict) -> dict:
@@ -198,7 +378,7 @@ def handle_callback(payload: dict) -> dict:
                 if not attempt.external_id:
                     attempt.external_id = call_uuid
 
-    elif event_type_lower in {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
+    elif event_type_lower in VOBIZ_TRANSCRIPT_EVENTS:
         task.vobiz_transcript_payload = as_json(payload)
         if attempt:
             attempt.vobiz_transcript_payload = as_json(payload)
@@ -212,7 +392,7 @@ def handle_callback(payload: dict) -> dict:
                 attempt_response["transcript"] = transcript
                 attempt.transcript = transcript
 
-    elif event_type_lower in {"recording", "call_recording", "recording_ready", "recording.completed"}:
+    elif event_type_lower in VOBIZ_RECORDING_EVENTS:
         task.vobiz_recording_payload = as_json(payload)
         if attempt:
             attempt.vobiz_recording_payload = as_json(payload)
@@ -241,6 +421,16 @@ def handle_callback(payload: dict) -> dict:
             attempt.call_uuid = call_uuid
 
     call_log = upsert_call_log(payload, task=task, attempt=attempt)
+    if event_type_lower in VOBIZ_TRANSCRIPT_EVENTS:
+        recovered_recording_url = backfill_vobiz_recording_from_media(payload, task=task, attempt=attempt, call_log=call_log)
+        if recovered_recording_url:
+            task_result["recording_url"] = recovered_recording_url
+            task_result["recording_backfilled"] = True
+            task.recording_url = recovered_recording_url
+            if attempt:
+                attempt_response["recording_url"] = recovered_recording_url
+                attempt_response["recording_backfilled"] = True
+                attempt.recording_url = recovered_recording_url
 
     # 4. Save updates
     task.result_json = as_json(task_result)
