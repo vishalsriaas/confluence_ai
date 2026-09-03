@@ -150,6 +150,43 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(config.base_url, "https://api.openai.com/v1")
         self.assertEqual(config.api_key, "summary-secret")
 
+    def test_callback_replay_enqueues_disposition_when_task_match_fails(self):
+        class FakeDoc:
+            name = "call-unit"
+            company = "globifit"
+            task = "task-unit"
+            agent = "agent-unit"
+            call_uuid = "call-unit"
+            sip_call_id = "sip-unit"
+            trunk_id = "trunk-unit"
+            direction = "Outbound"
+            from_number = "+919262175574"
+            to_number = "+919873090386"
+            customer_phone = "+919873090386"
+            recording_url = "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/call-unit.wav"
+            external_recording_url = recording_url
+
+            def get(self, fieldname):
+                return getattr(self, fieldname, None)
+
+        fake_frappe = SimpleNamespace(get_doc=Mock(return_value=FakeDoc()))
+        handle_callback = Mock(return_value={"status": "error"})
+
+        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz.handle_callback", handle_callback), \
+            patch("confluence_ai.services.recording_transcription._enqueue_disposition_after_transcript") as enqueue:
+            result = recording_transcription.emit_synthetic_transcript_callback(
+                "call-unit",
+                "[AGENT]: hello",
+                "hello",
+            )
+
+        self.assertEqual(result["status"], "error")
+        enqueue.assert_called_once_with("call-unit")
+        payload = handle_callback.call_args.args[0]
+        self.assertEqual(payload["customer_phone"], "+919873090386")
+        self.assertEqual(payload["CallStatus"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,6 +196,16 @@ def emit_synthetic_transcript_callback(call_log: str, transcript: str, summary: 
         "sip_call_id": doc.get("sip_call_id"),
         "TrunkID": doc.get("trunk_id"),
         "trunk_id": doc.get("trunk_id"),
+        "Direction": doc.get("direction"),
+        "direction": doc.get("direction"),
+        "CallStatus": doc.get("status") or "completed",
+        "status": doc.get("status") or "completed",
+        "from_number": doc.get("from_number"),
+        "to_number": doc.get("to_number"),
+        "From": doc.get("from_number"),
+        "To": doc.get("to_number"),
+        "customer_phone": doc.get("customer_phone"),
+        "phone": doc.get("customer_phone"),
         "recording_url": doc.get("recording_url") or doc.get("external_recording_url"),
         "url": doc.get("recording_url") or doc.get("external_recording_url"),
         "transcript": transcript,
@@ -207,7 +217,10 @@ def emit_synthetic_transcript_callback(call_log: str, transcript: str, summary: 
     try:
         from confluence_ai.services import vobiz
 
-        return vobiz.handle_callback(payload)
+        result = vobiz.handle_callback(payload)
+        if isinstance(result, dict) and result.get("status") == "error":
+            _enqueue_disposition_after_transcript(doc.name)
+        return result
     except Exception as exc:
         create_error(
             "Recording Transcript Callback Replay",
@@ -219,13 +232,17 @@ def emit_synthetic_transcript_callback(call_log: str, transcript: str, summary: 
             payload={"call_log": doc.name},
             exc=exc,
         )
-        try:
-            from confluence_ai.services.call_disposition import enqueue_call_disposition
-
-            enqueue_call_disposition(doc.name)
-        except Exception:
-            pass
+        _enqueue_disposition_after_transcript(doc.name)
         return {"status": "failed", "error": str(exc)}
+
+
+def _enqueue_disposition_after_transcript(call_log: str) -> None:
+    try:
+        from confluence_ai.services.call_disposition import enqueue_call_disposition
+
+        enqueue_call_disposition(call_log)
+    except Exception:
+        pass
 
 
 def fetch_call_recording_audio(doc, *, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB) -> tuple[bytes, str]:
