@@ -54,6 +54,35 @@ class TestCallDisposition(unittest.TestCase):
             call_disposition._is_waiting_for_transcript_response('{"reason":"waiting_for_transcript"}')
         )
 
+    def test_saved_disposition_decision_uses_call_log_fields(self):
+        class FakeDoc:
+            def get(self, fieldname):
+                return {
+                    "ai_disposition": "Not Interested",
+                    "ai_disposition_reason": "Customer refused online service.",
+                    "ai_disposition_confidence": 0.87,
+                    "ai_disposition_summary": "Customer did not want to proceed.",
+                }.get(fieldname)
+
+        decision = call_disposition._decision_from_saved_call_log(FakeDoc())
+
+        self.assertEqual(decision["ai_disposition"], "Not Interested")
+        self.assertEqual(decision["ai_disposition_confidence"], 0.87)
+
+    def test_missing_transcript_fallback_doc_detects_only_fallback_reason(self):
+        class FakeDoc:
+            def __init__(self, reason):
+                self.reason = reason
+
+            def get(self, fieldname):
+                return {
+                    "ai_disposition": "Not Answered",
+                    "ai_disposition_reason": self.reason,
+                }.get(fieldname)
+
+        self.assertTrue(call_disposition._is_missing_transcript_fallback_doc(FakeDoc("No transcript was received.")))
+        self.assertFalse(call_disposition._is_missing_transcript_fallback_doc(FakeDoc("Customer did not answer.")))
+
     def test_lead_id_prefers_crm_lead_reference(self):
         class FakeDoc:
             def get(self, fieldname):

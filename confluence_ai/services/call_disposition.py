@@ -95,7 +95,9 @@ def process_call_log(call_log: str, force: bool = False) -> dict:
 
     doc = frappe.get_doc("AI Call Log", call_log)
     if not force and doc.get("erp_status_update_status") == "Succeeded":
-        return {"status": "skipped", "reason": "already_updated", "call_log": call_log}
+        transcript = _clean_text(doc.get("transcript") or doc.get("transcript_summary"))
+        if not (transcript and _is_missing_transcript_fallback_doc(doc)):
+            return {"status": "skipped", "reason": "already_updated", "call_log": call_log}
 
     try:
         config = get_disposition_config()
@@ -178,6 +180,9 @@ def process_stale_missing_transcript_dispositions(
         if not _is_final_call_for_missing_transcript(row):
             skipped += 1
             continue
+        if _has_newer_transcript_disposition_for_same_phone(row):
+            skipped += 1
+            continue
         processed.append(process_missing_transcript_fallback(row.get("name")))
 
     return {"status": "success", "processed_count": len(processed), "skipped_count": skipped, "processed": processed}
@@ -200,6 +205,8 @@ def process_missing_transcript_fallback(call_log: str, force: bool = False) -> d
         return {"status": "skipped", "reason": "not_waiting_for_transcript", "call_log": doc.name}
     if not force and not _is_final_call_for_missing_transcript(doc):
         return {"status": "skipped", "reason": "call_not_final", "call_log": doc.name}
+    if not force and _has_newer_transcript_disposition_for_same_phone(doc):
+        return {"status": "skipped", "reason": "newer_transcript_disposition_exists", "call_log": doc.name}
 
     try:
         config = get_disposition_config()
@@ -225,6 +232,56 @@ def process_missing_transcript_fallback(call_log: str, force: bool = False) -> d
         )
         _save_update_state(doc, "Failed", {"error": str(exc)[:1000]})
         return {"status": "failed", "call_log": doc.name, "error": str(exc)}
+
+
+def sync_saved_disposition_to_erp(call_log: str) -> dict:
+    if not call_log or not frappe.db.exists("AI Call Log", call_log):
+        return {"status": "skipped", "reason": "missing_call_log"}
+    if not _call_log_has_disposition_fields():
+        return {"status": "skipped", "reason": "ai_call_log_fields_not_migrated"}
+
+    doc = frappe.get_doc("AI Call Log", call_log)
+    disposition = _clean_text(doc.get("ai_disposition"))
+    if not disposition:
+        return {"status": "skipped", "reason": "missing_ai_disposition", "call_log": doc.name}
+
+    try:
+        config = get_disposition_config()
+        if not config.enabled:
+            _save_update_state(doc, "Skipped", {"reason": "ai_disposition_disabled"})
+            return {"status": "skipped", "reason": "disabled", "call_log": doc.name}
+
+        decision = _decision_from_saved_call_log(doc)
+        update_result = update_crm_lead_status(doc, decision, config)
+        _save_update_state(doc, update_result.get("erp_status_update_status") or "Skipped", update_result)
+        return {"status": "success", "call_log": doc.name, "decision": decision, "erp_update": update_result}
+    except Exception as exc:
+        create_error(
+            "AI Call Disposition Sync",
+            str(exc),
+            source="call_disposition",
+            task=doc.get("task"),
+            agent=doc.get("agent"),
+            company=doc.get("company"),
+            payload={"call_log": doc.name},
+            exc=exc,
+        )
+        _save_update_state(doc, "Failed", {"error": str(exc)[:1000]})
+        return {"status": "failed", "call_log": doc.name, "error": str(exc)}
+
+
+def enqueue_saved_disposition_sync(call_log: str | None) -> dict:
+    if not call_log:
+        return {"status": "skipped", "reason": "missing_call_log"}
+    if not _call_log_has_disposition_fields():
+        return {"status": "skipped", "reason": "ai_call_log_fields_not_migrated"}
+
+    frappe.enqueue(
+        "confluence_ai.services.call_disposition.sync_saved_disposition_to_erp",
+        queue=get_queue_name("llm_queue", "agent_llm"),
+        call_log=call_log,
+    )
+    return {"status": "queued", "call_log": call_log}
 
 
 def classify_transcript(doc, transcript: str, config: DispositionConfig) -> dict:
@@ -679,6 +736,68 @@ def _missing_transcript_fallback_decision(doc) -> dict:
     }
 
 
+def _decision_from_saved_call_log(doc) -> dict:
+    return {
+        "ai_disposition": _normalize_disposition(doc.get("ai_disposition")),
+        "ai_disposition_reason": _clean_text(doc.get("ai_disposition_reason")) or "Disposition saved on AI Call Log.",
+        "ai_disposition_confidence": _safe_confidence(doc.get("ai_disposition_confidence")),
+        "ai_disposition_summary": _clean_text(doc.get("ai_disposition_summary")),
+    }
+
+
+def _is_missing_transcript_fallback_doc(doc) -> bool:
+    disposition = _clean_text(doc.get("ai_disposition")).lower()
+    reason = _clean_text(doc.get("ai_disposition_reason")).lower()
+    return disposition == "not answered" and "no transcript" in reason
+
+
+def _has_newer_transcript_disposition_for_same_phone(doc_or_row) -> bool:
+    phone = _clean_text(_get_doc_value(doc_or_row, "customer_phone"))
+    company = _clean_text(_get_doc_value(doc_or_row, "company"))
+    creation = _get_doc_value(doc_or_row, "creation")
+    current_name = _get_doc_value(doc_or_row, "name")
+    if not phone or not creation:
+        return False
+
+    variants = set(_phone_variants(phone))
+    filters = {
+        "creation": [">", creation],
+        "erp_status_update_status": "Succeeded",
+    }
+    if company:
+        filters["company"] = company
+
+    try:
+        rows = frappe.get_all(
+            "AI Call Log",
+            filters=filters,
+            fields=[
+                "name",
+                "customer_phone",
+                "transcript",
+                "transcript_summary",
+                "ai_disposition",
+                "erp_status_update_status",
+            ],
+            order_by="creation desc",
+            limit_page_length=50,
+        )
+    except Exception:
+        return False
+
+    for row in rows:
+        if row.get("name") == current_name:
+            continue
+        row_phone = _clean_text(row.get("customer_phone"))
+        if not row_phone or not (variants & set(_phone_variants(row_phone))):
+            continue
+        if not _clean_text(row.get("transcript") or row.get("transcript_summary")):
+            continue
+        if _clean_text(row.get("ai_disposition")):
+            return True
+    return False
+
+
 def _is_waiting_for_transcript_response(value: Any) -> bool:
     if isinstance(value, dict):
         return value.get("reason") == "waiting_for_transcript"
@@ -707,6 +826,7 @@ def _save_disposition(doc, decision: dict) -> None:
     doc.ai_disposition_confidence = decision.get("ai_disposition_confidence")
     doc.ai_disposition_summary = decision.get("ai_disposition_summary")
     doc.erp_status_update_status = "Pending"
+    doc.flags.ignore_ai_disposition_auto_sync = True
     doc.save(ignore_permissions=True)
     frappe.db.commit()
 
