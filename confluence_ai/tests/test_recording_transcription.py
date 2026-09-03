@@ -110,6 +110,46 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "transcript_already_present")
 
+    def test_openai_compatible_config_reuses_existing_summary_key(self):
+        class FakeMeta:
+            def has_field(self, fieldname):
+                return True
+
+        class FakeSettings:
+            meta = FakeMeta()
+
+            def get(self, fieldname):
+                return {
+                    "enable_recording_transcription_fallback": 1,
+                    "recording_transcription_provider": "OpenAI Compatible",
+                    "recording_transcription_model": "",
+                    "recording_transcription_base_url": "",
+                    "recording_transcription_path": "",
+                    "recording_transcription_timeout_seconds": 60,
+                    "recording_transcription_lookback_minutes": 360,
+                    "recording_transcription_limit": 50,
+                    "recording_transcription_wait_minutes": 2,
+                    "recording_transcription_max_audio_mb": 25,
+                    "whatsapp_summary_base_url": "https://api.openai.com/v1",
+                }.get(fieldname)
+
+            def get_password(self, fieldname, raise_exception=False):
+                return {"whatsapp_summary_api_key": "summary-secret"}.get(fieldname, "")
+
+        fake_frappe = SimpleNamespace(
+            get_single=Mock(return_value=FakeSettings()),
+            conf={},
+        )
+
+        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe):
+            config = recording_transcription.get_recording_transcription_config()
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.provider, "OpenAI Compatible")
+        self.assertEqual(config.model, "whisper-1")
+        self.assertEqual(config.base_url, "https://api.openai.com/v1")
+        self.assertEqual(config.api_key, "summary-secret")
+
 
 if __name__ == "__main__":
     unittest.main()

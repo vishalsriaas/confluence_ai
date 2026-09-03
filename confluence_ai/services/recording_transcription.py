@@ -285,13 +285,26 @@ def get_recording_transcription_config() -> RecordingTranscriptionConfig:
 
     if provider == "OpenAI":
         model = model or "whisper-1"
-        base_url = base_url or "https://api.openai.com/v1"
+        base_url = base_url or _settings_value(settings, "ai_disposition_base_url", "whatsapp_summary_base_url") or "https://api.openai.com/v1"
         path = path or "/audio/transcriptions"
-        api_key = _settings_password(settings, "recording_transcription_api_key") or frappe.conf.get("openai_api_key") or ""
+        api_key = (
+            _settings_password(settings, "recording_transcription_api_key")
+            or _settings_password(settings, "ai_disposition_api_key")
+            or _settings_password(settings, "whatsapp_summary_api_key")
+            or frappe.conf.get("openai_api_key")
+            or ""
+        )
     elif provider == "OpenAI Compatible":
         model = model or "whisper-1"
+        base_url = base_url or _settings_value(settings, "ai_disposition_base_url", "whatsapp_summary_base_url") or "https://api.openai.com/v1"
         path = path or "/audio/transcriptions"
-        api_key = _settings_password(settings, "recording_transcription_api_key") or ""
+        api_key = (
+            _settings_password(settings, "recording_transcription_api_key")
+            or _settings_password(settings, "ai_disposition_api_key")
+            or _settings_password(settings, "whatsapp_summary_api_key")
+            or frappe.conf.get("openai_api_key")
+            or ""
+        )
     elif provider == "Gemini":
         model = model or "gemini-2.5-flash"
         base_url = base_url or "https://generativelanguage.googleapis.com/v1beta"
