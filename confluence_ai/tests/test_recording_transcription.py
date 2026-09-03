@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from confluence_ai.services import recording_transcription
-from confluence_ai.services.recording_transcription import RecordingTranscriptionConfig
+from confluence_ai.services.recording_transcription import RecordingTranscriptionConfig, RecordingTranscriptionSkipped
 
 
 def _config(**overrides):
@@ -71,8 +71,15 @@ class TestRecordingTranscription(unittest.TestCase):
                 self.saved = True
 
         doc = FakeDoc()
+        saved_values = {}
+
+        def set_value(doctype, name, values, update_modified=True):
+            saved_values.update(values)
+            for fieldname, value in values.items():
+                setattr(doc, fieldname, value)
+
         fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(return_value=True), commit=Mock()),
+            db=SimpleNamespace(exists=Mock(return_value=True), commit=Mock(), set_value=Mock(side_effect=set_value)),
             get_doc=Mock(return_value=doc),
             get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
         )
@@ -87,6 +94,7 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIn("[AGENT]: Namaste", doc.transcript)
         self.assertEqual(doc.transcript_summary, doc.transcript[:1000])
+        self.assertIn("transcript_payload_json", saved_values)
         replay.assert_called_once()
 
     def test_process_skips_when_transcript_already_present(self):
@@ -186,6 +194,24 @@ class TestRecordingTranscription(unittest.TestCase):
         payload = handle_callback.call_args.args[0]
         self.assertEqual(payload["customer_phone"], "+919873090386")
         self.assertEqual(payload["CallStatus"], "completed")
+
+    def test_empty_wav_is_clean_skip_not_provider_error(self):
+        empty_wav = (
+            b"RIFF$\x00\x00\x00WAVE"
+            b"fmt \x10\x00\x00\x00\x01\x00\x01\x00\x80>\x00\x00\x00}\x00\x00\x02\x00\x10\x00"
+            b"data\x00\x00\x00\x00"
+        )
+
+        with self.assertRaises(RecordingTranscriptionSkipped) as raised:
+            recording_transcription._checked_audio_bytes(empty_wav, max_audio_mb=25)
+
+        self.assertEqual(raised.exception.reason, "recording_audio_empty")
+
+    def test_oversized_recording_is_clean_skip(self):
+        with self.assertRaises(RecordingTranscriptionSkipped) as raised:
+            recording_transcription._checked_audio_bytes(b"x" * 1025, max_audio_mb=0)
+
+        self.assertEqual(raised.exception.reason, "recording_audio_too_large")
 
 
 if __name__ == "__main__":

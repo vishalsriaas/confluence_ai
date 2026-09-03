@@ -35,6 +35,13 @@ class RecordingTranscriptionConfig:
     max_audio_mb: int
 
 
+class RecordingTranscriptionSkipped(Exception):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
 def process_missing_recording_transcripts(minutes: int | None = None, limit: int | None = None) -> dict:
     """Transcribe recent recorded calls when Vobiz transcript callbacks are missing."""
     if not _call_log_has_transcript_fields():
@@ -144,6 +151,31 @@ def process_call_log_recording_transcript(
             "call_log": doc.name,
             "transcript_chars": len(transcript),
             "callback": callback_result,
+        }
+    except RecordingTranscriptionSkipped as exc:
+        _save_transcription_skip_state(
+            doc.name,
+            {
+                "reason": exc.reason,
+                "message": exc.message,
+                "recording_url_present": bool(recording_url),
+            },
+        )
+        record_provider_event(
+            provider=config.provider,
+            operation="recording_transcription_fallback",
+            status="Skipped",
+            company=doc.get("company"),
+            agent=doc.get("agent"),
+            task=doc.get("task"),
+            request={"call_log": doc.name, "model": config.model, "recording_url_present": True},
+            response={"reason": exc.reason, "message": exc.message},
+        )
+        return {
+            "status": "skipped",
+            "call_log": doc.name,
+            "reason": exc.reason,
+            "message": exc.message,
         }
     except Exception as exc:
         create_error(
@@ -418,12 +450,27 @@ def _transcribe_gemini(audio_bytes: bytes, *, mime_type: str, config: RecordingT
 
 
 def _save_transcript(doc, transcript: str, summary: str, payload: dict) -> None:
-    current = frappe.get_doc("AI Call Log", doc.name)
-    current.transcript = transcript
-    current.transcript_summary = summary
-    current.transcript_payload_json = as_json(payload)
-    current.flags.ignore_ai_disposition_auto_sync = True
-    current.save(ignore_permissions=True)
+    frappe.db.set_value(
+        "AI Call Log",
+        doc.name,
+        {
+            "transcript": transcript,
+            "transcript_summary": summary,
+            "transcript_payload_json": as_json(payload),
+        },
+        update_modified=True,
+    )
+    frappe.db.commit()
+
+
+def _save_transcription_skip_state(call_log: str, response: dict) -> None:
+    values = {"erp_status_update_response": as_json(response)}
+    try:
+        if frappe.get_meta("AI Call Log").has_field("erp_status_update_status"):
+            values["erp_status_update_status"] = "Skipped"
+    except Exception:
+        pass
+    frappe.db.set_value("AI Call Log", call_log, values, update_modified=True)
     frappe.db.commit()
 
 
@@ -437,10 +484,36 @@ def _read_site_file(file_url: str, *, max_audio_mb: int) -> bytes:
 def _checked_audio_bytes(content: bytes, max_audio_mb: int) -> bytes:
     max_bytes = int(max_audio_mb) * 1024 * 1024
     if len(content or b"") <= 0:
-        frappe.throw("Downloaded recording is empty.")
+        raise RecordingTranscriptionSkipped("recording_audio_empty", "Downloaded recording is empty.")
+    if _looks_like_empty_wav(content):
+        raise RecordingTranscriptionSkipped(
+            "recording_audio_empty",
+            "Recording file exists, but it contains no audio samples.",
+        )
     if len(content) > max_bytes:
-        frappe.throw(f"Recording is too large for transcription fallback ({len(content)} bytes > {max_bytes} bytes).")
+        raise RecordingTranscriptionSkipped(
+            "recording_audio_too_large",
+            f"Recording is too large for transcription fallback ({len(content)} bytes > {max_bytes} bytes).",
+        )
+    if len(content) < 512:
+        raise RecordingTranscriptionSkipped(
+            "recording_audio_too_short",
+            "Recording file is too short for transcription fallback.",
+        )
     return content
+
+
+def _looks_like_empty_wav(content: bytes) -> bool:
+    if len(content) < 44 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
+        return False
+    offset = 12
+    while offset + 8 <= len(content):
+        chunk_id = content[offset : offset + 4]
+        chunk_size = int.from_bytes(content[offset + 4 : offset + 8], "little", signed=False)
+        if chunk_id == b"data":
+            return chunk_size == 0
+        offset += 8 + chunk_size + (chunk_size % 2)
+    return False
 
 
 def _audio_filename(mime_type: str) -> str:
