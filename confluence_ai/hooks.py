@@ -78,6 +78,7 @@ scheduler_events = {
             "confluence_ai.services.order_confirmation.process_due_workflows",
             "confluence_ai.services.fresh_followup.process_due_workflows",
             "confluence_ai.services.repeat_followup.process_due_workflows",
+            "confluence_ai.services.vobiz.process_missing_recording_callbacks",
             "confluence_ai.services.call_disposition.process_stale_missing_transcript_dispositions",
         ],
     },

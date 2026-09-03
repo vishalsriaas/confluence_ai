@@ -442,6 +442,11 @@ def execute_mcp_tool(tool: "frappe.Document", arguments: dict, task_id: str | No
                 "message": message,
                 "filters": filters,
             }
+            if arguments.get("skip_if_missing") or arguments.get("ignore_missing_records"):
+                result["status"] = "skipped"
+                result["reason"] = "no_matching_records"
+                record_mcp_event(tool.tool_name, arguments, result, task_id)
+                return result
             record_mcp_event(tool.tool_name, arguments, result, task_id, error=message)
             log_mcp_error(
                 tool.tool_name,
@@ -796,6 +801,11 @@ def execute_local_db_tool(tool: "frappe.Document", arguments: dict, task_id: str
         if not names:
             message = f"No matching {client_doctype} records found to update"
             result = {"ok": False, "message": message, "filters": filters}
+            if arguments.get("skip_if_missing") or arguments.get("ignore_missing_records"):
+                result["status"] = "skipped"
+                result["reason"] = "no_matching_records"
+                record_mcp_event(tool.tool_name, arguments, result, task_id)
+                return result
             record_mcp_event(tool.tool_name, arguments, result, task_id, error=message)
             log_mcp_error(
                 tool.tool_name,

@@ -19,6 +19,10 @@
   "livekit_diagnostics_section",
   "livekit_diagnostics_enabled",
   "livekit_diagnostics_max_events",
+  "vobiz_recording_backfill_section",
+  "enable_vobiz_recording_backfill",
+  "vobiz_recording_backfill_lookback_minutes",
+  "vobiz_recording_backfill_limit",
   "whatsapp_summary_section",
   "enable_whatsapp_ai_summary",
   "whatsapp_summary_provider",
@@ -138,6 +142,33 @@
    "fieldname": "livekit_diagnostics_max_events",
    "fieldtype": "Int",
    "label": "LiveKit Diagnostics Max Events"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "vobiz_recording_backfill_section",
+   "fieldtype": "Section Break",
+   "label": "Vobiz Recording Backfill"
+  },
+  {
+   "default": "1",
+   "description": "Poll recent Vobiz recordings and recover AI Call Logs when Vobiz recording/transcript webhooks are missed.",
+   "fieldname": "enable_vobiz_recording_backfill",
+   "fieldtype": "Check",
+   "label": "Enable Vobiz Recording Backfill"
+  },
+  {
+   "default": "360",
+   "description": "How many recent minutes of Vobiz recordings should be checked by the recovery job.",
+   "fieldname": "vobiz_recording_backfill_lookback_minutes",
+   "fieldtype": "Int",
+   "label": "Vobiz Recording Backfill Lookback Minutes"
+  },
+  {
+   "default": "1000",
+   "description": "Maximum recordings to check per Vobiz account per recovery run.",
+   "fieldname": "vobiz_recording_backfill_limit",
+   "fieldtype": "Int",
+   "label": "Vobiz Recording Backfill Limit"
   },
   {
    "collapsible": 1,

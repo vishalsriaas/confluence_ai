@@ -41,7 +41,7 @@ class TestCallDisposition(unittest.TestCase):
         class FakeDoc:
             def get(self, fieldname):
                 return {
-                    "status": "Completed",
+                    "status": "No Answer",
                     "event_type": "Hangup",
                 }.get(fieldname)
 
@@ -53,6 +53,30 @@ class TestCallDisposition(unittest.TestCase):
         self.assertTrue(
             call_disposition._is_waiting_for_transcript_response('{"reason":"waiting_for_transcript"}')
         )
+        self.assertTrue(call_disposition._should_apply_missing_transcript_fallback(FakeDoc()))
+
+    def test_missing_transcript_fallback_does_not_mark_recorded_completed_call_unreachable(self):
+        class FakeDoc:
+            def get(self, fieldname):
+                return {
+                    "status": "Completed",
+                    "event_type": "recording.completed",
+                    "recording_url": "/private/files/call.wav",
+                    "duration_sec": 155,
+                }.get(fieldname)
+
+        self.assertFalse(call_disposition._should_apply_missing_transcript_fallback(FakeDoc()))
+
+    def test_missing_transcript_fallback_does_not_mark_completed_duration_call_unreachable(self):
+        class FakeDoc:
+            def get(self, fieldname):
+                return {
+                    "status": "Completed",
+                    "event_type": "Hangup",
+                    "duration_sec": 30,
+                }.get(fieldname)
+
+        self.assertFalse(call_disposition._should_apply_missing_transcript_fallback(FakeDoc()))
 
     def test_saved_disposition_decision_uses_call_log_fields(self):
         class FakeDoc:

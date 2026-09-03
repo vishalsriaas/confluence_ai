@@ -162,6 +162,9 @@ def process_stale_missing_transcript_dispositions(
             "transcript",
             "transcript_summary",
             "ai_disposition",
+            "recording_url",
+            "external_recording_url",
+            "duration_sec",
             "erp_status_update_response",
         ],
         order_by="modified asc",
@@ -205,6 +208,15 @@ def process_missing_transcript_fallback(call_log: str, force: bool = False) -> d
         return {"status": "skipped", "reason": "not_waiting_for_transcript", "call_log": doc.name}
     if not force and not _is_final_call_for_missing_transcript(doc):
         return {"status": "skipped", "reason": "call_not_final", "call_log": doc.name}
+    if not force and not _should_apply_missing_transcript_fallback(doc):
+        response = {
+            "reason": "transcript_missing_for_completed_recorded_call",
+            "message": "Recording/call exists, so ERP disposition was not changed to Not Reachable without transcript.",
+            "recording_available": bool(doc.get("recording_url") or doc.get("external_recording_url")),
+            "duration_sec": doc.get("duration_sec"),
+        }
+        _save_update_state(doc, "Skipped", response)
+        return {"status": "skipped", "reason": response["reason"], "call_log": doc.name}
     if not force and _has_newer_transcript_disposition_for_same_phone(doc):
         return {"status": "skipped", "reason": "newer_transcript_disposition_exists", "call_log": doc.name}
 
@@ -379,6 +391,7 @@ def update_crm_lead_status(doc, decision: dict, config: DispositionConfig) -> di
         "ai_disposition_summary": decision.get("ai_disposition_summary"),
         "call_log": doc.name,
         "task": doc.get("task"),
+        "skip_if_missing": 1,
     }
 
     from confluence_ai.api.mcp import execute_mcp_tool
@@ -812,6 +825,28 @@ def _is_final_call_for_missing_transcript(doc_or_row) -> bool:
     status = _clean_text(_get_doc_value(doc_or_row, "status")).lower()
     event_type = _clean_text(_get_doc_value(doc_or_row, "event_type")).lower()
     return status in FINAL_CALL_STATUSES or event_type in FINAL_CALL_EVENT_TYPES
+
+
+def _should_apply_missing_transcript_fallback(doc_or_row) -> bool:
+    """Only update ERP as not reached when the call itself was not usable.
+
+    A completed call with a real recording but missing transcript is a data
+    capture problem, not a customer-not-reachable outcome.
+    """
+    status = _clean_text(_get_doc_value(doc_or_row, "status")).lower()
+    if status in {"no answer", "busy", "rejected", "cancelled", "canceled", "failed", "timeout"}:
+        return True
+
+    event_type = _clean_text(_get_doc_value(doc_or_row, "event_type")).lower()
+    recording_url = _clean_text(_get_doc_value(doc_or_row, "recording_url") or _get_doc_value(doc_or_row, "external_recording_url"))
+    try:
+        duration_sec = int(float(_get_doc_value(doc_or_row, "duration_sec") or 0))
+    except Exception:
+        duration_sec = 0
+
+    if status == "completed" or event_type in {"hangup", "completed", "recording.completed"}:
+        return not recording_url and duration_sec <= 0
+    return False
 
 
 def _get_doc_value(doc_or_row, fieldname: str) -> Any:

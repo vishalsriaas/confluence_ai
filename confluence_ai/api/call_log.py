@@ -118,6 +118,13 @@ def _vobiz_auth_candidates(call_log) -> list[dict[str, str]]:
 
 
 @frappe.whitelist()
+def backfill_vobiz_recordings(minutes: int | None = None, limit: int | None = None) -> dict:
+    from confluence_ai.services import vobiz
+
+    return vobiz.process_missing_recording_callbacks(minutes=minutes, limit=limit)
+
+
+@frappe.whitelist()
 def recording_audio(call_log: str):
     doc = frappe.get_doc("AI Call Log", call_log)
     url = doc.external_recording_url or doc.recording_url

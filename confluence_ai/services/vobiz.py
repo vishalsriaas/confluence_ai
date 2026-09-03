@@ -3,11 +3,357 @@ from __future__ import annotations
 import json
 import re
 import frappe
-from confluence_ai.services.utils import as_json, now
+from datetime import datetime
+from typing import Any
+
+import requests
+
+from confluence_ai.services.utils import as_json, now, record_provider_event
 
 
 VOBIZ_TRANSCRIPT_EVENTS = {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}
 VOBIZ_RECORDING_EVENTS = {"recording", "call_recording", "recording_ready", "recording.completed"}
+VOBIZ_RECORDING_BACKFILL_DEFAULT_LOOKBACK_MINUTES = 360
+VOBIZ_RECORDING_BACKFILL_DEFAULT_LIMIT = 1000
+
+
+def process_missing_recording_callbacks(minutes: int | None = None, limit: int | None = None) -> dict:
+    """Poll Vobiz recordings and backfill call logs missed by webhooks.
+
+    Vobiz recording webhooks are still the primary source. This safety job only
+    recovers recent recordings for configured Vobiz channel accounts when the
+    webhook was missed or not persisted.
+    """
+    if not _setting_enabled("enable_vobiz_recording_backfill", default=True):
+        return {"status": "skipped", "reason": "vobiz_recording_backfill_disabled"}
+
+    minutes = int(minutes or _setting_int("vobiz_recording_backfill_lookback_minutes", VOBIZ_RECORDING_BACKFILL_DEFAULT_LOOKBACK_MINUTES))
+    limit = int(limit or _setting_int("vobiz_recording_backfill_limit", VOBIZ_RECORDING_BACKFILL_DEFAULT_LIMIT))
+    minutes = max(minutes, 5)
+    limit = max(1, min(limit, 2000))
+    cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-minutes)
+
+    processed: list[dict] = []
+    skipped = 0
+    errors: list[dict] = []
+    for channel in _vobiz_recording_channels():
+        try:
+            result = _backfill_recent_vobiz_recordings_for_channel(channel, cutoff=cutoff, limit=limit)
+            processed.extend(result.get("processed") or [])
+            skipped += int(result.get("skipped") or 0)
+        except Exception as exc:
+            errors.append({"channel": channel.name, "error": str(exc)})
+            frappe.log_error(
+                title="Vobiz recording backfill failed",
+                message=f"Channel {channel.name}: {frappe.get_traceback()}",
+            )
+
+    return {
+        "status": "success" if not errors else "partial",
+        "processed_count": len(processed),
+        "skipped_count": skipped,
+        "errors": errors,
+        "processed": processed[:50],
+    }
+
+
+def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int) -> dict:
+    auth_id = str(channel.get("vobiz_auth_id") or "").strip()
+    auth_token = _get_password(channel, "vobiz_auth_token")
+    if not auth_id or not auth_token:
+        return {"processed": [], "skipped": 0}
+
+    recordings = _fetch_vobiz_recording_list(auth_id, auth_token, limit=limit, cutoff=cutoff)
+    processed: list[dict] = []
+    skipped = 0
+
+    for recording in recordings:
+        recording_dt = _parse_vobiz_datetime(recording.get("add_time"))
+        if recording_dt and recording_dt < cutoff:
+            skipped += 1
+            continue
+        if _recording_duration_sec(recording) <= 0:
+            skipped += 1
+            continue
+
+        call_uuid = str(recording.get("call_uuid") or recording.get("recording_id") or "").strip()
+        if not call_uuid:
+            skipped += 1
+            continue
+
+        payload = _vobiz_recording_api_payload(recording, channel, auth_id)
+        existing = frappe.db.exists("AI Call Log", {"call_uuid": call_uuid})
+        if not existing:
+            existing = _find_existing_call_log(payload)
+        if existing:
+            existing_doc = frappe.get_doc("AI Call Log", existing)
+            if existing_doc.get("recording_url") or existing_doc.get("external_recording_url"):
+                skipped += 1
+                continue
+
+        task_name, attempt_name = find_task_and_attempt(payload)
+        task = frappe.get_doc("AI Task", task_name) if task_name else None
+        attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
+        if task and not attempt:
+            attempts = frappe.get_all(
+                "AI Task Attempt",
+                filters={"task": task.name},
+                order_by="creation desc",
+                limit=1,
+                pluck="name",
+            )
+            attempt = frappe.get_doc("AI Task Attempt", attempts[0]) if attempts else None
+
+        call_log = upsert_call_log(payload, task=task, attempt=attempt)
+        _attach_recording_to_task_docs(payload, task=task, attempt=attempt)
+        _mark_call_log_waiting_for_transcript(call_log)
+        if task:
+            _handle_order_confirmation_callback(task, payload, "completed")
+            _handle_repeat_followup_callback(task, payload, "completed")
+            _handle_fresh_followup_callback(task, payload, "completed")
+
+        processed.append({"call_log": call_log, "call_uuid": call_uuid, "channel": channel.name})
+
+    if processed:
+        record_provider_event(
+            provider="Vobiz",
+            operation="recording_backfill",
+            status="Succeeded",
+            company=channel.get("company"),
+            request={"channel": channel.name, "lookback_limit": limit},
+            response={"processed_count": len(processed), "skipped_count": skipped, "processed": processed[:10]},
+        )
+
+    frappe.db.commit()
+    return {"processed": processed, "skipped": skipped}
+
+
+def _fetch_vobiz_recording_list(auth_id: str, auth_token: str, *, limit: int, cutoff=None) -> list[dict]:
+    url = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Recording/"
+    rows: list[dict] = []
+    offset = 0
+    page_size = min(max(limit, 1), 250)
+    while len(rows) < limit:
+        response = requests.get(
+            url,
+            headers={"X-Auth-ID": auth_id, "X-Auth-Token": auth_token, "Accept": "application/json"},
+            params={"page": 1, "limit": page_size, "per_page": page_size, "offset": offset},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        batch = data.get("objects") if isinstance(data, dict) else data
+        batch_rows = [row for row in (batch or []) if isinstance(row, dict)]
+        if not batch_rows:
+            break
+        rows.extend(batch_rows[: max(limit - len(rows), 0)])
+
+        if cutoff:
+            oldest = _parse_vobiz_datetime(batch_rows[-1].get("add_time"))
+            if oldest and oldest < cutoff:
+                break
+
+        meta = data.get("meta") if isinstance(data, dict) else {}
+        if not isinstance(meta, dict) or not meta.get("next"):
+            break
+        offset += len(batch_rows)
+        if len(batch_rows) < page_size:
+            break
+    return rows[:limit]
+
+
+def _vobiz_recording_api_payload(recording: dict, channel, auth_id: str) -> dict:
+    endpoints = _parse_json_object(channel.get("endpoint_paths_json"))
+    duration_sec = _recording_duration_sec(recording)
+    call_uuid = recording.get("call_uuid") or recording.get("recording_id")
+    payload = {
+        "event": "recording.completed",
+        "Event": "recording.completed",
+        "CallStatus": "completed",
+        "status": "completed",
+        "account_id": auth_id,
+        "AccountId": auth_id,
+        "CallUUID": call_uuid,
+        "call_uuid": call_uuid,
+        "recording_id": recording.get("recording_id") or call_uuid,
+        "recording_url": recording.get("recording_url"),
+        "url": recording.get("recording_url"),
+        "recording_duration_sec": duration_sec,
+        "Duration": duration_sec,
+        "from_number": recording.get("from_number"),
+        "to_number": recording.get("to_number"),
+        "From": recording.get("from_number"),
+        "To": recording.get("to_number"),
+        "Direction": _infer_recording_direction(recording, channel, endpoints),
+        "channel_account": channel.name,
+        "company": channel.get("company"),
+        "TrunkID": channel.get("trunk_id"),
+        "trunk_id": channel.get("trunk_id"),
+        "Domain": endpoints.get("sip_uri") or endpoints.get("inbound_domain"),
+        "domain": endpoints.get("sip_uri") or endpoints.get("inbound_domain"),
+        "recording_api_payload": recording,
+        "recording_backfilled": 1,
+    }
+    if recording.get("add_time"):
+        payload["started_at"] = recording.get("add_time")
+        payload["ended_at"] = recording.get("add_time")
+    return payload
+
+
+def _attach_recording_to_task_docs(payload: dict, *, task=None, attempt=None) -> None:
+    recording_url = payload.get("recording_url") or payload.get("url")
+    if not recording_url:
+        return
+    if task:
+        if not task.get("recording_url"):
+            task.recording_url = recording_url
+        if not task.get("call_uuid") and payload.get("CallUUID"):
+            task.call_uuid = payload.get("CallUUID")
+        task.vobiz_recording_payload = as_json(payload)
+        if task.status in {"Queued", "Running", "Waiting"}:
+            task.status = "Completed"
+        task.save(ignore_permissions=True)
+    if attempt:
+        if not attempt.get("recording_url"):
+            attempt.recording_url = recording_url
+        if not attempt.get("call_uuid") and payload.get("CallUUID"):
+            attempt.call_uuid = payload.get("CallUUID")
+        attempt.vobiz_recording_payload = as_json(payload)
+        if attempt.status in {"Started", "Retry Scheduled"}:
+            attempt.status = "Succeeded"
+        attempt.save(ignore_permissions=True)
+
+
+def _mark_call_log_waiting_for_transcript(call_log: str | None) -> None:
+    if not call_log or not frappe.db.exists("AI Call Log", call_log):
+        return
+    doc = frappe.get_doc("AI Call Log", call_log)
+    if doc.get("transcript") or doc.get("transcript_summary"):
+        return
+    if doc.get("ai_disposition") and not _is_missing_transcript_fallback_disposition(doc):
+        return
+    if frappe.get_meta("AI Call Log").has_field("erp_status_update_status"):
+        if _is_missing_transcript_fallback_disposition(doc):
+            doc.ai_disposition = ""
+            doc.ai_disposition_reason = ""
+            doc.ai_disposition_confidence = 0
+            doc.ai_disposition_summary = ""
+        doc.erp_status_update_status = "Skipped"
+        doc.erp_status_update_response = as_json(
+            {
+                "reason": "waiting_for_transcript",
+                "recording_backfilled": True,
+                "recording_available": bool(doc.get("recording_url") or doc.get("external_recording_url")),
+            }
+        )
+        doc.flags.ignore_ai_disposition_auto_sync = True
+        doc.save(ignore_permissions=True)
+
+
+def _is_missing_transcript_fallback_disposition(doc) -> bool:
+    disposition = str(doc.get("ai_disposition") or "").strip().lower()
+    reason = str(doc.get("ai_disposition_reason") or "").strip().lower()
+    response = _parse_json_object(doc.get("erp_status_update_response"))
+    custom = str(response.get("custom_vobiz_disposition") or response.get("disposition") or "").strip().lower()
+    return (
+        disposition == "not answered"
+        and ("no transcript" in reason or custom == "not reachable" or response.get("reason") == "missing_transcript_fallback")
+    )
+
+
+def _vobiz_recording_channels() -> list:
+    channels = []
+    if not frappe.db.exists("DocType", "AI Channel Account"):
+        return channels
+    rows = frappe.get_all(
+        "AI Channel Account",
+        filters={"enabled": 1, "channel_type": "LiveKit"},
+        fields=["name"],
+        limit_page_length=500,
+    )
+    for row in rows:
+        try:
+            channel = frappe.get_doc("AI Channel Account", row.name)
+        except Exception:
+            continue
+        if channel.get("vobiz_auth_id") and _get_password(channel, "vobiz_auth_token"):
+            channels.append(channel)
+    return channels
+
+
+def _recording_duration_sec(recording: dict) -> int:
+    for key in ("recording_duration_ms", "duration_ms"):
+        value = recording.get(key)
+        if value not in (None, ""):
+            try:
+                return int(float(value) / 1000)
+            except (TypeError, ValueError):
+                pass
+    for key in ("recording_duration_sec", "duration", "Duration"):
+        value = recording.get(key)
+        if value not in (None, ""):
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _parse_vobiz_datetime(value: Any):
+    if not value:
+        return None
+    text = str(value).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt
+    except Exception:
+        try:
+            return frappe.utils.get_datetime(value)
+        except Exception:
+            return None
+
+
+def _infer_recording_direction(recording: dict, channel, endpoints: dict) -> str:
+    from_number = recording.get("from_number")
+    to_number = recording.get("to_number")
+    line_values = [
+        channel.get("default_from"),
+        endpoints.get("outbound_phone_number"),
+        endpoints.get("inbound_phone_number"),
+        endpoints.get("phone_number"),
+        endpoints.get("vobiz_phone_number"),
+    ]
+    if any(_same_phone(from_number, line) for line in line_values if line):
+        return "Outbound"
+    if any(_same_phone(to_number, line) for line in line_values if line):
+        return "Inbound"
+    return str(recording.get("direction") or "").strip() or "Unknown"
+
+
+def _setting_enabled(fieldname: str, *, default: bool = False) -> bool:
+    value = _setting_value(fieldname, 1 if default else 0)
+    return value in (1, "1", True, "true", "True", "yes", "Yes")
+
+
+def _setting_int(fieldname: str, default: int) -> int:
+    value = _setting_value(fieldname, default)
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _setting_value(fieldname: str, default=None):
+    try:
+        meta = frappe.get_meta("Confluence AI Settings")
+        if not meta.has_field(fieldname):
+            return default
+        value = frappe.db.get_single_value("Confluence AI Settings", fieldname)
+        return value if value not in (None, "") else default
+    except Exception:
+        return default
 
 
 def download_vobiz_recording(recording_url: str, task) -> str | None:
@@ -16,7 +362,6 @@ def download_vobiz_recording(recording_url: str, task) -> str | None:
     if "storage.vobiz.ai" in recording_url or "test" in recording_url:
         return None
 
-    import requests
     # 1. Get channel account from task agent
     agent_name = task.assigned_agent or task.target_agent
     if not agent_name:
@@ -682,7 +1027,53 @@ def _find_existing_call_log(payload: dict) -> str | None:
         if recent:
             return recent[0]
 
+    nearby = _find_existing_call_log_by_phone_window(payload)
+    if nearby:
+        return nearby
+
     return None
+
+
+def _find_existing_call_log_by_phone_window(payload: dict) -> str | None:
+    customer_phone = _customer_phone_from_payload(payload)
+    suffix = _phone_suffix(customer_phone)
+    if not suffix:
+        return None
+
+    event_time = _parse_vobiz_datetime(payload.get("started_at") or payload.get("ended_at") or payload.get("add_time"))
+    if not event_time:
+        return None
+
+    start = frappe.utils.add_to_date(event_time, minutes=-15)
+    end = frappe.utils.add_to_date(event_time, minutes=15)
+    company = payload.get("company")
+    conditions = [
+        "`creation` between %(start)s and %(end)s",
+        "(`recording_url` is null or `recording_url` = '')",
+        "(`external_recording_url` is null or `external_recording_url` = '')",
+        "(`customer_phone` like %(suffix_like)s or `from_number` like %(suffix_like)s or `to_number` like %(suffix_like)s)",
+    ]
+    params = {
+        "start": start,
+        "end": end,
+        "suffix_like": f"%{suffix}",
+    }
+    if company:
+        conditions.append("(`company` = %(company)s or `company` is null or `company` = '')")
+        params["company"] = company
+
+    rows = frappe.db.sql(
+        f"""
+        select name
+        from `tabAI Call Log`
+        where {" and ".join(conditions)}
+        order by creation desc
+        limit 1
+        """,
+        params,
+        as_dict=True,
+    )
+    return rows[0].name if rows else None
 
 
 def _parse_json_object(value: str | None) -> dict:
@@ -746,6 +1137,119 @@ def _candidate_livekit_trunk_ids(payload: dict) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _candidate_channel_accounts(payload: dict) -> list[str]:
+    candidates: list[str] = []
+    explicit = payload.get("channel_account") or payload.get("ChannelAccount")
+    if explicit:
+        candidates.append(str(explicit).strip())
+
+    account_id = _vobiz_account_id(payload, payload.get("recording_url") or payload.get("url"))
+    if account_id:
+        candidates.extend(
+            frappe.get_all(
+                "AI Channel Account",
+                filters={"enabled": 1, "vobiz_auth_id": account_id},
+                pluck="name",
+            )
+        )
+
+    trunk_ids = _candidate_livekit_trunk_ids(payload)
+    for trunk_id in trunk_ids:
+        candidates.extend(
+            frappe.get_all(
+                "AI Channel Account",
+                filters={"enabled": 1, "trunk_id": trunk_id},
+                pluck="name",
+            )
+        )
+
+    domain = (payload.get("Domain") or payload.get("domain") or "").strip()
+    from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
+    to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
+    for row in frappe.get_all(
+        "AI Channel Account",
+        filters={"enabled": 1},
+        fields=["name", "default_from", "endpoint_paths_json"],
+        limit_page_length=500,
+    ):
+        endpoints = _parse_json_object(row.endpoint_paths_json)
+        if domain and domain in {endpoints.get("sip_uri"), endpoints.get("inbound_domain")}:
+            candidates.append(row.name)
+        line_values = [
+            row.default_from,
+            endpoints.get("outbound_phone_number"),
+            endpoints.get("inbound_phone_number"),
+            endpoints.get("phone_number"),
+            endpoints.get("vobiz_phone_number"),
+        ]
+        if any(_same_phone(from_number, line) or _same_phone(to_number, line) for line in line_values if line):
+            candidates.append(row.name)
+
+    result = []
+    for value in candidates:
+        if value and value not in result and frappe.db.exists("AI Channel Account", value):
+            result.append(value)
+    return result
+
+
+def _default_agent_for_channel(channel_name: str | None) -> str | None:
+    if not channel_name:
+        return None
+    return frappe.db.get_value("AI Agent", {"enabled": 1, "allowed_channel_account": channel_name}, "name")
+
+
+def _customer_phone_from_payload(payload: dict, fallback: str | None = None) -> str | None:
+    explicit = payload.get("customer_phone") or payload.get("phone") or payload.get("caller_number")
+    if explicit:
+        return explicit
+
+    from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
+    to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
+    direction = str(payload.get("Direction") or payload.get("direction") or "").lower()
+
+    channel_name = (payload.get("channel_account") or payload.get("ChannelAccount") or "").strip()
+    channel = frappe.get_doc("AI Channel Account", channel_name) if channel_name and frappe.db.exists("AI Channel Account", channel_name) else None
+    endpoints = _parse_json_object(channel.get("endpoint_paths_json")) if channel else {}
+    line_values = []
+    if channel:
+        line_values.append(channel.get("default_from"))
+    line_values.extend(
+        [
+            endpoints.get("outbound_phone_number"),
+            endpoints.get("inbound_phone_number"),
+            endpoints.get("phone_number"),
+            endpoints.get("vobiz_phone_number"),
+        ]
+    )
+
+    if any(_same_phone(from_number, line) for line in line_values if line):
+        return to_number or fallback
+    if any(_same_phone(to_number, line) for line in line_values if line):
+        return from_number or fallback
+    if direction.startswith("in"):
+        return from_number or fallback
+    if direction.startswith("out"):
+        return to_number or fallback
+    return fallback or to_number or from_number
+
+
+def _same_phone(left: Any, right: Any) -> bool:
+    left_digits = re.sub(r"\D", "", str(left or ""))
+    right_digits = re.sub(r"\D", "", str(right or ""))
+    if not left_digits or not right_digits:
+        return False
+    if len(left_digits) >= 10 and len(right_digits) >= 10:
+        return left_digits[-10:] == right_digits[-10:]
+    return left_digits == right_digits
+
+
+def _phone_suffix(value: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return None
+    return digits[-10:] if len(digits) >= 10 else digits
 
 
 def _find_repeat_followup_task_by_phone_and_trunk(candidate_trunk_ids: list[str], suffix: str | None) -> tuple[str | None, str | None]:
@@ -827,13 +1331,15 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
     event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
     event_type_lower = str(event_type).lower()
+    channel_accounts = _candidate_channel_accounts(payload)
+    channel_account = channel_accounts[0] if channel_accounts else None
 
     doc.provider = "Vobiz"
     doc.event_type = event_type
     doc.direction = payload.get("Direction") or payload.get("direction")
     doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
     doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
-    doc.customer_phone = doc.to_number or doc.customer_phone
+    doc.customer_phone = _customer_phone_from_payload(payload, doc.customer_phone)
     doc.call_uuid = doc.call_uuid or call_uuid
     doc.sip_call_id = doc.sip_call_id or sip_call_id
     if not doc.sip_call_id and event_type_lower in {"initiated", "dial", "ringing", "callinitiated"} and call_uuid:
@@ -842,6 +1348,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc.domain = payload.get("Domain") or payload.get("domain") or doc.domain
     doc.reason = payload.get("Reason") or payload.get("reason") or payload.get("hangup_cause") or doc.reason
     doc.last_payload_json = as_json(payload)
+    doc.company = doc.company or payload.get("company")
+    if channel_account:
+        doc.company = doc.company or frappe.db.get_value("AI Channel Account", channel_account, "company")
+        doc.agent = doc.agent or _default_agent_for_channel(channel_account)
 
     if task:
         doc.task = task.name
@@ -894,6 +1404,12 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
         doc.status_payload_json = as_json(payload)
         if doc.status in {"Completed", "Failed", "Rejected", "No Answer", "Busy", "Cancelled"}:
             doc.ended_at = now()
+    elif event_type_lower in VOBIZ_RECORDING_EVENTS:
+        event_time = _parse_vobiz_datetime(payload.get("started_at") or payload.get("add_time"))
+        if event_time and not doc.started_at:
+            doc.started_at = event_time
+        if event_time and not doc.ended_at:
+            doc.ended_at = event_time
 
     duration = payload.get("Duration") or payload.get("duration") or payload.get("recording_duration_sec")
     if duration is not None:
