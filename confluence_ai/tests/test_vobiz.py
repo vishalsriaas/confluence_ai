@@ -28,6 +28,15 @@ class TestVobizTranscript(unittest.TestCase):
     def test_leaves_unlabelled_text_unchanged(self):
         self.assertEqual(normalize_vobiz_ai_transcript_labels("plain transcript"), "plain transcript")
 
+    def test_recording_transcription_fallback_labels_are_not_swapped(self):
+        transcript = "[AGENT]: Namaste\n[CUSTOMER]: Hello"
+        payload = {
+            "source": "recording_transcription_fallback",
+            "transcript": transcript,
+        }
+
+        self.assertEqual(vobiz._transcript_from_payload(payload), transcript)
+
     def test_builds_expected_recording_url_from_transcript_payload(self):
         payload = {
             "event": "transcription.completed",

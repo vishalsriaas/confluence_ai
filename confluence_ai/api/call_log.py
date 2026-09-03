@@ -125,6 +125,21 @@ def backfill_vobiz_recordings(minutes: int | None = None, limit: int | None = No
 
 
 @frappe.whitelist()
+def transcribe_missing_recordings(
+    minutes: int | None = None,
+    limit: int | None = None,
+    call_log: str | None = None,
+    force: int | str | bool = 0,
+) -> dict:
+    from confluence_ai.services import recording_transcription
+
+    force_value = force in (1, "1", True, "true", "True", "yes", "Yes")
+    if call_log:
+        return recording_transcription.process_call_log_recording_transcript(call_log, force=force_value)
+    return recording_transcription.process_missing_recording_transcripts(minutes=minutes, limit=limit)
+
+
+@frappe.whitelist()
 def recording_audio(call_log: str):
     doc = frappe.get_doc("AI Call Log", call_log)
     url = doc.external_recording_url or doc.recording_url

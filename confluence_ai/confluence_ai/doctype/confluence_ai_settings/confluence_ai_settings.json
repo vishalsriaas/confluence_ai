@@ -23,6 +23,18 @@
   "enable_vobiz_recording_backfill",
   "vobiz_recording_backfill_lookback_minutes",
   "vobiz_recording_backfill_limit",
+  "recording_transcription_section",
+  "enable_recording_transcription_fallback",
+  "recording_transcription_provider",
+  "recording_transcription_model",
+  "recording_transcription_api_key",
+  "recording_transcription_base_url",
+  "recording_transcription_path",
+  "recording_transcription_timeout_seconds",
+  "recording_transcription_lookback_minutes",
+  "recording_transcription_limit",
+  "recording_transcription_wait_minutes",
+  "recording_transcription_max_audio_mb",
   "whatsapp_summary_section",
   "enable_whatsapp_ai_summary",
   "whatsapp_summary_provider",
@@ -169,6 +181,84 @@
    "fieldname": "vobiz_recording_backfill_limit",
    "fieldtype": "Int",
    "label": "Vobiz Recording Backfill Limit"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "recording_transcription_section",
+   "fieldtype": "Section Break",
+   "label": "Recording Transcription Fallback"
+  },
+  {
+   "default": "1",
+   "description": "When Vobiz sends/keeps recording but no transcript callback arrives, transcribe the recording and continue disposition/follow-up processing.",
+   "fieldname": "enable_recording_transcription_fallback",
+   "fieldtype": "Check",
+   "label": "Enable Recording Transcription Fallback"
+  },
+  {
+   "default": "Gemini",
+   "fieldname": "recording_transcription_provider",
+   "fieldtype": "Select",
+   "label": "Recording Transcription Provider",
+   "options": "Gemini\nOpenAI\nOpenAI Compatible"
+  },
+  {
+   "default": "gemini-2.5-flash",
+   "fieldname": "recording_transcription_model",
+   "fieldtype": "Data",
+   "label": "Recording Transcription Model"
+  },
+  {
+   "description": "Optional if the key exists in site config as gemini_api_key/google_api_key/openai_api_key. Stored encrypted by Frappe.",
+   "fieldname": "recording_transcription_api_key",
+   "fieldtype": "Password",
+   "label": "Recording Transcription API Key"
+  },
+  {
+   "default": "https://generativelanguage.googleapis.com/v1beta",
+   "fieldname": "recording_transcription_base_url",
+   "fieldtype": "Data",
+   "label": "Recording Transcription Base URL"
+  },
+  {
+   "description": "Use /audio/transcriptions for OpenAI/OpenAI Compatible. Gemini ignores this.",
+   "fieldname": "recording_transcription_path",
+   "fieldtype": "Data",
+   "label": "Recording Transcription Path"
+  },
+  {
+   "default": "60",
+   "fieldname": "recording_transcription_timeout_seconds",
+   "fieldtype": "Int",
+   "label": "Recording Transcription Timeout Seconds"
+  },
+  {
+   "default": "360",
+   "description": "How many recent minutes of recorded call logs should be checked for missing transcript.",
+   "fieldname": "recording_transcription_lookback_minutes",
+   "fieldtype": "Int",
+   "label": "Recording Transcription Lookback Minutes"
+  },
+  {
+   "default": "50",
+   "description": "Maximum recorded call logs to transcribe per scheduler run.",
+   "fieldname": "recording_transcription_limit",
+   "fieldtype": "Int",
+   "label": "Recording Transcription Limit"
+  },
+  {
+   "default": "2",
+   "description": "Wait this many minutes after recording update before fallback transcription, so late Vobiz transcript callbacks can arrive first.",
+   "fieldname": "recording_transcription_wait_minutes",
+   "fieldtype": "Int",
+   "label": "Recording Transcription Wait Minutes"
+  },
+  {
+   "default": "25",
+   "description": "Maximum recording size for fallback transcription.",
+   "fieldname": "recording_transcription_max_audio_mb",
+   "fieldtype": "Int",
+   "label": "Recording Transcription Max Audio MB"
   },
   {
    "collapsible": 1,

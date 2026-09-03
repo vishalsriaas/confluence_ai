@@ -727,9 +727,7 @@ def handle_callback(payload: dict) -> dict:
         task.vobiz_transcript_payload = as_json(payload)
         if attempt:
             attempt.vobiz_transcript_payload = as_json(payload)
-        transcript = normalize_vobiz_ai_transcript_labels(
-            payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
-        )
+        transcript = _transcript_from_payload(payload)
         if transcript:
             task_result["transcript"] = transcript
             task.transcript = transcript
@@ -1418,9 +1416,7 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
         except (TypeError, ValueError):
             pass
 
-    transcript = normalize_vobiz_ai_transcript_labels(
-        payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
-    )
+    transcript = _transcript_from_payload(payload)
     if event_type_lower in {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}:
         doc.transcript_payload_json = as_json(payload)
         if transcript:
@@ -1449,6 +1445,13 @@ def normalize_vobiz_ai_transcript_labels(transcript: object) -> str:
     text = re.sub(r"\[CUSTOMER\]\s*:", "[AGENT]:", text)
     text = re.sub(r"\[CALLER_TMP\]\s*:", "[CUSTOMER]:", text)
     return text
+
+
+def _transcript_from_payload(payload: dict) -> str:
+    transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text") or payload.get("transcription_text")
+    if payload.get("source") == "recording_transcription_fallback":
+        return str(transcript or "")
+    return normalize_vobiz_ai_transcript_labels(transcript)
 
 
 def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
