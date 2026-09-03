@@ -4,7 +4,7 @@ import frappe
 
 from confluence_ai.services.callbacks import post_batch_callback
 from confluence_ai.services.scheduler import is_agent_available
-from confluence_ai.services.utils import get_queue_name, get_setting
+from confluence_ai.services.utils import as_json, get_queue_name, get_setting
 
 
 CHANNEL_QUEUE_FIELD = {
@@ -45,8 +45,20 @@ def dispatch_batch(batch_name: str, limit: int | None = None) -> dict:
     if batch.status in {"Paused", "Completed", "Failed", "Cancelled"}:
         return {"skipped": batch.status}
 
+    config_error = _batch_tenant_config_error(batch)
+    if config_error:
+        _fail_batch_permanently(batch.name, config_error)
+        return {"failed": config_error, "permanent": True}
+
     batch.status = "Dispatching"
-    batch.save(ignore_permissions=True)
+    try:
+        batch.save(ignore_permissions=True)
+    except Exception as exc:
+        if _is_permanent_tenant_error(exc):
+            message = str(exc) or exc.__class__.__name__
+            _fail_batch_permanently(batch.name, message)
+            return {"failed": message, "permanent": True}
+        raise
 
     task_names = frappe.get_all(
         "AI Task",
@@ -142,3 +154,58 @@ def refresh_batch_counts(batch_name: str) -> None:
         "cancelled_count": frappe.db.count("AI Task", {"task_batch": batch_name, "status": "Cancelled"}),
     }
     frappe.db.set_value("AI Task Batch", batch_name, counts, update_modified=True)
+
+
+def _batch_tenant_config_error(batch) -> str | None:
+    company = (batch.company or "").strip()
+    if not company:
+        return None
+
+    checks = (
+        ("Task Template", "AI Task Template", batch.task_template),
+        ("Target Agent", "AI Agent", batch.target_agent),
+        ("Target Group", "AI Agent Group", batch.target_group),
+    )
+    for label, doctype, value in checks:
+        if not value or not frappe.db.exists(doctype, value):
+            continue
+        if not frappe.get_meta(doctype).has_field("company"):
+            continue
+        linked_company = frappe.db.get_value(doctype, value, "company")
+        if linked_company and linked_company != company:
+            return f"{label} must belong to company {company}."
+    return None
+
+
+def _is_permanent_tenant_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "must belong to company" in message
+
+
+def _fail_batch_permanently(batch_name: str, message: str) -> None:
+    summary = {
+        "status": "failed_permanently",
+        "reason": message,
+        "source": "dispatcher_tenant_validation",
+    }
+    frappe.db.sql(
+        """
+        update `tabAI Task`
+        set status = 'Failed',
+            last_error = %s,
+            modified = %s
+        where task_batch = %s
+            and status in ('Queued', 'Waiting', 'Running')
+        """,
+        (message, frappe.utils.now(), batch_name),
+    )
+    refresh_batch_counts(batch_name)
+    frappe.db.set_value(
+        "AI Task Batch",
+        batch_name,
+        {
+            "status": "Failed",
+            "result_summary_json": as_json(summary),
+        },
+        update_modified=True,
+    )
