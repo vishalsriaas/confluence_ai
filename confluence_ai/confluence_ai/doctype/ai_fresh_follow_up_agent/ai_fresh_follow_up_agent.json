@@ -58,6 +58,7 @@
   {
    "default": "3",
    "fieldname": "max_attempts",
+   "description": "Total call attempts for this agent, including the first call. 3 means the first call plus 2 retries.",
    "fieldtype": "Int",
    "in_list_view": 1,
    "label": "Max Attempts"

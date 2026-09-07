@@ -12,6 +12,16 @@ def execute_task(task_name: str) -> dict:
     if not frappe.db.exists("AI Task", task_name):
         return {"missing": task_name}
 
+    task = frappe.get_doc("AI Task", task_name)
+    if task.external_record_type == "AI Fresh Follow Up Workflow":
+        from confluence_ai.services.fresh_followup import task_dispatch_allowed
+
+        if not task_dispatch_allowed(task):
+            if task.status == "Queued":
+                frappe.db.set_value("AI Task", task.name, {"status": "Cancelled", "last_error": "Fresh follow-up schedule is no longer active."})
+                frappe.db.commit()
+            return {"skipped": "inactive_fresh_followup"}
+
     # Lock the task row to prevent concurrent execution
     status = frappe.db.get_value("AI Task", task_name, "status", for_update=True)
     if status in {"Completed", "Failed", "Cancelled", "Deadline Missed"}:

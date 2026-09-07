@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
 from typing import Any
 
 import frappe
 from frappe.utils import add_to_date, get_datetime, now_datetime
-from frappe.utils.synchronization import filelock
 
 from confluence_ai.services.dispatcher import enqueue_task_execution, refresh_batch_counts
 from confluence_ai.services.utils import as_json, create_error, parse_json_object
@@ -60,10 +60,15 @@ def start_from_event(payload: dict | list | None) -> dict:
     if not context.get("phone"):
         frappe.throw("Fresh follow-up payload must include phone or mobile.")
 
+    _lock_company(settings.company)
     idem_key = _first_path(payload, _field_names(settings.idempotency_key_field_names)) or context.get("phone")
-    existing = frappe.db.exists(WORKFLOW, {"idempotency_key": idem_key}) if idem_key else None
+    existing = frappe.db.get_value(WORKFLOW, {"company": settings.company, "idempotency_key": idem_key}, "name", for_update=True) if idem_key else None
     if existing:
         return {"status": "duplicate", "workflow": existing, "idempotency_key": idem_key}
+
+    existing = _consolidate_customer_workflows(settings.company, context["phone"])
+    if existing:
+        return {"status": "duplicate", "workflow": existing, "reason": "active_customer_workflow"}
 
     workflow = frappe.new_doc(WORKFLOW)
     workflow.update(
@@ -172,11 +177,16 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
         return {"status": "ignored", "reason": "missing_phone", "task": task.name}
     normalized["fresh_followup_outcome_contract"] = _fresh_followup_outcome_contract()
 
+    _lock_company(company)
     base_idem = task.idempotency_key or task.call_uuid or task.name
     idem_key = f"fresh-followup:{base_idem}"
-    existing = frappe.db.exists(WORKFLOW, {"idempotency_key": idem_key})
+    existing = frappe.db.get_value(WORKFLOW, {"company": company, "idempotency_key": idem_key}, "name", for_update=True)
     if existing:
         return {"status": "duplicate", "workflow": existing, "idempotency_key": idem_key, "task": task.name}
+
+    existing = _consolidate_customer_workflows(company, normalized["phone"])
+    if existing:
+        return _attach_related_call(existing, task)
 
     workflow = frappe.new_doc(WORKFLOW)
     deadline = task.deadline or add_to_date(now_datetime(), minutes=_safe_int(settings.voice_call_timeout_minutes, 5), as_datetime=True)
@@ -245,11 +255,21 @@ def maybe_start_from_task(task, payload: dict | None = None, context: dict | Non
 
 def queue_agent_call(workflow_name: str, agent_no: int | None = None) -> dict:
     with _workflow_lock(workflow_name):
-        workflow = frappe.get_doc(WORKFLOW, workflow_name)
+        workflow = frappe.get_doc(WORKFLOW, workflow_name, for_update=True)
         if not workflow.enabled:
             return {"status": "skipped", "reason": "disabled", "workflow": workflow.name}
         if workflow.status in FINAL_STATES:
             return {"status": "skipped", "reason": "final_state", "workflow": workflow.name}
+        canonical = _consolidate_customer_workflows(workflow.company, workflow.customer_phone)
+        workflow.reload()
+        if canonical and canonical != workflow.name:
+            return {"status": "skipped", "reason": "duplicate_customer_workflow", "workflow": workflow.name, "canonical": canonical}
+        if workflow.status not in {"Draft", "Scheduled", "Pending Config"}:
+            return {"status": "skipped", "reason": "not_scheduled", "workflow": workflow.name}
+        if workflow.next_call_time and get_datetime(workflow.next_call_time) > now_datetime():
+            return {"status": "skipped", "reason": "not_due", "workflow": workflow.name}
+        if agent_no and int(agent_no) != int(workflow.next_agent_no or 1):
+            return {"status": "skipped", "reason": "wrong_agent", "workflow": workflow.name}
         block = _do_not_follow_up_match(workflow.company, workflow.customer_phone)
         if block:
             return _mark_no_follow_up(workflow, block)
@@ -361,6 +381,8 @@ def handle_voice_result(
     if not doc:
         frappe.throw("Fresh follow-up workflow not found.")
 
+    _lock_workflow(doc)
+    doc.reload()
     row = _agent_row_for_task_or_status(doc, task)
     if not row:
         frappe.throw("Fresh follow-up agent row not found.")
@@ -369,6 +391,10 @@ def handle_voice_result(
     attempt_no = _safe_int(row.attempt_count, 0)
     transcript_text = transcript or _task_transcript(task) or notes or ""
     _store_row_transcript(row, agent_no, attempt_no, transcript_text)
+    if not doc.enabled or doc.status in FINAL_STATES or (task and row.task != task) or row.status == "Completed":
+        doc.save(ignore_permissions=True)
+        frappe.db.commit()
+        return {"status": "ignored", "reason": "inactive_or_already_handled_call", "workflow": doc.name}
 
     block = _do_not_follow_up_match(doc.company, doc.customer_phone)
     if block:
@@ -426,9 +452,12 @@ def handle_voice_result(
     return {"status": "completed", "workflow": doc.name, "agent_no": agent_no, "next": next_result}
 
 
-def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> dict:
+def wait_for_voice_transcript(workflow_name: str, notes: str | None = None, task: str | None = None) -> dict:
     doc = frappe.get_doc(WORKFLOW, workflow_name)
-    if doc.status in FINAL_STATES:
+    _lock_workflow(doc)
+    doc.reload()
+    row = _agent_row_for_task_or_status(doc, task)
+    if not doc.enabled or doc.status != "Queued" or (task and (not row or row.task != task)):
         return {"status": "ignored", "reason": "final_state", "workflow": doc.name}
     if notes:
         doc.timer_status = notes
@@ -439,14 +468,21 @@ def wait_for_voice_transcript(workflow_name: str, notes: str | None = None) -> d
     return {"status": "waiting_for_transcript", "workflow": doc.name}
 
 
-def mark_call_missed(workflow: str, notes: str | None = None, task: str | None = None) -> dict:
+def mark_call_missed(workflow: str, notes: str | None = None, task: str | None = None, *, timeout_only: bool = False) -> dict:
     doc = _find_workflow(workflow=workflow, task=task)
     if not doc:
         frappe.throw("Fresh follow-up workflow not found.")
 
+    _lock_workflow(doc)
+    doc.reload()
     row = _agent_row_for_task_or_status(doc, task)
     if not row:
         frappe.throw("Fresh follow-up agent row not found.")
+
+    if not doc.enabled or doc.status != "Queued" or row.status != "Queued" or (task and row.task != task):
+        return {"status": "ignored", "reason": "inactive_or_already_handled_call", "workflow": doc.name}
+    if timeout_only and (not doc.active_call_timeout_at or get_datetime(doc.active_call_timeout_at) > now_datetime()):
+        return {"status": "ignored", "reason": "timeout_not_due", "workflow": doc.name}
 
     block = _do_not_follow_up_match(doc.company, doc.customer_phone)
     if block:
@@ -512,7 +548,7 @@ def process_due_workflows() -> dict:
         limit=200,
     ):
         try:
-            mark_call_missed(name, "Voice call timed out without callback.")
+            mark_call_missed(name, "Voice call timed out without callback.", timeout_only=True)
             missed += 1
         except Exception as exc:
             _mark_failed(name, exc)
@@ -898,6 +934,9 @@ def _agent_row_for_task_or_status(workflow, task: str | None = None):
         for row in workflow.get("agents") or []:
             if row.task == task:
                 return row
+        for entry in reversed(json.loads(workflow.task_history_json or "[]")):
+            if entry.get("task") == task:
+                return _agent_row(workflow, entry.get("agent_no"))
     return _agent_row(workflow, workflow.current_agent_no or workflow.next_agent_no or 1)
 
 
@@ -908,6 +947,11 @@ def _find_workflow(workflow: str | None = None, task: str | None = None):
         row = frappe.db.get_value(WORKFLOW_AGENT, {"task": task}, ["parent"], as_dict=True)
         if row and row.parent:
             return frappe.get_doc(WORKFLOW, row.parent)
+        if frappe.db.exists("AI Task", task):
+            context = parse_json_object(frappe.db.get_value("AI Task", task, "context_json"))
+            linked = context.get("fresh_followup_workflow")
+            if linked and frappe.db.exists(WORKFLOW, linked):
+                return frappe.get_doc(WORKFLOW, linked)
     return None
 
 
@@ -1029,6 +1073,8 @@ def _normalize_phone(value: object) -> str:
     if not text:
         return ""
     digits = re.sub(r"\D", "", text)
+    if digits.startswith("00"):
+        digits = digits[2:]
     if len(digits) == 10:
         return f"+91{digits}"
     if len(digits) == 11 and digits.startswith("0"):
@@ -1037,7 +1083,7 @@ def _normalize_phone(value: object) -> str:
         return f"+{digits}"
     if text.startswith("+") and digits:
         return f"+{digits}"
-    return text
+    return f"+{digits}" if digits else ""
 
 
 def _do_not_follow_up_match(company: str | None, phone: object) -> dict | None:
@@ -1117,5 +1163,123 @@ def _mark_failed(workflow_name: str, exc: Exception) -> None:
         frappe.log_error(frappe.get_traceback(), "AI Fresh Follow Up mark failed error")
 
 
+def _lock_company(company: str) -> None:
+    # A DB lock survives until commit/rollback and works across worker hosts.
+    frappe.db.get_value("AI Company", company, "name", for_update=True)
+
+
+def _lock_workflow(workflow) -> None:
+    _lock_company(workflow.company)
+    frappe.db.get_value(WORKFLOW, workflow.name, "name", for_update=True)
+    workflow.flags.for_update = True
+
+
+@contextmanager
 def _workflow_lock(workflow_name: str):
-    return filelock(f"ai_fresh_followup_{workflow_name}", timeout=60)
+    company = frappe.db.get_value(WORKFLOW, workflow_name, "company")
+    _lock_company(company)
+    frappe.db.get_value(WORKFLOW, workflow_name, "name", for_update=True)
+    yield
+
+
+def _active_customer_workflow(company: str, phone: str) -> str | None:
+    matches = _active_customer_workflows(company, phone)
+    return matches[0] if matches else None
+
+
+def _active_customer_workflows(company: str, phone: str) -> list[str]:
+    normalized = _normalize_phone(phone)
+    if not normalized:
+        return []
+    rows = frappe.db.get_values(
+        WORKFLOW,
+        filters={"company": company, "enabled": 1, "status": ["not in", sorted(FINAL_STATES)]},
+        fieldname=["name", "customer_phone"],
+        order_by="creation asc, name asc",
+        as_dict=True,
+        for_update=True,
+    )
+    return [row.name for row in rows if _normalize_phone(row.customer_phone) == normalized]
+
+
+def _consolidate_customer_workflows(company: str, phone: str) -> str | None:
+    names = _active_customer_workflows(company, phone)
+    if len(names) < 2:
+        return names[0] if names else None
+    docs = [frappe.get_doc(WORKFLOW, name, for_update=True) for name in names]
+    # Keep ongoing work first, otherwise the latest, most advanced journey.
+    def rank(doc):
+        completed = max((int(row.agent_no or row.idx) for row in doc.agents if row.status == "Completed"), default=0)
+        return (doc.status == "Queued", completed, get_datetime(doc.creation), doc.name)
+
+    keep = max(docs, key=rank)
+    kept_tasks = {row.task for row in keep.agents if row.task}
+    history = json.loads(keep.task_history_json or "[]")
+    for duplicate in docs:
+        if duplicate.name == keep.name:
+            continue
+        for other in duplicate.agents:
+            row = _agent_row(keep, other.agent_no or other.idx)
+            if row:
+                row.attempt_count = _safe_int(row.attempt_count) + _safe_int(other.attempt_count)
+                _store_row_transcript(row, int(row.agent_no or row.idx), other.attempt_count, other.transcript)
+            if other.task and other.task not in kept_tasks:
+                status = frappe.db.get_value("AI Task", other.task, "status", for_update=True)
+                if status == "Queued":
+                    frappe.db.set_value("AI Task", other.task, {
+                        "status": "Cancelled", "last_error": f"Duplicate fresh follow-up consolidated into {keep.name}."
+                    })
+            if other.status in {"Pending", "Scheduled", "Queued", "Pending Config"}:
+                other.status = "Cancelled"
+        history.extend(json.loads(duplicate.task_history_json or "[]"))
+        duplicate.enabled = 0
+        duplicate.status = "Cancelled"
+        duplicate.next_agent_no = 0
+        duplicate.next_call_time = None
+        duplicate.active_call_timeout_at = None
+        duplicate.final_reason = f"Duplicate customer workflow consolidated into {keep.name}. History preserved."
+        duplicate.timer_status = duplicate.final_reason
+        duplicate.save(ignore_permissions=True)
+    keep.task_history_json = as_json(history)
+    keep.save(ignore_permissions=True)
+    return keep.name
+
+
+def task_dispatch_allowed(task) -> bool:
+    """Recheck queued jobs before any outbound call is started."""
+    if task.external_record_type != WORKFLOW:
+        return True
+    _lock_company(task.company)
+    doc = frappe.get_doc(WORKFLOW, task.external_record_id, for_update=True)
+    row = _agent_row_for_task_or_status(doc, task.name)
+    return bool(
+        doc.enabled and doc.status == "Queued" and row and row.task == task.name
+        and row.status == "Queued" and _safe_int(row.attempt_count) <= max(1, _safe_int(row.max_attempts, 1))
+        and _active_customer_workflow(doc.company, doc.customer_phone) == doc.name
+    )
+
+
+def _attach_related_call(workflow_name: str, task) -> dict:
+    doc = frappe.get_doc(WORKFLOW, workflow_name, for_update=True)
+    history = json.loads(doc.task_history_json or "[]")
+    if not any(entry.get("task") == task.name for entry in history):
+        row = _agent_row(doc, 1)
+        _append_task_history(doc, 1, _safe_int(row.attempt_count, 0), task.name, "related_call")
+        _store_row_transcript(row, 1, row.attempt_count, task.get("transcript"))
+        # A customer calling back can satisfy a pending Agent 1 retry.
+        # Never reset the attempts or replace an already-running call.
+        if doc.status == "Scheduled" and int(doc.next_agent_no or 0) == 1 and task.external_record_type == "Vobiz Inbound Call":
+            deadline = task.deadline or add_to_date(now_datetime(), minutes=_safe_int(doc.voice_call_timeout_minutes, 5), as_datetime=True)
+            row.task = task.name
+            row.status = "Queued"
+            doc.status = "Queued"
+            doc.active_call_timeout_at = deadline
+            doc.next_call_time = deadline
+        doc.save(ignore_permissions=True)
+    _attach_outcome_contract_to_task(task.name, doc.name)
+    context = parse_json_object(frappe.db.get_value("AI Task", task.name, "context_json"))
+    prior = _workflow_context(doc, 1)
+    for key in ("prior_call_transcripts", "previous_agent_transcripts", "previous_transcript_summary"):
+        context[key] = prior[key]
+    frappe.db.set_value("AI Task", task.name, "context_json", as_json(context))
+    return {"status": "attached", "workflow": doc.name, "task": task.name, "reason": "active_customer_workflow"}

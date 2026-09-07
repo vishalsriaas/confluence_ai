@@ -968,6 +968,7 @@ def _handle_fresh_followup_callback(task, payload: dict, event_type_lower: str) 
             return fresh_followup.wait_for_voice_transcript(
                 workflow_name,
                 "Voice call ended; waiting for Vobiz transcript before scheduling the next fresh follow-up agent.",
+                task=task.name,
             )
 
         return fresh_followup.handle_voice_result(
@@ -987,7 +988,8 @@ def _handle_fresh_followup_callback(task, payload: dict, event_type_lower: str) 
 def _fresh_followup_workflow_for_task(task) -> str | None:
     if task.external_record_type == "AI Fresh Follow Up Workflow" and task.external_record_id:
         return task.external_record_id
-    return frappe.db.get_value("AI Fresh Follow Up Workflow Agent", {"task": task.name}, "parent")
+    context = parse_json_object(task.context_json) if task.context_json else {}
+    return frappe.db.get_value("AI Fresh Follow Up Workflow Agent", {"task": task.name}, "parent") or context.get("fresh_followup_workflow")
 
 
 def _payload_call_ids(payload: dict) -> list[str]:
