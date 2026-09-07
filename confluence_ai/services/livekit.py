@@ -493,6 +493,8 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
     room_name = f"agent-army-{task.name}"
 
     metadata = build_voice_metadata(task.name, payload)
+    if operation == "outbound_call":
+        metadata["context"]["direction"] = "Outbound"
     metadata_str = json.dumps(metadata)
     livekit_agent_name = _livekit_dispatch_name(agent, endpoints, payload)
 
@@ -727,6 +729,14 @@ def handle_callback(payload: dict) -> dict:
 
     # 2. Get the documents
     task = frappe.get_doc("AI Task", task_name)
+    if payload.get("identity_source") == "sip.callIDFull":
+        from confluence_ai.services.call_identity import bind_provider_identity
+
+        bound_call = bind_provider_identity(task, payload)
+        frappe.db.commit()
+        task.reload()
+        if payload.get("event") == "call_identity":
+            return {"status": "success", "task": task.name, "call_log": bound_call}
     attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
     if not attempt:
         latest_attempts = frappe.get_all(
@@ -1046,7 +1056,7 @@ def _apply_livekit_call_log_payload(
 
     doc.provider = "LiveKit"
     doc.event_type = livekit_event
-    doc.direction = context.get("direction") or "Inbound"
+    doc.direction = payload.get("direction") or context.get("direction") or doc.direction or "Inbound"
     doc.agent = task.assigned_agent or task.target_agent or doc.agent
     doc.task = task.name
     doc.company = task.company or doc.company
@@ -1092,6 +1102,7 @@ def _apply_livekit_call_log_payload(
             )
         )
 
+    previous_status = doc.status
     status = str(payload.get("status") or livekit_event or "").lower()
     if status in {"completed", "call_ended", "participant_left", "room_finished", "recording_ready", "transcript_ready"}:
         doc.status = "Completed"
@@ -1102,11 +1113,15 @@ def _apply_livekit_call_log_payload(
     elif not doc.status:
         doc.status = "Unknown"
 
+    terminal_states = {"Completed", "Failed", "Rejected", "No Answer", "Busy", "Cancelled"}
+    if previous_status in terminal_states and doc.status not in terminal_states:
+        doc.status = previous_status
+
     if event_type_lower in {"room_started", "participant_joined", "initiated"}:
-        doc.initiated_payload_json = as_json(payload)
+        doc.initiated_payload_json = doc.initiated_payload_json or as_json(payload)
         doc.started_at = payload.get("started_at") or doc.started_at or now()
     elif event_type_lower in {"room_finished", "call_ended", "participant_left", "completed", "failed", "room_failed", "call_failed"}:
-        doc.status_payload_json = as_json(payload)
+        doc.status_payload_json = doc.status_payload_json or as_json(payload)
         doc.started_at = payload.get("started_at") or doc.started_at
         doc.ended_at = payload.get("ended_at") or doc.ended_at or now()
 

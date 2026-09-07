@@ -12,10 +12,7 @@ from confluence_ai.services.utils import as_json, get_request_json
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def receive_vobiz() -> dict:
     payload = get_request_json()
-    event = _record_inbound("vobiz", payload)
-    result = vobiz.handle_callback(payload)
-    _mark_webhook_processed(event, result)
-    return result
+    return _process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -32,10 +29,7 @@ def receive_whatsapp() -> dict:
 def receive_livekit() -> dict:
     require_access("webhook")
     payload = get_request_json()
-    event = _record_inbound("livekit", payload)
-    result = livekit.handle_callback(payload)
-    frappe.db.set_value("AI Webhook Event", event, {"status": "Processed", "response_json": as_json(result)})
-    return result
+    return _process_telephony_receipt("livekit", payload, livekit.handle_callback)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -53,18 +47,7 @@ def receive_event(source_system: str | None = None) -> dict:
     payload = get_request_json()
 
     if _is_vobiz_payload(payload):
-        webhook_event = _record_inbound("vobiz", payload)
-        try:
-            result = vobiz.handle_callback(payload)
-            _mark_webhook_processed(webhook_event, result)
-            return result
-        except Exception as exc:
-            frappe.db.set_value(
-                "AI Webhook Event",
-                webhook_event,
-                {"status": "Failed", "response_json": as_json({"error": str(exc)})},
-            )
-            raise
+        return _process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
 
     webhook_event = _record_inbound(source_system or "external", payload)
 
@@ -146,16 +129,37 @@ def _is_order_confirmation_payload(payload: dict) -> bool:
     return event_type.endswith("order-confirmation") or event_type == "order_confirmation"
 
 
+def _process_telephony_receipt(source: str, payload: dict, handler) -> dict:
+    event = _record_inbound(source, payload)
+    # Persist receipt before processing: a later exception must not erase evidence.
+    frappe.db.commit()
+    try:
+        result = handler(payload)
+        _mark_webhook_processed(event, result)
+        frappe.db.commit()
+        return result
+    except Exception as exc:
+        frappe.db.rollback()
+        frappe.db.set_value("AI Webhook Event", event, {
+            "status": "Failed", "error_message": str(exc)[:500],
+            "response_json": as_json({"error": str(exc)}),
+        })
+        frappe.db.commit()
+        raise
+
+
 def _record_inbound(source: str, payload: dict) -> str:
+    task = payload.get("task") or payload.get("task_name")
+    batch = payload.get("batch") or payload.get("task_batch")
     doc = frappe.new_doc("AI Webhook Event")
     doc.update(
         {
             "status": "Queued",
             "direction": "Inbound",
-            "event_type": payload.get("event") or payload.get("event_type") or payload.get("status") or "unknown",
+            "event_type": payload.get("event") or payload.get("event_type") or payload.get("Event") or payload.get("status") or "unknown",
             "source": source,
-            "task": payload.get("task") or payload.get("task_name"),
-            "task_batch": payload.get("batch") or payload.get("task_batch"),
+            "task": task if task and frappe.db.exists("AI Task", task) else None,
+            "task_batch": batch if batch and frappe.db.exists("AI Task Batch", batch) else None,
             "signature_valid": 1,
             "payload_json": as_json(payload),
         }

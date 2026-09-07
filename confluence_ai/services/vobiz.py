@@ -1005,10 +1005,10 @@ def _payload_call_ids(payload: dict) -> list[str]:
 def _find_existing_call_log(payload: dict) -> str | None:
     ids = _payload_call_ids(payload)
     for value in ids:
-        existing = frappe.db.exists("AI Call Log", {"call_uuid": value})
+        existing = frappe.db.get_value("AI Call Log", {"call_uuid": value}, "name", for_update=True)
         if existing:
             return existing
-        existing = frappe.db.exists("AI Call Log", {"sip_call_id": value})
+        existing = frappe.db.get_value("AI Call Log", {"sip_call_id": value}, "name", for_update=True)
         if existing:
             return existing
 
@@ -1357,6 +1357,13 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     )
     sip_call_id = payload.get("SIPCallID") or payload.get("sip_call_id")
 
+    channel_accounts = _candidate_channel_accounts(payload)
+    channel_account = channel_accounts[0] if channel_accounts else None
+    company = getattr(task, "company", None) or payload.get("company")
+    if not company and channel_account:
+        company = frappe.db.get_value("AI Channel Account", channel_account, "company")
+    if company:
+        frappe.db.get_value("AI Company", company, "name", for_update=True)
     if task and getattr(task, "name", None):
         frappe.db.get_value("AI Task", task.name, "name", for_update=True)
     existing = _find_existing_call_log_for_task(task=task, attempt=attempt) or _find_existing_call_log(payload)
@@ -1364,16 +1371,18 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc = frappe.get_doc("AI Call Log", existing, for_update=True) if existing else frappe.new_doc("AI Call Log")
     event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
     event_type_lower = str(event_type).lower()
-    channel_accounts = _candidate_channel_accounts(payload)
-    channel_account = channel_accounts[0] if channel_accounts else None
+    previous_status = doc.status
 
     doc.provider = "Vobiz"
     doc.event_type = event_type
-    doc.direction = payload.get("Direction") or payload.get("direction")
-    doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
-    doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
+    doc.direction = payload.get("Direction") or payload.get("direction") or doc.direction
+    doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number") or doc.from_number
+    doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number") or doc.to_number
     doc.customer_phone = _customer_phone_from_payload(payload, doc.customer_phone)
-    doc.call_uuid = doc.call_uuid or call_uuid
+    if not doc.call_uuid or doc.call_uuid.startswith("agent-army-") or (
+        sip_call_id and doc.sip_call_id == sip_call_id and doc.call_uuid == sip_call_id
+    ):
+        doc.call_uuid = call_uuid or doc.call_uuid
     if _should_replace_sip_call_id(doc.sip_call_id, sip_call_id):
         doc.sip_call_id = sip_call_id
     if not doc.sip_call_id and event_type_lower in {"initiated", "dial", "ringing", "callinitiated"} and call_uuid:
@@ -1429,6 +1438,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
         doc.status = "Initiated"
     elif not doc.status:
         doc.status = "Unknown"
+
+    terminal_states = {"Completed", "Failed", "Rejected", "No Answer", "Busy", "Cancelled"}
+    if previous_status in terminal_states and doc.status not in terminal_states:
+        doc.status = previous_status
 
     if event_type_lower in {"initiated", "dial", "ringing", "callinitiated"}:
         doc.initiated_payload_json = as_json(payload)
