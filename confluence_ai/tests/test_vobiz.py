@@ -242,14 +242,14 @@ class TestVobizTranscript(unittest.TestCase):
         task = SimpleNamespace(name="task-unit")
         attempt = SimpleNamespace(name="attempt-unit")
 
-        def exists(doctype, filters):
+        def exists(doctype, filters, *args, **kwargs):
             if filters == {"attempt": "attempt-unit"}:
                 return "call-by-attempt"
             if filters == {"task": "task-unit"}:
                 return "call-by-task"
             return None
 
-        fake_frappe = SimpleNamespace(db=SimpleNamespace(exists=Mock(side_effect=exists)))
+        fake_frappe = SimpleNamespace(db=SimpleNamespace(get_value=Mock(side_effect=exists)))
 
         with patch("confluence_ai.services.vobiz.frappe", fake_frappe):
             self.assertEqual(vobiz._find_existing_call_log_for_task(task=task, attempt=attempt), "call-by-attempt")
@@ -301,7 +301,7 @@ class TestVobizTranscript(unittest.TestCase):
             return None
 
         fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(side_effect=exists), get_value=Mock(return_value=None)),
+            db=SimpleNamespace(exists=Mock(side_effect=exists), get_value=Mock(side_effect=lambda dt, filters, *a, **k: exists(dt, filters))),
             get_doc=Mock(return_value=existing_doc),
             new_doc=Mock(side_effect=AssertionError("upsert should reuse the existing task call log")),
         )

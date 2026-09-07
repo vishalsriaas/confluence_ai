@@ -856,6 +856,8 @@ def _get_doc_value(doc_or_row, fieldname: str) -> Any:
 
 
 def _save_disposition(doc, decision: dict) -> None:
+    doc.flags.for_update = True
+    doc.reload()
     doc.ai_disposition = decision.get("ai_disposition")
     doc.ai_disposition_reason = decision.get("ai_disposition_reason")
     doc.ai_disposition_confidence = decision.get("ai_disposition_confidence")
@@ -868,7 +870,11 @@ def _save_disposition(doc, decision: dict) -> None:
 
 def _save_update_state(doc, status: str, response: dict) -> None:
     try:
-        current = frappe.get_doc("AI Call Log", doc.name)
+        current = frappe.get_doc("AI Call Log", doc.name, for_update=True)
+        if response.get("reason") == "waiting_for_transcript" and current.get("transcript"):
+            return
+        if current.get("ai_disposition") != doc.get("ai_disposition"):
+            return
         current.erp_status_update_status = status
         current.erp_status_update_response = as_json(response)
         current.save(ignore_permissions=True)

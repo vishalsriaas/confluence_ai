@@ -473,9 +473,6 @@ def _select_vobiz_transcription(rows: list[dict], call_id: str) -> dict | None:
     for row in rows:
         if str(row.get("transcription_id") or row.get("id") or "").strip() == call_id and _transcript_from_payload(row):
             return row
-    for row in rows:
-        if _transcript_from_payload(row):
-            return row
     return None
 
 

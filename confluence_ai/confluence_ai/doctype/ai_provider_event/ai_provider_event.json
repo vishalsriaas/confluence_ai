@@ -33,7 +33,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Succeeded\nFailed\nRate Limited\nTimeout"
+   "options": "Succeeded\nFailed\nRate Limited\nTimeout\nSkipped"
   },
   {
    "fieldname": "provider",

@@ -997,7 +997,8 @@ def _fresh_followup_workflow_for_task(task) -> str | None:
 
 def _livekit_call_log_name(payload: dict, task, call_uuid: str | None) -> str | None:
     if task.name:
-        existing = frappe.db.exists("AI Call Log", {"task": task.name})
+        frappe.db.get_value("AI Task", task.name, "name", for_update=True)
+        existing = frappe.db.get_value("AI Call Log", {"task": task.name}, "name", for_update=True)
         if existing:
             return existing
 
@@ -1061,7 +1062,7 @@ def _apply_livekit_call_log_payload(
         or doc.to_number
     )
     doc.call_uuid = doc.call_uuid or call_uuid
-    doc.sip_call_id = payload.get("sip_call_id") or payload.get("room_name") or payload.get("room") or doc.sip_call_id
+    doc.sip_call_id = payload.get("sip_call_id") or doc.sip_call_id or payload.get("room_name") or payload.get("room")
     doc.trunk_id = payload.get("trunk_id") or context.get("trunk_id") or task.trunk_id or doc.trunk_id
     doc.domain = payload.get("domain") or context.get("vobiz_domain") or doc.domain
     doc.reason = payload.get("reason") or doc.reason
@@ -1126,14 +1127,13 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
             payload.get("call_uuid")
             or payload.get("CallUUID")
             or task.call_uuid
-            or task.external_record_id
             or payload.get("room_name")
             or payload.get("room")
         )
 
         for save_attempt in range(3):
             existing = _livekit_call_log_name(payload, task, call_uuid)
-            doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
+            doc = frappe.get_doc("AI Call Log", existing, for_update=True) if existing else frappe.new_doc("AI Call Log")
             _apply_livekit_call_log_payload(
                 doc,
                 payload,

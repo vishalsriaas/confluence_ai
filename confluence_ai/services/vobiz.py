@@ -107,6 +107,7 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
         call_log = upsert_call_log(payload, task=task, attempt=attempt)
         _attach_recording_to_task_docs(payload, task=task, attempt=attempt)
         _mark_call_log_waiting_for_transcript(call_log)
+        frappe.db.commit()
         if task:
             _handle_order_confirmation_callback(task, payload, "completed")
             _handle_repeat_followup_callback(task, payload, "completed")
@@ -362,38 +363,27 @@ def download_vobiz_recording(recording_url: str, task) -> str | None:
     if "storage.vobiz.ai" in recording_url or "test" in recording_url:
         return None
 
-    # 1. Get channel account from task agent
-    agent_name = task.assigned_agent or task.target_agent
-    if not agent_name:
-        return None
-
     try:
-        agent = frappe.get_doc("AI Agent", agent_name)
-    except Exception:
-        return None
+        from urllib.parse import urlparse
 
-    account_name = agent.allowed_channel_account
-    if not account_name:
-        return None
-
-    try:
-        account = frappe.get_doc("AI Channel Account", account_name)
-        api_key = account.get_password("api_key")
-        api_secret = account.get_password("api_secret")
-    except Exception:
-        return None
-
-    if not api_key or not api_secret:
-        return None
-
-    headers = {
-        "X-Auth-ID": api_key,
-        "X-Auth-Token": api_secret
-    }
-
-    try:
-        response = requests.get(recording_url, headers=headers, timeout=30)
+        parsed = urlparse(recording_url)
+        if parsed.scheme != "https" or parsed.hostname != "media.vobiz.ai":
+            return None
+        account_id = _vobiz_account_id({}, recording_url)
+        response = None
+        for headers in _vobiz_media_auth_candidates({}, task, account_id):
+            if account_id and headers.get("X-Auth-ID") != account_id:
+                continue
+            response = requests.get(recording_url, headers=headers, timeout=30, allow_redirects=False)
+            if response.status_code not in {401, 403}:
+                break
+            response.close()
+        if response is None:
+            return None
         response.raise_for_status()
+        if response.status_code != 200:
+            response.close()
+            return None
 
         # Save to Frappe file manager
         from frappe.utils.file_manager import save_file
@@ -1022,6 +1012,9 @@ def _find_existing_call_log(payload: dict) -> str | None:
         if existing:
             return existing
 
+    if ids:
+        return None
+
     phone = payload.get("To") or payload.get("to") or payload.get("to_number")
     from_number = payload.get("From") or payload.get("from") or payload.get("from_number")
     if phone and from_number:
@@ -1090,12 +1083,12 @@ def _find_existing_call_log_by_phone_window(payload: dict) -> str | None:
 
 def _find_existing_call_log_for_task(task=None, attempt=None) -> str | None:
     if attempt and getattr(attempt, "name", None):
-        existing = frappe.db.exists("AI Call Log", {"attempt": attempt.name})
+        existing = frappe.db.get_value("AI Call Log", {"attempt": attempt.name}, "name", for_update=True)
         if existing:
             return existing
 
     if task and getattr(task, "name", None):
-        existing = frappe.db.exists("AI Call Log", {"task": task.name})
+        existing = frappe.db.get_value("AI Call Log", {"task": task.name}, "name", for_update=True)
         if existing:
             return existing
 
@@ -1364,9 +1357,11 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     )
     sip_call_id = payload.get("SIPCallID") or payload.get("sip_call_id")
 
+    if task and getattr(task, "name", None):
+        frappe.db.get_value("AI Task", task.name, "name", for_update=True)
     existing = _find_existing_call_log_for_task(task=task, attempt=attempt) or _find_existing_call_log(payload)
 
-    doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
+    doc = frappe.get_doc("AI Call Log", existing, for_update=True) if existing else frappe.new_doc("AI Call Log")
     event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
     event_type_lower = str(event_type).lower()
     channel_accounts = _candidate_channel_accounts(payload)
@@ -1518,14 +1513,7 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
             return t_name, None
 
     # 2. Extract Phone Suffix (last 10 digits)
-    phone = (
-        payload.get("To")
-        or payload.get("to")
-        or payload.get("to_number")
-        or payload.get("phone")
-        or payload.get("From")
-        or payload.get("from")
-    )
+    phone = _customer_phone_from_payload(payload)
     suffix = None
     if phone:
         digits = "".join(c for c in str(phone) if c.isdigit())
@@ -1543,13 +1531,16 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
     )
 
     # 4. Strict match for Vobiz payloads (requiring trunk identity, UUID/SIPCallID, and Phone Suffix)
+    call_ids = _payload_call_ids(payload)
+    event_type = str(payload.get("event") or payload.get("Event") or payload.get("event_type") or "").lower()
+    allow_phone_match = event_type in {"callinitiated", "initiated", "dial", "ringing"}
     if candidate_trunk_ids and suffix:
         if uuid:
             # Check attempts by external_id or call_uuid matching the trunk
             attempts = frappe.get_all(
                 "AI Task Attempt",
                 filters={"trunk_id": ["in", candidate_trunk_ids]},
-                or_filters={"external_id": uuid, "call_uuid": uuid},
+                or_filters={"external_id": ["in", call_ids], "call_uuid": ["in", call_ids]},
                 fields=["name", "task"],
                 order_by="creation desc",
             )
@@ -1562,7 +1553,7 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
             # Check tasks directly by call_uuid matching the trunk
             tasks = frappe.get_all(
                 "AI Task",
-                filters={"call_uuid": uuid, "trunk_id": ["in", candidate_trunk_ids]},
+                filters={"call_uuid": ["in", call_ids], "trunk_id": ["in", candidate_trunk_ids]},
                 fields=["name"],
                 order_by="modified desc",
             )
@@ -1589,7 +1580,7 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
             },
             fields=["name"],
             order_by="modified desc",
-        )
+        ) if allow_phone_match else []
         for t in tasks:
             task = frappe.get_doc("AI Task", t.name)
             context = task.context_json or ""
@@ -1604,7 +1595,7 @@ def find_task_and_attempt(payload: dict) -> tuple[str | None, str | None]:
                 attempt_name = latest_attempts[0] if latest_attempts else None
                 return task.name, attempt_name
 
-        repeat_task, repeat_attempt = _find_repeat_followup_task_by_phone_and_trunk(candidate_trunk_ids, suffix)
+        repeat_task, repeat_attempt = _find_repeat_followup_task_by_phone_and_trunk(candidate_trunk_ids, suffix) if allow_phone_match else (None, None)
         if repeat_task:
             return repeat_task, repeat_attempt
 
