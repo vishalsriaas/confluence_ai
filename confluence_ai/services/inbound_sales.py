@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import frappe
@@ -27,16 +28,36 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
         return {"status": "no_route", "message": "No AI Sales Disease Route matched this inbound TrunkID."}
 
     call_uuid = _payload_call_uuid(payload)
+    if not call_uuid or is_internal_call_id(call_uuid):
+        return {"status": "pending_identity", "reason": "provider_call_id_required"}
+    lock_key = "inbound-task:" + hashlib.sha256(call_uuid.encode()).hexdigest()
+    # Keep the reservation across helper commits; unrelated calls use different locks.
+    with frappe.cache.lock(lock_key, timeout=120, blocking_timeout=30):
+        try:
+            result = _handle_identified_inbound_call(payload, selection)
+            frappe.db.commit()
+            return result
+        except Exception:
+            frappe.db.rollback()
+            raise
+
+
+def _handle_identified_inbound_call(payload: dict, selection: dict) -> dict:
+    call_uuid = _payload_call_uuid(payload)
     idem_key = f"inbound-vobiz:{call_uuid}" if call_uuid else None
     if idem_key:
-        existing = frappe.db.exists("AI Task", {"idempotency_key": idem_key})
+        existing = frappe.db.get_value("AI Task", {"idempotency_key": idem_key}, "name", for_update=True)
         if existing:
             task = frappe.get_doc("AI Task", existing)
+            if selection.get("company") and task.company != selection["company"]:
+                frappe.throw("Inbound call identity belongs to a different company.")
             metadata = build_voice_metadata(task.name, _task_context(task))
             return {"status": "duplicate", "task": task.name, "metadata": metadata}
 
     existing_livekit_task = _find_latest_inbound_task(payload)
     if existing_livekit_task:
+        if selection.get("company") and existing_livekit_task.company != selection["company"]:
+            frappe.throw("Inbound call identity belongs to a different company.")
         _attach_vobiz_payload_to_existing_task(existing_livekit_task, payload, selection, idem_key)
         metadata = build_voice_metadata(existing_livekit_task.name, _task_context(existing_livekit_task))
         return {
@@ -214,21 +235,28 @@ def _attach_vobiz_payload_to_existing_task(task, payload: dict, selection: dict,
 
 def resolve_latest_inbound_metadata(payload: dict) -> dict:
     """Resolve metadata for a LiveKit inbound room that arrived without metadata."""
-    task = _find_latest_inbound_task(payload)
-    if not task:
-        created = _create_task_from_livekit_resolve_payload(payload)
-        if created.get("status") in {"routed", "duplicate"} and created.get("task"):
-            task = frappe.get_doc("AI Task", created["task"])
-
-    if not task:
-        return {"status": "no_task"}
-
-    context = _task_context(task)
-    metadata = build_voice_metadata(task.name, context)
+    # Older workers send SCL_* at the top level but include the full SIP ID here.
+    provider_ids = {
+        str((participant.get("attributes") or {}).get("sip.callIDFull") or "").strip()
+        for participant in (payload.get("participants") or [])
+        if isinstance(participant, dict) and isinstance(participant.get("attributes"), dict)
+    } - {""}
+    supplied_id = _payload_call_uuid(payload)
+    if supplied_id and not is_internal_call_id(supplied_id):
+        provider_ids.add(supplied_id)
+    if len(provider_ids) != 1:
+        return {"status": "pending_identity", "reason": "provider_call_id_missing_or_ambiguous"}
+    provider_id = provider_ids.pop()
+    if is_internal_call_id(provider_id):
+        return {"status": "pending_identity", "reason": "provider_call_id_required"}
+    payload = {**payload, "call_uuid": provider_id, "CallUUID": provider_id}
+    created = _create_task_from_livekit_resolve_payload(payload)
+    if created.get("status") not in {"routed", "duplicate"} or not created.get("task"):
+        return created
     return {
         "status": "resolved",
-        "task": task.name,
-        "metadata": metadata,
+        "task": created["task"],
+        "metadata": created["metadata"],
     }
 
 
@@ -269,71 +297,10 @@ def _create_task_from_livekit_resolve_payload(payload: dict) -> dict:
 
 def _find_latest_inbound_task(payload: dict):
     call_uuid = _payload_call_uuid(payload)
-    if call_uuid:
-        name = frappe.db.exists("AI Task", {"call_uuid": call_uuid})
+    if call_uuid and not is_internal_call_id(call_uuid):
+        name = frappe.db.get_value("AI Task", {"call_uuid": call_uuid}, "name", for_update=True)
         if name:
             return frappe.get_doc("AI Task", name)
-
-    caller = _digits(payload.get("caller_phone") or payload.get("From") or payload.get("from"))
-    called = _digits(payload.get("called_number") or payload.get("To") or payload.get("to"))
-    trunk_id = str(payload.get("TrunkID") or payload.get("trunk_id") or "").strip()
-    domain = str(payload.get("Domain") or payload.get("domain") or "").strip().lower()
-    if not any((caller, called, trunk_id, domain)):
-        return None
-
-    filters = {
-        "channel": "Voice",
-        "external_record_type": "Vobiz Inbound Call",
-        "status": ["in", ["Queued", "Running", "Waiting"]],
-        "creation": [">=", frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-2)],
-    }
-
-    # Vobiz and LiveKit use different trunk IDs for the same physical call:
-    # Vobiz sends its account trunk UUID, while LiveKit sends ST_*. Do not make
-    # trunk a hard filter here; prefer matching by caller/called phone and only
-    # use trunk as an optional tie-breaker.
-    candidates = frappe.get_all(
-        "AI Task",
-        filters=filters,
-        fields=["name", "context_json", "trunk_id", "call_uuid"],
-        order_by="creation desc",
-        limit=40,
-    )
-
-    ranked_matches = []
-    for row in candidates:
-        if row.get("call_uuid") and not is_internal_call_id(row.call_uuid) and row.call_uuid != call_uuid:
-            continue
-        context_text = row.context_json or ""
-        try:
-            context = json.loads(context_text or "{}")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(context, dict):
-            continue
-        row_caller = _digits(context.get("customer_phone") or context.get("phone") or context.get("caller_phone"))
-        row_called = _digits(context.get("called_number") or context.get("inbound_phone_number"))
-        if not caller or not called or caller[-10:] != row_caller[-10:] or called[-10:] != row_called[-10:]:
-            continue
-        context_digits = row_caller + row_called
-        context_lower = context_text.lower()
-        score = 0
-        if trunk_id and str(row.get("trunk_id") or "").strip().lower() == trunk_id.lower():
-            score += 10
-        if caller and caller[-10:] in context_digits:
-            score += 6
-        if called and called[-10:] in context_digits:
-            score += 5
-        if domain and domain in context_lower:
-            score += 4
-        if score:
-            ranked_matches.append((score, row))
-
-    if ranked_matches:
-        ranked_matches.sort(key=lambda item: item[0], reverse=True)
-        if len(ranked_matches) > 1:
-            return None
-        return frappe.get_doc("AI Task", ranked_matches[0][1].name)
     return None
 
 

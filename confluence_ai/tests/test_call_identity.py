@@ -189,7 +189,7 @@ class TestCallIdentity(unittest.TestCase):
         frappe.db.set_value("AI Task", self.task.name, {"creation": frappe.utils.now_datetime(), "call_uuid": "old-provider-id"})
         self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
         frappe.db.set_value("AI Task", self.task.name, "call_uuid", "SCL_current")
-        self.assertEqual(inbound_sales._find_latest_inbound_task(payload).name, self.task.name)
+        self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
         payload["From"] = "00918888888888"
         self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
 
