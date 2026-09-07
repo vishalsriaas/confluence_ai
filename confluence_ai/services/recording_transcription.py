@@ -70,7 +70,9 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
           and coalesce(transcript_summary, '') = ''
           and coalesce(nullif(recording_url, ''), nullif(external_recording_url, ''), '') != ''
           and coalesce(status, '') in ('Completed', 'Unknown', 'In Progress')
-        order by modified asc
+        order by
+          case when coalesce(task, '') != '' then 0 else 1 end,
+          modified asc
         limit %(limit)s
         """,
         {"cutoff": cutoff, "wait_cutoff": wait_cutoff, "limit": row_limit},
@@ -215,7 +217,82 @@ def enqueue_call_log_recording_transcript(call_log: str | None) -> dict:
 
 def emit_synthetic_transcript_callback(call_log: str, transcript: str, summary: str | None = None) -> dict:
     doc = frappe.get_doc("AI Call Log", call_log)
+    summary = summary or transcript[:1000]
+    try:
+        _sync_transcript_to_related_docs(doc, transcript, summary)
+        workflow_result = _notify_task_workflow_transcript(doc, transcript, summary)
+        _enqueue_disposition_after_transcript(doc.name)
+        return {
+            "status": "success",
+            "source": "recording_transcription_fallback",
+            "call_log": doc.name,
+            "task": doc.get("task"),
+            "attempt": doc.get("attempt"),
+            "workflow": workflow_result,
+            "ai_disposition": "queued",
+        }
+    except Exception as exc:
+        create_error(
+            "Recording Transcript Sync",
+            str(exc),
+            source="recording_transcription",
+            task=doc.get("task"),
+            agent=doc.get("agent"),
+            company=doc.get("company"),
+            payload={"call_log": doc.name},
+            exc=exc,
+        )
+        _enqueue_disposition_after_transcript(doc.name)
+        return {"status": "partial", "call_log": doc.name, "error": str(exc)}
+
+
+def _sync_transcript_to_related_docs(doc, transcript: str, summary: str) -> None:
     payload = {
+        "event": "transcription.completed",
+        "source": "recording_transcription_fallback",
+        "call_log": doc.name,
+        "task": doc.get("task"),
+        "attempt": doc.get("attempt"),
+        "company": doc.get("company"),
+        "transcript_chars": len(transcript),
+        "summary": summary,
+    }
+    _set_transcript_fields("AI Task", doc.get("task"), transcript, payload)
+    _set_transcript_fields("AI Task Attempt", doc.get("attempt"), transcript, payload)
+    frappe.db.commit()
+
+
+def _notify_task_workflow_transcript(doc, transcript: str, summary: str) -> dict:
+    task_name = doc.get("task")
+    if not task_name or not frappe.db.exists("AI Task", task_name):
+        return {"status": "skipped", "reason": "missing_task"}
+
+    task = frappe.get_doc("AI Task", task_name)
+    payload = _fallback_transcript_payload(doc, transcript, summary)
+    try:
+        from confluence_ai.services import vobiz
+
+        return {
+            "order_confirmation": vobiz._handle_order_confirmation_callback(task, payload, "transcription.completed"),
+            "repeat_followup": vobiz._handle_repeat_followup_callback(task, payload, "transcription.completed"),
+            "fresh_followup": vobiz._handle_fresh_followup_callback(task, payload, "transcription.completed"),
+        }
+    except Exception as exc:
+        create_error(
+            "Recording Transcript Workflow Notify",
+            str(exc),
+            source="recording_transcription",
+            task=doc.get("task"),
+            agent=doc.get("agent"),
+            company=doc.get("company"),
+            payload={"call_log": doc.name},
+            exc=exc,
+        )
+        return {"status": "failed", "error": str(exc)}
+
+
+def _fallback_transcript_payload(doc, transcript: str, summary: str) -> dict:
+    return {
         "event": "transcription.completed",
         "Event": "transcription.completed",
         "source": "recording_transcription_fallback",
@@ -242,30 +319,27 @@ def emit_synthetic_transcript_callback(call_log: str, transcript: str, summary: 
         "url": doc.get("recording_url") or doc.get("external_recording_url"),
         "transcript": transcript,
         "transcription_text": transcript,
-        "summary": summary or transcript[:1000],
-        "transcription_summary": summary or transcript[:1000],
+        "summary": summary,
+        "transcription_summary": summary,
     }
 
-    try:
-        from confluence_ai.services import vobiz
 
-        result = vobiz.handle_callback(payload)
-        if isinstance(result, dict) and result.get("status") == "error":
-            _enqueue_disposition_after_transcript(doc.name)
-        return result
-    except Exception as exc:
-        create_error(
-            "Recording Transcript Callback Replay",
-            str(exc),
-            source="recording_transcription",
-            task=doc.get("task"),
-            agent=doc.get("agent"),
-            company=doc.get("company"),
-            payload={"call_log": doc.name},
-            exc=exc,
-        )
-        _enqueue_disposition_after_transcript(doc.name)
-        return {"status": "failed", "error": str(exc)}
+def _set_transcript_fields(doctype: str, name: str | None, transcript: str, payload: dict) -> None:
+    if not name or not frappe.db.exists(doctype, name):
+        return
+    try:
+        meta = frappe.get_meta(doctype)
+    except Exception:
+        return
+
+    values = {}
+    if meta.has_field("transcript"):
+        values["transcript"] = transcript
+    if meta.has_field("vobiz_transcript_payload"):
+        values["vobiz_transcript_payload"] = as_json(payload)
+
+    if values:
+        frappe.db.set_value(doctype, name, values, update_modified=True)
 
 
 def _enqueue_disposition_after_transcript(call_log: str) -> None:

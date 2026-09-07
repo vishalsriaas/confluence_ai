@@ -621,12 +621,24 @@ def handle_callback(payload: dict) -> dict:
 
     if not task_name:
         call_log = upsert_call_log(payload)
-        frappe.db.commit()
-        frappe.log_error(
-            title="Vobiz callback match failed",
-            message=f"Could not find matching AI Task or AI Task Attempt for payload: {json.dumps(payload, default=str)}",
-        )
-        return {"status": "error", "message": "No matching task or attempt found", "call_log": call_log}
+        if call_log:
+            task_name = frappe.db.get_value("AI Call Log", call_log, "task")
+            attempt_name = frappe.db.get_value("AI Call Log", call_log, "attempt")
+        if task_name:
+            task = frappe.get_doc("AI Task", task_name)
+            attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
+            call_log = upsert_call_log(payload, task=task, attempt=attempt)
+        else:
+            record_provider_event(
+                provider="Vobiz",
+                operation="callback_without_task",
+                status="Skipped",
+                company=payload.get("company"),
+                request={"event": payload.get("event") or payload.get("event_type") or payload.get("Event"), "payload": payload},
+                response={"call_log": call_log, "reason": "no_matching_task_or_attempt"},
+            )
+            frappe.db.commit()
+            return {"status": "logged_without_task", "call_log": call_log, "reason": "no_matching_task_or_attempt"}
 
     # 2. Get the documents
     task = frappe.get_doc("AI Task", task_name)
@@ -1074,6 +1086,32 @@ def _find_existing_call_log_by_phone_window(payload: dict) -> str | None:
     return rows[0].name if rows else None
 
 
+def _find_existing_call_log_for_task(task=None, attempt=None) -> str | None:
+    if attempt and getattr(attempt, "name", None):
+        existing = frappe.db.exists("AI Call Log", {"attempt": attempt.name})
+        if existing:
+            return existing
+
+    if task and getattr(task, "name", None):
+        existing = frappe.db.exists("AI Call Log", {"task": task.name})
+        if existing:
+            return existing
+
+    return None
+
+
+def _should_replace_sip_call_id(current: Any, candidate: Any) -> bool:
+    if not candidate:
+        return False
+    if not current:
+        return True
+    current_text = str(current or "").strip().lower()
+    candidate_text = str(candidate or "").strip()
+    if not candidate_text or current_text == candidate_text.lower():
+        return False
+    return current_text.startswith(("agent-army-", "room_", "task-", "batch-"))
+
+
 def _parse_json_object(value: str | None) -> dict:
     if not value:
         return {}
@@ -1324,7 +1362,7 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     )
     sip_call_id = payload.get("SIPCallID") or payload.get("sip_call_id")
 
-    existing = _find_existing_call_log(payload)
+    existing = _find_existing_call_log_for_task(task=task, attempt=attempt) or _find_existing_call_log(payload)
 
     doc = frappe.get_doc("AI Call Log", existing) if existing else frappe.new_doc("AI Call Log")
     event_type = payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update"
@@ -1339,7 +1377,8 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number")
     doc.customer_phone = _customer_phone_from_payload(payload, doc.customer_phone)
     doc.call_uuid = doc.call_uuid or call_uuid
-    doc.sip_call_id = doc.sip_call_id or sip_call_id
+    if _should_replace_sip_call_id(doc.sip_call_id, sip_call_id):
+        doc.sip_call_id = sip_call_id
     if not doc.sip_call_id and event_type_lower in {"initiated", "dial", "ringing", "callinitiated"} and call_uuid:
         doc.sip_call_id = call_uuid
     doc.trunk_id = payload.get("TrunkID") or payload.get("trunk_id") or doc.trunk_id

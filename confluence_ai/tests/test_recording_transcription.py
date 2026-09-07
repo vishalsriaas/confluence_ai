@@ -49,7 +49,7 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(parts[1]["inline_data"]["mime_type"], "audio/wav")
         self.assertTrue(parts[1]["inline_data"]["data"])
 
-    def test_successful_fallback_saves_transcript_and_replays_callback(self):
+    def test_successful_fallback_saves_transcript_and_queues_disposition(self):
         class FakeDoc:
             name = "call-unit"
             transcript = ""
@@ -158,11 +158,12 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(config.base_url, "https://api.openai.com/v1")
         self.assertEqual(config.api_key, "summary-secret")
 
-    def test_callback_replay_enqueues_disposition_when_task_match_fails(self):
+    def test_fallback_transcript_syncs_related_docs_and_queues_disposition(self):
         class FakeDoc:
             name = "call-unit"
             company = "globifit"
             task = "task-unit"
+            attempt = "attempt-unit"
             agent = "agent-unit"
             call_uuid = "call-unit"
             sip_call_id = "sip-unit"
@@ -177,11 +178,23 @@ class TestRecordingTranscription(unittest.TestCase):
             def get(self, fieldname):
                 return getattr(self, fieldname, None)
 
-        fake_frappe = SimpleNamespace(get_doc=Mock(return_value=FakeDoc()))
-        handle_callback = Mock(return_value={"status": "error"})
+        writes = []
+
+        def set_value(doctype, name, values, update_modified=True):
+            writes.append((doctype, name, values))
+
+        fake_frappe = SimpleNamespace(
+            db=SimpleNamespace(
+                exists=Mock(return_value=True),
+                set_value=Mock(side_effect=set_value),
+                commit=Mock(),
+            ),
+            get_doc=Mock(return_value=FakeDoc()),
+            get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
+        )
 
         with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
-            patch("confluence_ai.services.vobiz.handle_callback", handle_callback), \
+            patch("confluence_ai.services.recording_transcription._notify_task_workflow_transcript", Mock(return_value={"fresh_followup": {"status": "completed"}})), \
             patch("confluence_ai.services.recording_transcription._enqueue_disposition_after_transcript") as enqueue:
             result = recording_transcription.emit_synthetic_transcript_callback(
                 "call-unit",
@@ -189,11 +202,53 @@ class TestRecordingTranscription(unittest.TestCase):
                 "hello",
             )
 
-        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["status"], "success")
         enqueue.assert_called_once_with("call-unit")
-        payload = handle_callback.call_args.args[0]
-        self.assertEqual(payload["customer_phone"], "+919873090386")
-        self.assertEqual(payload["CallStatus"], "completed")
+        self.assertEqual(result["task"], "task-unit")
+        self.assertEqual(result["attempt"], "attempt-unit")
+        self.assertEqual(result["workflow"]["fresh_followup"]["status"], "completed")
+        self.assertIn(("AI Task", "task-unit"), [(row[0], row[1]) for row in writes])
+        self.assertIn(("AI Task Attempt", "attempt-unit"), [(row[0], row[1]) for row in writes])
+
+    def test_fallback_transcript_notifies_workflow_handlers_directly(self):
+        class FakeDoc:
+            name = "call-unit"
+            company = "globifit"
+            task = "task-unit"
+            attempt = "attempt-unit"
+            agent = "agent-unit"
+            call_uuid = "call-unit"
+            sip_call_id = "sip-unit"
+            trunk_id = "trunk-unit"
+            direction = "Outbound"
+            from_number = "+919262175574"
+            to_number = "+919873090386"
+            customer_phone = "+919873090386"
+            status = "Completed"
+            recording_url = "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/call-unit.wav"
+            external_recording_url = recording_url
+
+            def get(self, fieldname):
+                return getattr(self, fieldname, None)
+
+        task = SimpleNamespace(name="task-unit", channel="Voice", external_record_type="AI Fresh Follow Up Workflow", external_record_id="ffu-unit")
+        fake_frappe = SimpleNamespace(
+            db=SimpleNamespace(exists=Mock(return_value=True)),
+            get_doc=Mock(return_value=task),
+        )
+        fresh_handler = Mock(return_value={"status": "completed", "workflow": "ffu-unit"})
+
+        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz._handle_order_confirmation_callback", Mock(return_value=None)), \
+            patch("confluence_ai.services.vobiz._handle_repeat_followup_callback", Mock(return_value=None)), \
+            patch("confluence_ai.services.vobiz._handle_fresh_followup_callback", fresh_handler):
+            result = recording_transcription._notify_task_workflow_transcript(FakeDoc(), "[AGENT]: hello", "hello")
+
+        self.assertEqual(result["fresh_followup"]["status"], "completed")
+        args = fresh_handler.call_args.args
+        self.assertEqual(args[0], task)
+        self.assertEqual(args[2], "transcription.completed")
+        self.assertEqual(args[1]["source"], "recording_transcription_fallback")
 
     def test_empty_wav_is_clean_skip_not_provider_error(self):
         empty_wav = (

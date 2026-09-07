@@ -237,3 +237,112 @@ class TestVobizTranscript(unittest.TestCase):
         self.assertEqual(len(rows), 300)
         self.assertEqual(get.call_args_list[0].kwargs["params"]["offset"], 0)
         self.assertEqual(get.call_args_list[1].kwargs["params"]["offset"], 250)
+
+    def test_existing_call_log_prefers_attempt_then_task(self):
+        task = SimpleNamespace(name="task-unit")
+        attempt = SimpleNamespace(name="attempt-unit")
+
+        def exists(doctype, filters):
+            if filters == {"attempt": "attempt-unit"}:
+                return "call-by-attempt"
+            if filters == {"task": "task-unit"}:
+                return "call-by-task"
+            return None
+
+        fake_frappe = SimpleNamespace(db=SimpleNamespace(exists=Mock(side_effect=exists)))
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe):
+            self.assertEqual(vobiz._find_existing_call_log_for_task(task=task, attempt=attempt), "call-by-attempt")
+            self.assertEqual(vobiz._find_existing_call_log_for_task(task=task), "call-by-task")
+
+    def test_vobiz_sip_id_replaces_livekit_room_sip_id(self):
+        self.assertTrue(vobiz._should_replace_sip_call_id("agent-army-task-1", "Y0tbpQnHeQV6mxse"))
+        self.assertTrue(vobiz._should_replace_sip_call_id("", "Y0tbpQnHeQV6mxse"))
+        self.assertFalse(vobiz._should_replace_sip_call_id("already-real-sip", "Y0tbpQnHeQV6mxse"))
+
+    def test_vobiz_upsert_updates_existing_livekit_task_call_log(self):
+        class FakeCallLog:
+            name = "call-existing"
+            customer_phone = None
+            sip_call_id = "agent-army-task-unit"
+            call_uuid = "room-call-id"
+            company = None
+            agent = None
+            status = None
+            started_at = None
+            ended_at = None
+            reason = None
+            trunk_id = None
+            domain = None
+
+            def get(self, fieldname):
+                return getattr(self, fieldname, None)
+
+            def save(self, ignore_permissions=False):
+                self.saved = True
+
+        existing_doc = FakeCallLog()
+        task = SimpleNamespace(
+            name="task-unit",
+            assigned_agent="agent-unit",
+            target_agent=None,
+            company="globifit",
+            context_json='{"customer_name": "Jagmohan", "customer_phone": "+919873090386"}',
+        )
+        attempt = SimpleNamespace(name="attempt-unit", company="globifit")
+
+        def exists(doctype, filters=None):
+            if doctype == "DocType" and filters == "AI Call Log":
+                return True
+            if filters == {"attempt": "attempt-unit"}:
+                return None
+            if filters == {"task": "task-unit"}:
+                return "call-existing"
+            return None
+
+        fake_frappe = SimpleNamespace(
+            db=SimpleNamespace(exists=Mock(side_effect=exists), get_value=Mock(return_value=None)),
+            get_doc=Mock(return_value=existing_doc),
+            new_doc=Mock(side_effect=AssertionError("upsert should reuse the existing task call log")),
+        )
+
+        payload = {
+            "event": "recording.completed",
+            "Direction": "Outbound",
+            "From": "+919262175574",
+            "To": "+919873090386",
+            "CallUUID": "bridge-call-id",
+            "SIPCallID": "Y0tbpQnHeQV6mxse",
+            "CallStatus": "completed",
+            "recording_url": "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/Y0tbpQnHeQV6mxse.wav",
+        }
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz._candidate_channel_accounts", Mock(return_value=[])):
+            result = vobiz.upsert_call_log(payload, task=task, attempt=attempt)
+
+        self.assertEqual(result, "call-existing")
+        self.assertEqual(existing_doc.customer_name, "Jagmohan")
+        self.assertEqual(existing_doc.customer_phone, "+919873090386")
+        self.assertEqual(existing_doc.task, "task-unit")
+        self.assertEqual(existing_doc.attempt, "attempt-unit")
+        self.assertEqual(existing_doc.sip_call_id, "Y0tbpQnHeQV6mxse")
+        self.assertEqual(existing_doc.recording_url, payload["recording_url"])
+        self.assertTrue(existing_doc.saved)
+
+    def test_unmatched_callback_is_logged_without_core_error(self):
+        fake_frappe = SimpleNamespace(
+            db=SimpleNamespace(get_value=Mock(return_value=None), commit=Mock()),
+        )
+        provider_event = Mock()
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
+            patch("confluence_ai.services.inbound_sales.handle_vobiz_inbound_call", Mock(return_value={"status": "ignored"})), \
+            patch("confluence_ai.services.vobiz.find_task_and_attempt", Mock(return_value=(None, None))), \
+            patch("confluence_ai.services.vobiz.upsert_call_log", Mock(return_value="call-unit")), \
+            patch("confluence_ai.services.vobiz.record_provider_event", provider_event):
+            result = vobiz.handle_callback({"event": "recording.completed", "company": "globifit"})
+
+        self.assertEqual(result["status"], "logged_without_task")
+        self.assertEqual(result["call_log"], "call-unit")
+        provider_event.assert_called_once()
