@@ -13,6 +13,7 @@ from livekit.protocol import agent_dispatch as proto_dispatch
 from livekit.protocol import sip as proto_sip
 
 from confluence_ai.services.utils import as_json, create_error, parse_json_object, record_provider_event
+from confluence_ai.services.call_identity import call_phone, is_internal_call_id
 
 
 import string
@@ -1066,12 +1067,12 @@ def _apply_livekit_call_log_payload(
         doc.attempt = attempt.name
         doc.company = doc.company or attempt.company
     doc.customer_name = context.get("customer_name") or context.get("patient_name") or doc.customer_name
-    doc.customer_phone = (
+    doc.customer_phone = call_phone(
         payload.get("caller_phone")
         or payload.get("from")
         or context.get("customer_phone")
         or context.get("phone")
-        or doc.customer_phone
+        or doc.customer_phone, doc.customer_phone
     )
     doc.from_number = (
         payload.get("from")
@@ -1088,8 +1089,13 @@ def _apply_livekit_call_log_payload(
         or context.get("outbound_phone_number")
         or doc.to_number
     )
-    doc.call_uuid = doc.call_uuid or call_uuid
-    doc.sip_call_id = payload.get("sip_call_id") or doc.sip_call_id or payload.get("room_name") or payload.get("room")
+    doc.from_number = call_phone(doc.from_number)
+    doc.to_number = call_phone(doc.to_number)
+    if not doc.call_uuid or (is_internal_call_id(doc.call_uuid) and call_uuid and not is_internal_call_id(call_uuid)):
+        doc.call_uuid = call_uuid
+    candidate_sip = payload.get("sip_call_id") or payload.get("room_name") or payload.get("room")
+    if not doc.sip_call_id or (is_internal_call_id(doc.sip_call_id) and candidate_sip and not is_internal_call_id(candidate_sip)):
+        doc.sip_call_id = candidate_sip
     doc.trunk_id = payload.get("trunk_id") or context.get("trunk_id") or task.trunk_id or doc.trunk_id
     doc.domain = payload.get("domain") or context.get("vobiz_domain") or doc.domain
     doc.reason = payload.get("reason") or doc.reason

@@ -1,12 +1,34 @@
 """Join independently arriving call events only with an explicit SIP identity."""
 
 import frappe
+import re
 from frappe.model.rename_doc import rename_doc
+
+
+def is_internal_call_id(value) -> bool:
+    return str(value or "").lower().startswith(("scl_", "agent-army-", "room_", "sip-", "task-", "batch-"))
+
+
+def call_phone(value, existing=None):
+    """Normalize an explicit international prefix without guessing a country."""
+    text = str(value or "").strip()
+    if not text:
+        return existing
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return value
+    if digits.startswith("00"):
+        return "+" + digits[2:]
+    if text.startswith("+"):
+        return "+" + digits
+    if existing and str(existing).startswith("+") and len(digits) >= 7 and str(existing).endswith(digits):
+        return existing
+    return digits
 
 
 def bind_provider_identity(task, payload: dict) -> str | None:
     provider_id = str(payload.get("sip_call_id") or "").strip()
-    if payload.get("identity_source") != "sip.callIDFull" or not provider_id:
+    if payload.get("identity_source") not in {"sip.callIDFull", "vobiz.SIPCallID"} or not provider_id or is_internal_call_id(provider_id):
         return None
     frappe.db.get_value("AI Company", task.company, "name", for_update=True)
     frappe.db.get_value("AI Task", task.name, "name", for_update=True)
@@ -24,7 +46,7 @@ def bind_provider_identity(task, payload: dict) -> str | None:
         canonical = docs[0].name
     target = frappe.get_doc("AI Call Log", canonical, for_update=True) if canonical else frappe.new_doc("AI Call Log")
     original_uuid = target.call_uuid
-    if target.sip_call_id and not target.sip_call_id.startswith(("agent-army-", "SCL_")) and target.sip_call_id != provider_id:
+    if target.sip_call_id and not is_internal_call_id(target.sip_call_id) and target.sip_call_id != provider_id:
         frappe.throw("Task is already linked to a different provider SIP identity.")
     target.task = task.name
     target.company = task.company
@@ -33,7 +55,7 @@ def bind_provider_identity(task, payload: dict) -> str | None:
         attempts = frappe.get_all("AI Task Attempt", filters={"task": task.name}, order_by="creation desc", limit=1, pluck="name")
         target.attempt = attempts[0] if attempts else None
     target.sip_call_id = provider_id
-    if not target.call_uuid or target.call_uuid.startswith("agent-army-"):
+    if not target.call_uuid or is_internal_call_id(target.call_uuid):
         target.call_uuid = provider_id
     target.direction = payload.get("direction") or target.direction
     fields = (
@@ -59,6 +81,7 @@ def bind_provider_identity(task, payload: dict) -> str | None:
                 target.set(field, source.get(field))
         if source.status in terminal and target.status not in terminal:
             target.status = source.status
+        target.customer_phone = call_phone(source.customer_phone, target.customer_phone)
     target.status = target.status or "Unknown"
     if merged_uuid:
         # The source still owns the unique UUID until the merge is complete.
@@ -86,6 +109,6 @@ def bind_provider_identity(task, payload: dict) -> str | None:
         if target.attempt:
             frappe.db.set_value("AI Task Attempt", target.attempt, values)
     current = frappe.db.get_value("AI Task", task.name, "call_uuid")
-    if not current or current.startswith("agent-army-"):
+    if not current or is_internal_call_id(current):
         frappe.db.set_value("AI Task", task.name, "call_uuid", provider_id)
     return target.name

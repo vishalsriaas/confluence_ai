@@ -8,7 +8,7 @@ from unittest.mock import patch
 import frappe
 
 from confluence_ai.api import webhook
-from confluence_ai.services import call_identity, livekit, vobiz
+from confluence_ai.services import call_identity, inbound_sales, livekit, vobiz
 
 
 class TestCallIdentity(unittest.TestCase):
@@ -130,6 +130,68 @@ class TestCallIdentity(unittest.TestCase):
     def test_missing_full_identity_does_nothing(self):
         self.assertIsNone(call_identity.bind_provider_identity(self.task, {"sip_call_id": "SCL_internal"}))
         self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 0)
+
+    def test_inbound_and_outbound_replace_internal_id_and_keep_one_log(self):
+        for direction in ("inbound", "outbound"):
+            with self.subTest(direction=direction):
+                frappe.db.delete("AI Call Log", {"company": self.company})
+                frappe.db.set_value("AI Task", self.task.name, "call_uuid", "SCL_internal")
+                self.task.reload()
+                canonical = frappe.get_doc({"doctype": "AI Call Log", "company": self.company, "task": self.task.name,
+                    "sip_call_id": "SCL_internal", "call_uuid": "SCL_internal", "customer_phone": "9999999999"}).insert(ignore_permissions=True)
+                payload = self.payload("initiated")
+                payload["Direction"] = direction
+                payload["From" if direction == "inbound" else "To"] = "00919999999999"
+                vobiz._bind_vobiz_identity(self.task, payload)
+                self.assertEqual(vobiz.upsert_call_log(payload, self.task, self.attempt), canonical.name)
+                for event in ("recording", "transcript", "hangup"):
+                    media = {**payload, **self.payload(event), "Direction": direction}
+                    self.assertEqual(vobiz.upsert_call_log(media), canonical.name)
+                canonical.reload()
+                livekit._apply_livekit_call_log_payload(canonical,
+                    {"sip_call_id": "SCL_internal", "event": "call_ended"}, self.task, self.attempt,
+                    diagnostics_enabled=False, context={"customer_phone": "9999999999"}, livekit_event="call_ended",
+                    event_type_lower="call_ended", call_uuid="SCL_internal")
+                self.assertEqual(canonical.sip_call_id, payload["SIPCallID"])
+                self.assertEqual(canonical.call_uuid, payload["CallUUID"])
+                self.assertTrue(canonical.transcript)
+                self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 1)
+
+    def test_vobiz_binding_merges_recording_that_arrived_first(self):
+        canonical = frappe.get_doc({"doctype": "AI Call Log", "company": self.company, "task": self.task.name,
+            "call_uuid": "SCL_internal", "sip_call_id": "SCL_internal"}).insert(ignore_permissions=True)
+        orphan = vobiz.upsert_call_log(self.payload("recording"))
+        vobiz.upsert_call_log(self.payload("transcript"))
+        vobiz._bind_vobiz_identity(self.task, self.payload("hangup"))
+        self.assertFalse(frappe.db.exists("AI Call Log", orphan))
+        canonical.reload()
+        self.assertEqual(canonical.call_uuid, self.payload("recording")["CallUUID"])
+        self.assertEqual(self.task.transcript, canonical.transcript)
+
+    def test_number_format_does_not_guess_country(self):
+        self.assertEqual(call_identity.call_phone("00919873090386"), "+919873090386")
+        self.assertEqual(call_identity.call_phone("9873090386", "+919873090386"), "+919873090386")
+        self.assertEqual(call_identity.call_phone("00442071234567"), "+442071234567")
+        self.assertEqual(call_identity.call_phone("2025550123"), "2025550123")
+
+    def test_inbound_does_not_reuse_old_or_different_call(self):
+        self.task.channel = "Voice"
+        self.task.external_record_type = "Vobiz Inbound Call"
+        self.task.status = "Running"
+        self.task.call_uuid = "SCL_old"
+        self.task.context_json = json.dumps({"customer_phone": "9999999999", "called_number": "9999999998"})
+        self.task.flags.ignore_mandatory = True
+        self.task.save(ignore_permissions=True)
+        old_time = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-3)
+        frappe.db.set_value("AI Task", self.task.name, "creation", old_time)
+        payload = {"CallUUID": "new-provider-id", "From": "00919999999999", "To": "00919999999998"}
+        self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
+        frappe.db.set_value("AI Task", self.task.name, {"creation": frappe.utils.now_datetime(), "call_uuid": "old-provider-id"})
+        self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
+        frappe.db.set_value("AI Task", self.task.name, "call_uuid", "SCL_current")
+        self.assertEqual(inbound_sales._find_latest_inbound_task(payload).name, self.task.name)
+        payload["From"] = "00918888888888"
+        self.assertIsNone(inbound_sales._find_latest_inbound_task(payload))
 
     def test_conflicting_task_is_rejected(self):
         other = frappe.get_doc({"doctype": "AI Task", "company": self.company})

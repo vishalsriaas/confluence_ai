@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from confluence_ai.services.utils import as_json, now, parse_json_object, record_provider_event
+from confluence_ai.services.call_identity import bind_provider_identity, call_phone, is_internal_call_id
 
 
 VOBIZ_TRANSCRIPT_EVENTS = {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}
@@ -592,6 +593,7 @@ def handle_callback(payload: dict) -> dict:
     inbound_result = handle_vobiz_inbound_call(payload)
     if inbound_result.get("status") in {"routed", "duplicate"} and inbound_result.get("task"):
         task = frappe.get_doc("AI Task", inbound_result["task"])
+        _bind_vobiz_identity(task, payload)
         attempts = frappe.get_all(
             "AI Task Attempt",
             filters={"task": task.name},
@@ -632,6 +634,7 @@ def handle_callback(payload: dict) -> dict:
 
     # 2. Get the documents
     task = frappe.get_doc("AI Task", task_name)
+    _bind_vobiz_identity(task, payload)
     attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
     if not attempt:
         latest_attempts = frappe.get_all(
@@ -802,6 +805,16 @@ def handle_callback(payload: dict) -> dict:
         "repeat_followup": repeat_followup_result,
         "fresh_followup": fresh_followup_result,
     }
+
+
+def _bind_vobiz_identity(task, payload):
+    provider_id = payload.get("SIPCallID") or payload.get("sip_call_id")
+    if provider_id and not is_internal_call_id(provider_id):
+        bind_provider_identity(task, {
+            "sip_call_id": provider_id, "identity_source": "vobiz.SIPCallID",
+            "direction": str(payload.get("Direction") or payload.get("direction") or "").title() or None,
+        })
+        task.reload()
 
 
 def _enqueue_call_disposition_if_ready(call_log: str | None, event_type: str) -> dict | None:
@@ -1104,7 +1117,7 @@ def _should_replace_sip_call_id(current: Any, candidate: Any) -> bool:
     candidate_text = str(candidate or "").strip()
     if not candidate_text or current_text == candidate_text.lower():
         return False
-    return current_text.startswith(("agent-army-", "room_", "task-", "batch-"))
+    return is_internal_call_id(current_text) and not is_internal_call_id(candidate_text)
 
 
 def _parse_json_object(value: str | None) -> dict:
@@ -1379,7 +1392,7 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number") or doc.from_number
     doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number") or doc.to_number
     doc.customer_phone = _customer_phone_from_payload(payload, doc.customer_phone)
-    if not doc.call_uuid or doc.call_uuid.startswith("agent-army-") or (
+    if not doc.call_uuid or is_internal_call_id(doc.call_uuid) or (
         sip_call_id and doc.sip_call_id == sip_call_id and doc.call_uuid == sip_call_id
     ):
         doc.call_uuid = call_uuid or doc.call_uuid
@@ -1415,6 +1428,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
 
     if not doc.company and doc.agent:
         doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
+
+    doc.customer_phone = call_phone(_customer_phone_from_payload(payload), doc.customer_phone)
+    doc.from_number = call_phone(doc.from_number)
+    doc.to_number = call_phone(doc.to_number)
 
     status = payload.get("CallStatus") or payload.get("Status") or payload.get("status") or event_type
     status_lower = str(status or "").lower()

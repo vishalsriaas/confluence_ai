@@ -9,6 +9,7 @@ from confluence_ai.services.livekit import build_voice_metadata
 from confluence_ai.services.sales_disease_router import apply_sales_route_context, resolve_inbound_sales_route
 from confluence_ai.services.sales_context import enrich_sales_context, enrich_start_context_tools
 from confluence_ai.services.utils import as_json, create_error, now
+from confluence_ai.services.call_identity import is_internal_call_id
 
 
 INBOUND_EVENT = "inbound-sales-call"
@@ -284,6 +285,7 @@ def _find_latest_inbound_task(payload: dict):
         "channel": "Voice",
         "external_record_type": "Vobiz Inbound Call",
         "status": ["in", ["Queued", "Running", "Waiting"]],
+        "creation": [">=", frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-2)],
     }
 
     # Vobiz and LiveKit use different trunk IDs for the same physical call:
@@ -293,15 +295,27 @@ def _find_latest_inbound_task(payload: dict):
     candidates = frappe.get_all(
         "AI Task",
         filters=filters,
-        fields=["name", "context_json", "trunk_id"],
+        fields=["name", "context_json", "trunk_id", "call_uuid"],
         order_by="creation desc",
         limit=40,
     )
 
     ranked_matches = []
     for row in candidates:
+        if row.get("call_uuid") and not is_internal_call_id(row.call_uuid) and row.call_uuid != call_uuid:
+            continue
         context_text = row.context_json or ""
-        context_digits = _digits(context_text)
+        try:
+            context = json.loads(context_text or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(context, dict):
+            continue
+        row_caller = _digits(context.get("customer_phone") or context.get("phone") or context.get("caller_phone"))
+        row_called = _digits(context.get("called_number") or context.get("inbound_phone_number"))
+        if not caller or not called or caller[-10:] != row_caller[-10:] or called[-10:] != row_called[-10:]:
+            continue
+        context_digits = row_caller + row_called
         context_lower = context_text.lower()
         score = 0
         if trunk_id and str(row.get("trunk_id") or "").strip().lower() == trunk_id.lower():
@@ -317,6 +331,8 @@ def _find_latest_inbound_task(payload: dict):
 
     if ranked_matches:
         ranked_matches.sort(key=lambda item: item[0], reverse=True)
+        if len(ranked_matches) > 1:
+            return None
         return frappe.get_doc("AI Task", ranked_matches[0][1].name)
     return None
 
