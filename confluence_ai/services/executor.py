@@ -74,19 +74,12 @@ def execute_task(task_name: str) -> dict:
         result = _run_channel(task, payload)
         
         # Reload docs to get any potential updates from concurrent callbacks
-        task = frappe.get_doc("AI Task", task_name)
-        attempt = frappe.get_doc("AI Task Attempt", attempt.name)
+        task = frappe.get_doc("AI Task", task_name, for_update=True)
+        attempt = frappe.get_doc("AI Task Attempt", attempt.name, for_update=True)
 
         if task.channel == "Voice":
-            task.status = "Running"
-            task.result_json = as_json(result)
-            task.last_error = ""
+            _apply_voice_dispatch_result(task, attempt, result)
             task.save(ignore_permissions=True)
-            
-            attempt.status = "Started"
-            attempt.response_json = as_json(result)
-            if isinstance(result, dict):
-                attempt.external_id = result.get("sip_call_sid") or result.get("room_sid")
             attempt.save(ignore_permissions=True)
         else:
             task.status = "Completed"
@@ -127,6 +120,21 @@ def execute_task(task_name: str) -> dict:
         create_error("Task Execution", message, source="executor", task=task.name, task_batch=task.task_batch, agent=task.assigned_agent, exc=exc)
         post_batch_callback(task.task_batch, "task_failed", {"task": task.name, "error": message})
         raise
+
+
+def _apply_voice_dispatch_result(task, attempt, result: dict) -> None:
+    # A fast hangup can arrive before the dispatch response; never reopen it.
+    if task.status not in {"Completed", "Failed", "Cancelled", "Deadline Missed"}:
+        task.status = "Running"
+        task.last_error = ""
+    if attempt.status not in {"Succeeded", "Failed", "Cancelled", "Deadline Missed"}:
+        attempt.status = "Started"
+    task.result_json = as_json({**result, **parse_json_object(task.result_json)})
+    attempt.response_json = as_json({**result, **parse_json_object(attempt.response_json)})
+    if result.get("sip_call_id"):
+        task.call_uuid = task.call_uuid or result["sip_call_id"]
+        attempt.call_uuid = attempt.call_uuid or result["sip_call_id"]
+    attempt.external_id = attempt.external_id or result.get("sip_call_sid") or result.get("room_sid")
 
 
 def _run_channel(task, payload: dict) -> dict:

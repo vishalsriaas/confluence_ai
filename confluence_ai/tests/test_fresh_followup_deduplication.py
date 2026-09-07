@@ -72,6 +72,96 @@ class TestFreshFollowUpDeduplication(unittest.TestCase):
         self.assertEqual(doc.agents[0].attempt_count, 1)
         self.enqueue.assert_called_once()
 
+    def test_missing_outcome_pauses_without_retry_or_next_agent(self):
+        first, doc = self.start()
+        result = flow.handle_voice_result(task=first["task"], transcript="[AGENT]: Hello\n[CUSTOMER]: Hello", result={"duration_sec": 40})
+        doc.reload()
+        self.assertEqual(result["status"], "pending_outcome")
+        self.assertEqual(doc.status, "Pending Config")
+        self.assertIsNone(doc.next_call_time)
+        self.assertIsNone(doc.active_call_timeout_at)
+        self.assertEqual(doc.agents[0].attempt_count, 1)
+        self.assertEqual(flow.queue_agent_call(doc.name)["reason"], "pending_outcome")
+        self.clock.return_value += timedelta(days=3)
+        get_all = frappe.get_all
+        def scoped_workflows(doctype, **kwargs):
+            kwargs["filters"] = {**kwargs.get("filters", {}), "company": self.company}
+            return get_all(doctype, **kwargs)
+        with patch.object(flow.frappe, "get_all", side_effect=scoped_workflows), patch.object(flow, "_missed_task_rows", return_value=[]):
+            flow.process_due_workflows()
+        self.enqueue.assert_called_once()
+        again, _ = self.start("another-inbound-event")
+        self.assertEqual(again["workflow"], doc.name)
+
+    def test_delayed_explicit_outcome_resumes_paused_workflow(self):
+        first, doc = self.start()
+        flow.handle_voice_result(task=first["task"], transcript="[AGENT]: Hello\n[CUSTOMER]: Hello", result={"duration_sec": 40})
+        flow.handle_voice_result(task=first["task"], transcript="[CUSTOMER]: Call tomorrow", result={"duration_sec": 40, "follow_up_required": True, "reason": "later_requested"})
+        doc.reload()
+        self.assertEqual(doc.status, "Scheduled")
+        self.assertEqual(doc.next_agent_no, 2)
+        self.assertEqual(doc.next_call_time, self.clock.return_value + timedelta(days=1))
+        self.assertEqual(doc.agents[0].attempt_count, 1)
+        self.enqueue.assert_called_once()
+
+    def test_followup_context_drops_previous_transport_but_keeps_transcript(self):
+        _, doc = self.start()
+        doc.context_json = frappe.as_json({"direction": "Inbound", "Direction": "inbound", "call_uuid": "old-call", "sip_call_id": "old-sip", "room_name": "old-room", "to": "old-destination", "source_reference_name": "original-lead"})
+        doc.agents[0].transcript = "Customer asked to call tomorrow."
+        context = flow._workflow_context(doc, 2)
+        self.assertEqual(context["direction"], "Outbound")
+        self.assertEqual(context["to"], doc.customer_phone)
+        for key in ("Direction", "call_uuid", "sip_call_id", "room_name"):
+            self.assertNotIn(key, context)
+        self.assertEqual(context["prior_call_transcripts"]["agent_1"], doc.agents[0].transcript)
+
+    def test_workflow_error_clears_scheduling_without_resetting_attempts(self):
+        _, doc = self.start()
+        with patch.object(flow, "create_error"):
+            flow._mark_failed(doc.name, RuntimeError("unit failure"))
+        doc.reload()
+        self.assertEqual(doc.status, "Failed")
+        self.assertIsNone(doc.next_call_time)
+        self.assertIsNone(doc.active_call_timeout_at)
+        self.assertEqual(doc.next_agent_no, 0)
+        self.assertEqual(doc.agents[0].attempt_count, 1)
+        self.assertEqual(flow.queue_agent_call(doc.name)["reason"], "final_state")
+
+    def test_late_error_cannot_overwrite_completed_workflow(self):
+        first, doc = self.start()
+        flow.handle_voice_result(task=first["task"], transcript="Customer: done", result={"duration_sec": 40, "follow_up_required": False})
+        with patch.object(flow, "create_error"):
+            flow._mark_failed(doc.name, RuntimeError("late error"))
+        doc.reload()
+        self.assertEqual(doc.status, "Completed")
+
+    def test_three_agent_journey_with_retry_and_cumulative_transcripts(self):
+        first, doc = self.start()
+        flow.handle_voice_result(task=first["task"], transcript="[CUSTOMER]: Ask family then call tomorrow", result={"duration_sec": 40, "follow_up_required": True, "reason": "later_requested"})
+        doc.reload()
+        self.clock.return_value = doc.next_call_time
+        second = flow.queue_agent_call(doc.name)
+        flow.mark_call_missed(doc.name, task=second["task"])
+        doc.reload()
+        self.assertEqual(doc.next_agent_no, 2)
+        self.clock.return_value = doc.next_call_time
+        retry = flow.queue_agent_call(doc.name)
+        flow.handle_voice_result(task=retry["task"], transcript="[CUSTOMER]: Family has not decided, call tomorrow", result={"duration_sec": 40, "follow_up_required": True, "reason": "later_requested"})
+        doc.reload()
+        self.assertEqual(doc.next_agent_no, 3)
+        context = flow._workflow_context(doc, 3)
+        self.assertIn("Ask family", context["prior_call_transcripts"]["agent_1"])
+        self.assertIn("Family has not decided", context["prior_call_transcripts"]["agent_2"])
+        self.clock.return_value = doc.next_call_time
+        third = flow.queue_agent_call(doc.name)
+        flow.handle_voice_result(task=third["task"], transcript="[CUSTOMER]: Done", result={"duration_sec": 40, "follow_up_required": False, "reason": "encounter_created"})
+        doc.reload()
+        self.assertEqual(doc.status, "Completed")
+        self.assertEqual([row.attempt_count for row in doc.agents], [1, 2, 1])
+        self.assertIsNone(doc.next_call_time)
+        self.assertEqual(flow.queue_agent_call(doc.name)["reason"], "final_state")
+        self.assertEqual(self.enqueue.call_count, 4)
+
     def test_duplicate_webhook_after_completion_does_not_restart(self):
         result, doc = self.start()
         flow.handle_voice_result(task=result["task"], transcript="Customer: done", result={"duration_sec": 40, "follow_up_required": False})

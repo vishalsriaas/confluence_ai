@@ -260,6 +260,8 @@ def queue_agent_call(workflow_name: str, agent_no: int | None = None) -> dict:
             return {"status": "skipped", "reason": "disabled", "workflow": workflow.name}
         if workflow.status in FINAL_STATES:
             return {"status": "skipped", "reason": "final_state", "workflow": workflow.name}
+        if workflow.status == "Pending Config" and parse_json_object(workflow.result_json).get("pending_followup_outcome"):
+            return {"status": "skipped", "reason": "pending_outcome", "workflow": workflow.name}
         canonical = _consolidate_customer_workflows(workflow.company, workflow.customer_phone)
         workflow.reload()
         if canonical and canonical != workflow.name:
@@ -414,11 +416,25 @@ def handle_voice_result(
     decision = _fresh_followup_decision(result=result, task=task, outcome=outcome)
     if decision.get("reason") == "no_structured_followup_outcome":
         if _has_conversation_transcript(transcript_text):
-            decision = {
-                "follow_up_required": True,
-                "reason": "outcome_missing_after_connected_call",
-                "source": "transcript_fallback",
-            }
+            row.status = "Pending Config"
+            row.last_notes = "Connected call has no captured follow-up decision; automatic calls paused."
+            doc.status = "Pending Config"
+            doc.next_agent_no = 0
+            doc.next_call_time = None
+            doc.active_call_timeout_at = None
+            doc.timer_status = row.last_notes
+            doc.result_json = as_json({
+                "pending_followup_outcome": True,
+                "fresh_followup_decision": decision,
+                "transcript": transcript_text,
+                "raw_result": result or {},
+            })
+            if task and frappe.db.exists("AI Task", task):
+                frappe.db.set_value("AI Task", task, {"status": "Completed", "last_error": ""})
+            _append_task_history(doc, agent_no, attempt_no, task, "pending_outcome")
+            doc.save(ignore_permissions=True)
+            frappe.db.commit()
+            return {"status": "pending_outcome", "workflow": doc.name, "agent_no": agent_no}
         else:
             return mark_call_missed(
                 doc.name,
@@ -638,6 +654,9 @@ def _settings_for_payload(payload: dict):
 
 def _workflow_context(workflow, agent_no: int) -> dict:
     base_context = parse_json_object(workflow.context_json, "Workflow Context JSON")
+    # A follow-up is a new outbound call, not the original inbound transport session.
+    for key in ("CallUUID", "call_uuid", "SIPCallID", "sip_call_id", "room", "room_name", "room_sid", "bridge_uuid", "Direction", "From", "To", "from_number", "to_number"):
+        base_context.pop(key, None)
     previous_transcripts = {
         f"agent_{int(row.agent_no or row.idx)}": row.transcript
         for row in workflow.agents
@@ -651,6 +670,8 @@ def _workflow_context(workflow, agent_no: int) -> dict:
     base_context.update(
         {
             "event": "fresh_followup",
+            "direction": "Outbound",
+            "to": workflow.customer_phone,
             "workflow": workflow.name,
             "company": workflow.company,
             "fresh_followup_agent_no": agent_no,
@@ -1153,9 +1174,21 @@ def _safe_int(value: object, default: int = 0) -> int:
 
 def _mark_failed(workflow_name: str, exc: Exception) -> None:
     try:
+        frappe.db.rollback()
         doc = frappe.get_doc(WORKFLOW, workflow_name)
+        _lock_workflow(doc)
+        doc.reload()
+        if doc.status in FINAL_STATES:
+            return
         doc.status = "Failed"
         doc.final_reason = str(exc)
+        doc.next_agent_no = 0
+        doc.next_call_time = None
+        doc.active_call_timeout_at = None
+        doc.timer_status = f"Stopped after workflow error: {exc}"
+        for row in doc.agents:
+            if row.status in {"Pending", "Scheduled", "Queued", "Pending Config"}:
+                row.status = "Cancelled"
         doc.save(ignore_permissions=True)
         create_error("Fresh Follow Up", str(exc), source="fresh_followup", company=doc.company, payload={"workflow": workflow_name}, exc=exc)
         frappe.db.commit()

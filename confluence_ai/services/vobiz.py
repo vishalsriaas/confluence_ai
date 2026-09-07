@@ -8,7 +8,7 @@ from typing import Any
 
 import requests
 
-from confluence_ai.services.utils import as_json, now, record_provider_event
+from confluence_ai.services.utils import as_json, now, parse_json_object, record_provider_event
 
 
 VOBIZ_TRANSCRIPT_EVENTS = {"transcript", "call_transcript", "transcript_ready", "transcription.completed"}

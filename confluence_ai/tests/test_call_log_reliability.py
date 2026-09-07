@@ -1,15 +1,59 @@
+import asyncio
 import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import frappe
 
-from confluence_ai.services import call_disposition, livekit, recording_transcription, vobiz
+from confluence_ai.services import call_disposition, executor, livekit, recording_transcription, vobiz
 
 
 class TestCallLogReliability(unittest.TestCase):
+    def test_outbound_identity_uses_provider_id_not_livekit_sid(self):
+        participant = SimpleNamespace(attributes={"sip.callID": "SCL_internal", "sip.callIDFull": "provider-full-id"})
+        room = SimpleNamespace(get_participant=AsyncMock(return_value=participant))
+        value = asyncio.run(livekit._outbound_provider_call_id(SimpleNamespace(room=room), "room-unit", "sip-unit"))
+        self.assertEqual(value, "provider-full-id")
+        request = room.get_participant.call_args.args[0]
+        self.assertEqual(request.room, "room-unit")
+        self.assertEqual(request.identity, "sip-unit")
+
+    def test_departed_participant_does_not_fail_successful_dispatch(self):
+        room = SimpleNamespace(get_participant=AsyncMock(side_effect=RuntimeError("not found")))
+        self.assertIsNone(asyncio.run(livekit._outbound_provider_call_id(SimpleNamespace(room=room), "room-unit", "sip-unit")))
+
+    def test_dispatch_result_persists_provider_identity(self):
+        task = frappe._dict(status="Queued", result_json="{}", call_uuid=None)
+        attempt = frappe._dict(status="Started", response_json="{}", call_uuid=None, external_id=None)
+        executor._apply_voice_dispatch_result(task, attempt, {"sip_call_id": "provider-full-id", "sip_call_sid": "SCL_internal"})
+        self.assertEqual(task.status, "Running")
+        self.assertEqual(task.call_uuid, "provider-full-id")
+        self.assertEqual(attempt.call_uuid, "provider-full-id")
+        self.assertEqual(attempt.external_id, "SCL_internal")
+
+    def test_fast_callback_cannot_be_overwritten_by_dispatch_return(self):
+        task = frappe._dict(status="Completed", result_json='{"last_vobiz_payload":{"status":"completed"}}', call_uuid="bridge-id", last_error="")
+        attempt = frappe._dict(status="Succeeded", response_json='{"duration_sec":20}', call_uuid="bridge-id", external_id="bridge-id")
+        executor._apply_voice_dispatch_result(task, attempt, {"sip_call_id": "provider-full-id", "sip_call_sid": "SCL_internal"})
+        self.assertEqual(task.status, "Completed")
+        self.assertEqual(attempt.status, "Succeeded")
+        self.assertEqual(task.call_uuid, "bridge-id")
+        self.assertEqual(attempt.external_id, "bridge-id")
+        self.assertEqual(json.loads(task.result_json)["last_vobiz_payload"]["status"], "completed")
+        self.assertEqual(json.loads(attempt.response_json)["duration_sec"], 20)
+
+    def test_inbound_task_resolves_followup_from_context(self):
+        task = SimpleNamespace(name="task-unit", external_record_type="Vobiz Inbound Call", external_record_id="call-unit", context_json='{"fresh_followup_workflow":"ffu-unit"}')
+        with patch.object(vobiz.frappe.db, "get_value", return_value=None):
+            self.assertEqual(vobiz._fresh_followup_workflow_for_task(task), "ffu-unit")
+
+    def test_inbound_task_without_followup_is_ignored(self):
+        task = SimpleNamespace(name="task-unit", external_record_type="Vobiz Inbound Call", external_record_id="call-unit", context_json='{"phone":"9999999999"}')
+        with patch.object(vobiz.frappe.db, "get_value", return_value=None):
+            self.assertIsNone(vobiz._fresh_followup_workflow_for_task(task))
+
     def test_transcript_selection_rejects_other_calls(self):
         row = {"call_uuid": "other-call", "transcription_id": "other-call", "transcription_text": "Other customer"}
         self.assertIsNone(recording_transcription._select_vobiz_transcription([row], "wanted-call"))

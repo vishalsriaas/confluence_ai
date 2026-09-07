@@ -307,6 +307,18 @@ def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
 
 
+async def _outbound_provider_call_id(lkapi, room_name: str, identity: str) -> str | None:
+    try:
+        participant = await asyncio.wait_for(
+            lkapi.room.get_participant(proto_room.RoomParticipantIdentity(room=room_name, identity=identity)),
+            timeout=3,
+        )
+        return participant.attributes.get("sip.callIDFull") or None
+    except Exception:
+        # An unanswered/disconnected participant may already have left the room.
+        return None
+
+
 def _normalize_phone(value: object) -> str | None:
     text = str(value or "").strip()
     if not text:
@@ -550,6 +562,11 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         dispatch_info = await lkapi.agent_dispatch.create_dispatch(dispatch_req)
         result_payload["dispatch_id"] = dispatch_info.id
         result_payload["livekit_agent_name"] = livekit_agent_name
+        if operation == "outbound_call":
+            provider_call_id = await _outbound_provider_call_id(lkapi, room_name, result_payload["participant_identity"])
+            if provider_call_id:
+                result_payload["sip_call_id"] = provider_call_id
+            result_payload["call_identity_status"] = "captured" if provider_call_id else "unavailable"
 
         record_provider_event(
             provider=account.provider_type or "LiveKit",

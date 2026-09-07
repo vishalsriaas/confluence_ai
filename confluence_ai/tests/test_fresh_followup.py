@@ -18,7 +18,7 @@ class TestFreshFollowUp(unittest.TestCase):
         frappe.db.delete("AI Task Template", {"template_key": "unit_fresh_followup_voice"})
         frappe.db.commit()
 
-    def test_connected_call_without_structured_outcome_schedules_next_agent(self):
+    def test_connected_call_without_structured_outcome_pauses_calls(self):
         agent_1 = self._ensure_agent("Unit Fresh Follow Up Agent 1")
         agent_2 = self._ensure_agent("Unit Fresh Follow Up Agent 2")
         task = self._create_agent_1_task(agent_1)
@@ -27,11 +27,12 @@ class TestFreshFollowUp(unittest.TestCase):
         result = fresh_followup.handle_voice_result(task=task.name)
         workflow.reload()
 
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(workflow.status, "Scheduled")
-        self.assertEqual(workflow.next_agent_no, 2)
-        self.assertIn("outcome_missing_after_connected_call", workflow.result_json)
-        self.assertIn("Agent 2 scheduled", workflow.timer_status)
+        self.assertEqual(result["status"], "pending_outcome")
+        self.assertEqual(workflow.status, "Pending Config")
+        self.assertEqual(workflow.next_agent_no, 0)
+        self.assertIsNone(workflow.next_call_time)
+        self.assertIn("pending_followup_outcome", workflow.result_json)
+        self.assertIn("automatic calls paused", workflow.timer_status)
         agent_1_context = parse_json_object(frappe.db.get_value("AI Task", task.name, "context_json"))
         self.assertEqual(agent_1_context["fresh_followup_workflow"], workflow.name)
 
