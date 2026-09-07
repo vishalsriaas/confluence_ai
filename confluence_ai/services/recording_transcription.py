@@ -11,7 +11,7 @@ import frappe
 import requests
 
 from confluence_ai.services.utils import as_json, create_error, get_queue_name, record_provider_event
-from confluence_ai.services.vobiz import _vobiz_account_id, _vobiz_media_auth_candidates
+from confluence_ai.services.vobiz import _transcript_from_payload, _vobiz_account_id, _vobiz_media_auth_candidates
 
 
 DEFAULT_LOOKBACK_MINUTES = 360
@@ -43,16 +43,13 @@ class RecordingTranscriptionSkipped(Exception):
 
 
 def process_missing_recording_transcripts(minutes: int | None = None, limit: int | None = None) -> dict:
-    """Transcribe recent recorded calls when Vobiz transcript callbacks are missing."""
+    """Recover recent call transcripts when Vobiz transcript callbacks are missing."""
     if not _call_log_has_transcript_fields():
         return {"status": "skipped", "reason": "ai_call_log_transcript_fields_not_migrated"}
 
     config = get_recording_transcription_config()
     if not config.enabled:
         return {"status": "skipped", "reason": "recording_transcription_fallback_disabled"}
-    if not config.api_key:
-        return {"status": "skipped", "reason": "recording_transcription_api_key_missing"}
-
     lookback = int(minutes or config.lookback_minutes or DEFAULT_LOOKBACK_MINUTES)
     row_limit = int(limit or config.limit or DEFAULT_LIMIT)
     lookback = max(lookback, 5)
@@ -112,10 +109,45 @@ def process_call_log_recording_transcript(
     config = config or get_recording_transcription_config()
     if not config.enabled:
         return {"status": "skipped", "reason": "recording_transcription_fallback_disabled", "call_log": doc.name}
-    if not config.api_key:
-        return {"status": "skipped", "reason": "recording_transcription_api_key_missing", "call_log": doc.name}
-
     try:
+        vobiz_result = fetch_vobiz_transcript_for_call_log(doc)
+        if vobiz_result.get("status") == "success":
+            transcript = str(vobiz_result.get("transcript") or "").strip()
+            summary = str(vobiz_result.get("summary") or transcript[:1000]).strip()
+            payload = _fallback_transcript_payload(doc, transcript, summary)
+            payload["source"] = "vobiz_transcript_pull"
+            payload["vobiz_transcription_id"] = vobiz_result.get("transcription_id")
+            _save_transcript(doc, transcript, summary, payload)
+            record_provider_event(
+                provider="Vobiz",
+                operation="vobiz_transcript_pull",
+                status="Succeeded",
+                company=doc.get("company"),
+                agent=doc.get("agent"),
+                task=doc.get("task"),
+                request={"call_log": doc.name, "call_ids": vobiz_result.get("searched_call_ids")},
+                response={"transcript_chars": len(transcript), "summary": summary},
+            )
+            callback_result = emit_synthetic_transcript_callback(doc.name, transcript, summary)
+            return {
+                "status": "success",
+                "source": "vobiz_transcript_pull",
+                "call_log": doc.name,
+                "transcript_chars": len(transcript),
+                "callback": callback_result,
+            }
+
+        if not _ai_recording_transcription_enabled():
+            return {
+                "status": "skipped",
+                "reason": vobiz_result.get("reason") or "vobiz_transcript_not_ready",
+                "source": "vobiz_transcript_pull",
+                "call_log": doc.name,
+            }
+
+        if not config.api_key:
+            return {"status": "skipped", "reason": "recording_transcription_api_key_missing", "call_log": doc.name}
+
         audio_bytes, mime_type = fetch_call_recording_audio(doc, max_audio_mb=config.max_audio_mb)
         transcript = str(transcribe_recording_audio(audio_bytes, mime_type=mime_type, config=config) or "").strip()
         if not transcript:
@@ -124,7 +156,7 @@ def process_call_log_recording_transcript(
         summary = transcript[:1000]
         payload = {
             "event": "transcription.completed",
-            "source": "recording_transcription_fallback",
+            "source": "ai_recording_transcription_fallback",
             "provider": config.provider,
             "model": config.model,
             "call_log": doc.name,
@@ -349,6 +381,146 @@ def _enqueue_disposition_after_transcript(call_log: str) -> None:
         enqueue_call_disposition(call_log)
     except Exception:
         pass
+
+
+def fetch_vobiz_transcript_for_call_log(doc) -> dict:
+    """Pull a missed Vobiz transcript callback without re-transcribing audio."""
+    recording_url = doc.get("recording_url") or doc.get("external_recording_url")
+    payload = {
+        "recording_url": recording_url,
+        "url": recording_url,
+        "AccountId": _vobiz_account_id({}, recording_url),
+        "TrunkID": doc.get("trunk_id"),
+        "trunk_id": doc.get("trunk_id"),
+    }
+    task = frappe.get_doc("AI Task", doc.get("task")) if doc.get("task") and frappe.db.exists("AI Task", doc.get("task")) else None
+    account_id = _vobiz_account_id(payload, recording_url)
+    call_ids = _vobiz_transcript_call_ids(doc)
+    if not call_ids:
+        return {"status": "skipped", "reason": "missing_vobiz_call_id"}
+
+    auth_candidates = _vobiz_media_auth_candidates(payload, task=task, account_id=account_id)
+    if not auth_candidates:
+        return {"status": "skipped", "reason": "missing_vobiz_auth", "searched_call_ids": call_ids}
+
+    last_error = ""
+    for headers in auth_candidates:
+        auth_id = headers.get("X-Auth-ID") or account_id
+        if not auth_id:
+            continue
+        url = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Transcriptions/"
+        for call_id in call_ids:
+            try:
+                response = requests.get(
+                    url,
+                    headers={**headers, "Accept": "application/json"},
+                    params={"call_uuid": call_id, "limit": 5},
+                    timeout=30,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+            if response.status_code == 404:
+                continue
+            if not response.ok:
+                last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+                continue
+
+            row = _select_vobiz_transcription(_vobiz_transcription_rows(response), call_id)
+            if not row:
+                continue
+            transcript = str(_transcript_from_payload(row) or "").strip()
+            if not transcript:
+                continue
+            summary = str(row.get("summary") or transcript[:1000]).strip()
+            return {
+                "status": "success",
+                "source": "vobiz_transcript_pull",
+                "transcript": transcript,
+                "summary": summary,
+                "transcription_id": row.get("transcription_id") or row.get("id"),
+                "matched_call_id": call_id,
+                "searched_call_ids": call_ids,
+            }
+
+    return {
+        "status": "skipped",
+        "reason": "vobiz_transcript_not_ready",
+        "searched_call_ids": call_ids,
+        "last_error": last_error,
+    }
+
+
+def _vobiz_transcription_rows(response) -> list[dict]:
+    data = response.json()
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if not isinstance(data, dict):
+        return []
+    rows = data.get("objects") or data.get("data") or data.get("results") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _select_vobiz_transcription(rows: list[dict], call_id: str) -> dict | None:
+    call_id = str(call_id or "").strip()
+    if not rows:
+        return None
+    for row in rows:
+        if str(row.get("call_uuid") or "").strip() == call_id and _transcript_from_payload(row):
+            return row
+    for row in rows:
+        if str(row.get("transcription_id") or row.get("id") or "").strip() == call_id and _transcript_from_payload(row):
+            return row
+    for row in rows:
+        if _transcript_from_payload(row):
+            return row
+    return None
+
+
+def _vobiz_transcript_call_ids(doc) -> list[str]:
+    candidates = [
+        doc.get("call_uuid"),
+        doc.get("sip_call_id"),
+    ]
+    recording_id = _recording_id_from_url(doc.get("recording_url") or doc.get("external_recording_url"))
+    if recording_id:
+        candidates.append(recording_id)
+
+    unique = []
+    seen = set()
+    for value in candidates:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
+
+
+def _recording_id_from_url(recording_url: str | None) -> str:
+    if not recording_url:
+        return ""
+    tail = str(recording_url).split("?")[0].rstrip("/").split("/")[-1]
+    if tail.lower().endswith(".wav"):
+        tail = tail[:-4]
+    return tail.strip()
+
+
+def _ai_recording_transcription_enabled() -> bool:
+    truthy = {1, "1", True, "true", "True", "yes", "Yes", "on", "On"}
+    for fieldname in ("enable_ai_recording_transcription_fallback", "allow_ai_recording_transcription_fallback"):
+        try:
+            settings = frappe.get_single("Confluence AI Settings")
+            if settings.meta.has_field(fieldname):
+                return settings.get(fieldname) in truthy
+        except Exception:
+            pass
+    try:
+        return frappe.conf.get("enable_ai_recording_transcription_fallback") in truthy
+    except Exception:
+        return False
 
 
 def fetch_call_recording_audio(doc, *, max_audio_mb: int = DEFAULT_MAX_AUDIO_MB) -> tuple[bytes, str]:
