@@ -223,6 +223,42 @@ queued side effects were blocked. No voice worker, scheduler, customer call or
 cloud deployment was started for this verification. A post-deployment controlled
 call is still required to verify actual provider delivery and identity capture.
 
+## Repeated Recording Backfill Events (2026-09-08)
+
+The recording scan retried unchanged Pending Matching receipts every minute.
+Each retry wrote callback_without_task, and the scan counted a null call_log as
+successful recovery. Live events provevent-127126 and provevent-127228 reported
+the same four unmatched calls as Succeeded.
+
+- Under the existing receipt lock, an unchanged pending receipt now returns
+  without invoking the callback again unless an exact call identity is available.
+- Identity-triggered replay still processes the pending receipt, including
+  bridge relations; failed receipts remain retryable. Raw receipts are retained.
+- Backfill reports pending separately. It logs success only for an actual linked
+  Call Log with a recording. Repeated pending/duplicate scans produce no success
+  event. Existing webhook deduplication and exact matching rules are preserved.
+- No voice worker, prompt, follow-up schedule or transcript recovery change.
+
+Live containment: enable_vobiz_recording_backfill was changed from 1 to 0 at
+2026-09-08 17:14:39 IST to stop the flood while the correction is deployed.
+Normal callbacks and enable_vobiz_transcript_recovery remain enabled. Restore
+enable_vobiz_recording_backfill to 1 after deploying this correction and verify
+that an unchanged pending recording produces no new provider events on later
+scans. Do not leave the recording fallback disabled as the permanent solution.
+
+Backup: `backups/recording-event-loop-20260908/` in the Windows workspace contains
+the original live setting and the pre-edit webhook.py/vobiz.py sources.
+
+Verification: 173 backend tests passed, zero failures/errors/skips (46.323s),
+with external HTTP and queued side effects blocked. Repeated pending receipt and
+recording scans produce one initial unmatched event, no false success events,
+and later exact identity/bridge replay attaches the recording to the same log.
+Local AI Provider Event metadata was reloaded to include the existing Skipped
+option, matching current source/live schema. Temporary test Redis was stopped.
+Live recheck at 17:18:22 IST found zero new Globifit callback_without_task or
+recording_backfill events since the 17:14:39 pause. The code correction still
+requires deployment before the recording fallback is re-enabled.
+
 ## Rollback
 
 Use a maintenance window; stop new dispatches and let active calls finish.

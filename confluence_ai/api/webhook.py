@@ -147,6 +147,13 @@ def _process_telephony_receipt(source: str, payload: dict, handler) -> dict:
             task = frappe.get_doc("AI Task", task_name) if task_name and frappe.db.exists("AI Task", task_name) else None
             company = company_for(payload, task)
             keys = [identity_key(company, kind, value) for kind, value in aliases(payload)] if company else []
+            if frappe.db.get_value("AI Webhook Event", event, "status") == "Pending Matching":
+                from confluence_ai.services.call_registry import find_call
+                if not find_call(payload, company):
+                    # Keep one durable receipt until an exact identity becomes available.
+                    # Repeated recovery scans must not rerun the unmatched handler.
+                    return {"status": "pending_matching", "webhook_event": event,
+                            "call_log": None, "reason": "exact_call_identity_required"}
             frappe.db.set_value("AI Webhook Event", event, {
                 "event_key": event_key, "company": company, "identity_keys_json": as_json(keys),
             })

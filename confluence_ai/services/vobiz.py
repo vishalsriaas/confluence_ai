@@ -36,12 +36,14 @@ def process_missing_recording_callbacks(minutes: int | None = None, limit: int |
 
     processed: list[dict] = []
     skipped = 0
+    pending = 0
     errors: list[dict] = []
     for channel in _vobiz_recording_channels():
         try:
             result = _backfill_recent_vobiz_recordings_for_channel(channel, cutoff=cutoff, limit=limit)
             processed.extend(result.get("processed") or [])
             skipped += int(result.get("skipped") or 0)
+            pending += int(result.get("pending") or 0)
         except Exception as exc:
             errors.append({"channel": channel.name, "error": str(exc)})
             frappe.log_error(
@@ -50,9 +52,10 @@ def process_missing_recording_callbacks(minutes: int | None = None, limit: int |
             )
 
     return {
-        "status": "success" if not errors else "partial",
+        "status": "partial" if errors else ("pending_matching" if pending and not processed else "success"),
         "processed_count": len(processed),
         "skipped_count": skipped,
+        "pending_count": pending,
         "errors": errors,
         "processed": processed[:50],
     }
@@ -67,6 +70,7 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
     recordings = _fetch_vobiz_recording_list(auth_id, auth_token, limit=limit, cutoff=cutoff)
     processed: list[dict] = []
     skipped = 0
+    pending = 0
 
     for recording in recordings:
         recording_dt = _parse_vobiz_datetime(recording.get("add_time"))
@@ -92,24 +96,19 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
                 skipped += 1
                 continue
 
-        task_name, attempt_name = find_task_and_attempt(payload)
-        task = frappe.get_doc("AI Task", task_name) if task_name else None
-        attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
-        if task and not attempt:
-            attempts = frappe.get_all(
-                "AI Task Attempt",
-                filters={"task": task.name},
-                order_by="creation desc",
-                limit=1,
-                pluck="name",
-            )
-            attempt = frappe.get_doc("AI Task Attempt", attempts[0]) if attempts else None
-
         from confluence_ai.api.webhook import _process_telephony_receipt
         result = _process_telephony_receipt("vobiz", payload, handle_callback)
         call_log = result.get("call_log")
-
-        processed.append({"call_log": call_log, "call_uuid": call_uuid, "channel": channel.name})
+        if result.get("status") == "pending_matching":
+            pending += 1
+        elif result.get("status") == "success" and call_log:
+            doc = frappe.get_doc("AI Call Log", call_log)
+            if doc.get("recording_url") or doc.get("external_recording_url"):
+                processed.append({"call_log": call_log, "call_uuid": call_uuid, "channel": channel.name})
+            else:
+                skipped += 1
+        else:
+            skipped += 1
 
     if processed:
         record_provider_event(
@@ -118,11 +117,12 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
             status="Succeeded",
             company=channel.get("company"),
             request={"channel": channel.name, "lookback_limit": limit},
-            response={"processed_count": len(processed), "skipped_count": skipped, "processed": processed[:10]},
+            response={"processed_count": len(processed), "skipped_count": skipped,
+                      "pending_count": pending, "processed": processed[:10]},
         )
 
     frappe.db.commit()
-    return {"processed": processed, "skipped": skipped}
+    return {"processed": processed, "skipped": skipped, "pending": pending}
 
 
 def _fetch_vobiz_recording_list(auth_id: str, auth_token: str, *, limit: int, cutoff=None) -> list[dict]:

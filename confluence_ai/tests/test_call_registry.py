@@ -158,6 +158,73 @@ class TestCallRegistry(unittest.TestCase):
         self.assertIsNone(registry.find_call(self.payload("recording"), self.company))
         self.assertIsNone(vobiz.upsert_call_log(self.payload("recording")))
 
+    def test_repeated_pending_receipt_does_not_repeat_handler_or_provider_event(self):
+        self.reserve()
+        payload = self.payload("recording")
+        with patch.object(vobiz, "handle_callback", wraps=vobiz.handle_callback) as handler:
+            first = webhook._process_telephony_receipt("vobiz", payload, handler)
+            self.assertEqual(first["status"], "pending_matching")
+            receipt = frappe.get_last_doc("AI Webhook Event", filters={"company": self.company})
+            for _ in range(10):
+                result = webhook._process_telephony_receipt("vobiz", payload, handler)
+                self.assertEqual(result["status"], "pending_matching")
+                self.assertEqual(result["webhook_event"], receipt.name)
+            self.assertEqual(handler.call_count, 1)
+        self.assertEqual(frappe.db.count("AI Webhook Event", {"company": self.company}), 1)
+        self.assertEqual(frappe.db.count("AI Provider Event", {"company": self.company, "operation": "callback_without_task"}), 1)
+        self.assertEqual(str(frappe.db.get_value("AI Webhook Event", receipt.name, "modified")), str(receipt.modified))
+
+    def test_recording_scan_stays_pending_then_identity_replays_it(self):
+        self.reserve()
+        channel = frappe._dict(name="unit-channel", company=self.company, vobiz_auth_id="unit-account")
+        recording = {"call_uuid": self.payload("recording")["CallUUID"], "recording_id": "unit-recording",
+            "recording_duration_ms": "10000", "recording_url": "https://media.invalid/one.wav"}
+        cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-10)
+        with patch.object(vobiz, "_get_password", return_value="unit-token"), \
+             patch.object(vobiz, "_fetch_vobiz_recording_list", return_value=[recording]):
+            for _ in range(5):
+                result = vobiz._backfill_recent_vobiz_recordings_for_channel(channel, cutoff=cutoff, limit=10)
+                self.assertEqual(result, {"processed": [], "skipped": 0, "pending": 1})
+            self.assertEqual(frappe.db.count("AI Provider Event", {"company": self.company, "operation": "recording_backfill"}), 0)
+            self.assertEqual(frappe.db.count("AI Provider Event", {"company": self.company, "operation": "callback_without_task"}), 1)
+            self.assertEqual(frappe.db.count("AI Webhook Event", {"company": self.company}), 1)
+            name = self.identity()["call_log"]
+            webhook._process_telephony_receipt("vobiz", self.payload("hangup"), vobiz.handle_callback)
+            self.assertEqual(frappe.db.get_value("AI Call Log", name, "recording_url"), recording["recording_url"])
+            self.assertEqual(frappe.db.count("AI Webhook Event", {"company": self.company, "status": "Pending Matching"}), 0)
+            result = vobiz._backfill_recent_vobiz_recordings_for_channel(channel, cutoff=cutoff, limit=10)
+            self.assertEqual(result, {"processed": [], "skipped": 1, "pending": 0})
+        self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 1)
+
+    def test_pending_receipt_reprocesses_when_exact_identity_is_available(self):
+        self.reserve()
+        payload = self.payload("transcript")
+        webhook._process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
+        from confluence_ai.services.call_identity import bind_provider_identity
+        name = bind_provider_identity(self.task, {"sip_call_id": payload["SIPCallID"],
+            "identity_source": "sip.callIDFull", "attempt": self.attempt.name})
+        frappe.db.commit()
+        result = webhook._process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
+        self.assertEqual(result["call_log"], name)
+        self.assertTrue(frappe.db.get_value("AI Call Log", name, "transcript"))
+
+    def test_backfill_success_is_logged_only_after_attachment(self):
+        self.reserve()
+        name = self.identity()["call_log"]
+        payload = self.payload("hangup")
+        webhook._process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
+        channel = frappe._dict(name="unit-channel", company=self.company, vobiz_auth_id="unit-account")
+        recording = {"call_uuid": payload["CallUUID"], "recording_id": "unit-recording",
+            "recording_duration_ms": "10000", "recording_url": "https://media.invalid/one.wav"}
+        with patch.object(vobiz, "_get_password", return_value="unit-token"), \
+             patch.object(vobiz, "_fetch_vobiz_recording_list", return_value=[recording]):
+            result = vobiz._backfill_recent_vobiz_recordings_for_channel(channel,
+                cutoff=frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-10), limit=10)
+        self.assertEqual(len(result["processed"]), 1)
+        self.assertEqual(result["processed"][0]["call_log"], name)
+        self.assertTrue(frappe.db.get_value("AI Call Log", name, "recording_url"))
+        self.assertEqual(frappe.db.count("AI Provider Event", {"company": self.company, "operation": "recording_backfill", "status": "Succeeded"}), 1)
+
     def test_cross_company_attempt_rejected(self):
         self.reserve()
         with self.assertRaises(frappe.ValidationError):
