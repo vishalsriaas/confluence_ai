@@ -428,7 +428,7 @@ def _is_inbound_call_start(payload: dict) -> bool:
 
 
 def _payload_call_uuid(payload: dict) -> str | None:
-    value = payload.get("CallUUID") or payload.get("call_uuid") or payload.get("RequestID") or payload.get("SIPCallID")
+    value = payload.get("SIPCallID") or payload.get("sip_call_id") or payload.get("CallUUID") or payload.get("call_uuid")
     return str(value).strip() if value else None
 
 

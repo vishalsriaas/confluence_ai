@@ -16,7 +16,7 @@ from confluence_ai.services.vobiz import _transcript_from_payload, _vobiz_accoun
 
 DEFAULT_LOOKBACK_MINUTES = 360
 DEFAULT_LIMIT = 50
-DEFAULT_WAIT_MINUTES = 2
+DEFAULT_WAIT_MINUTES = 5
 DEFAULT_MAX_AUDIO_MB = 25
 
 
@@ -33,6 +33,8 @@ class RecordingTranscriptionConfig:
     limit: int
     wait_minutes: int
     max_audio_mb: int
+    retry_minutes: int = 5
+    max_attempts: int = 3
 
 
 class RecordingTranscriptionSkipped(Exception):
@@ -61,10 +63,12 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
         """
         select name
         from `tabAI Call Log`
-        where modified >= %(cutoff)s
-          and modified <= %(wait_cutoff)s
+        where creation >= %(cutoff)s
+          and coalesce(transcript_recovery_attempts, 0) < %(max_attempts)s
+          and call_end_received_at is not null
+          and recording_received_at <= %(wait_cutoff)s
+          and (transcript_recovery_next_at is null or transcript_recovery_next_at <= NOW())
           and coalesce(transcript, '') = ''
-          and coalesce(transcript_summary, '') = ''
           and coalesce(nullif(recording_url, ''), nullif(external_recording_url, ''), '') != ''
           and coalesce(status, '') in ('Completed', 'Unknown', 'In Progress')
         order by
@@ -72,7 +76,7 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
           modified asc
         limit %(limit)s
         """,
-        {"cutoff": cutoff, "wait_cutoff": wait_cutoff, "limit": row_limit},
+        {"cutoff": cutoff, "wait_cutoff": wait_cutoff, "limit": row_limit, "max_attempts": config.max_attempts},
         as_dict=True,
     )
 
@@ -87,153 +91,78 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
     }
 
 
-def process_call_log_recording_transcript(
-    call_log: str,
-    *,
-    force: bool = False,
-    config: RecordingTranscriptionConfig | None = None,
-) -> dict:
+def process_call_log_recording_transcript(call_log: str, *, force: bool = False, config=None) -> dict:
+    """Fetch only Vobiz's existing transcript, with a durable bounded retry budget."""
     if not call_log or not frappe.db.exists("AI Call Log", call_log):
         return {"status": "skipped", "reason": "missing_call_log"}
-    if not _call_log_has_transcript_fields():
-        return {"status": "skipped", "reason": "ai_call_log_transcript_fields_not_migrated"}
-
-    doc = frappe.get_doc("AI Call Log", call_log)
-    if not force and (doc.get("transcript") or doc.get("transcript_summary")):
-        return {"status": "skipped", "reason": "transcript_already_present", "call_log": doc.name}
-
-    recording_url = doc.get("recording_url") or doc.get("external_recording_url")
-    if not recording_url:
-        return {"status": "skipped", "reason": "recording_missing", "call_log": doc.name}
-
     config = config or get_recording_transcription_config()
     if not config.enabled:
-        return {"status": "skipped", "reason": "recording_transcription_fallback_disabled", "call_log": doc.name}
-    try:
-        vobiz_result = fetch_vobiz_transcript_for_call_log(doc)
-        if vobiz_result.get("status") == "success":
-            transcript = str(vobiz_result.get("transcript") or "").strip()
-            summary = str(vobiz_result.get("summary") or transcript[:1000]).strip()
-            payload = _fallback_transcript_payload(doc, transcript, summary)
-            payload["source"] = "vobiz_transcript_pull"
-            payload["vobiz_transcription_id"] = vobiz_result.get("transcription_id")
-            _save_transcript(doc, transcript, summary, payload)
-            record_provider_event(
-                provider="Vobiz",
-                operation="vobiz_transcript_pull",
-                status="Succeeded",
-                company=doc.get("company"),
-                agent=doc.get("agent"),
-                task=doc.get("task"),
-                request={"call_log": doc.name, "call_ids": vobiz_result.get("searched_call_ids")},
-                response={"transcript_chars": len(transcript), "summary": summary},
+        return {"status": "skipped", "reason": "recovery_disabled"}
+    with frappe.cache.lock("transcript-recovery:" + call_log, timeout=600, blocking_timeout=1):
+        doc = frappe.get_doc("AI Call Log", call_log, for_update=True)
+        now = frappe.utils.now_datetime()
+        reason = recovery_wait_reason(doc, config, now)
+        if reason:
+            return {"status": "skipped", "reason": reason, "call_log": call_log}
+        doc.transcript_recovery_attempts = int(doc.transcript_recovery_attempts or 0) + 1
+        doc.transcript_recovery_next_at = frappe.utils.add_to_date(now, minutes=config.retry_minutes)
+        doc.transcript_recovery_status = "Checking Vobiz"
+        doc.save(ignore_permissions=True)
+        frappe.db.commit()
+        try:
+            result = fetch_vobiz_transcript_for_call_log(doc)
+            # A real webhook may have arrived while the HTTP request was in flight.
+            doc.reload()
+            if doc.transcript:
+                return {"status": "skipped", "reason": "transcript_already_present"}
+            if result.get("status") == "success":
+                payload = _fallback_transcript_payload(doc, result["transcript"], result.get("summary"))
+                payload.update(source="vobiz_transcript_pull", attempt=doc.attempt,
+                    transcript=result["transcript"], transcript_labels_normalized=True)
+                from confluence_ai.api.webhook import _process_telephony_receipt
+                from confluence_ai.services.vobiz import handle_callback
+                applied = _process_telephony_receipt("vobiz", payload, handle_callback)
+                doc.reload()
+                doc.transcript_recovery_status = "Recovered" if doc.transcript else "Pending Matching"
+                doc.save(ignore_permissions=True)
+                frappe.db.commit()
+                return {"status": "success" if doc.transcript else "pending_matching", "call_log": call_log, "callback": applied}
+            error = result.get("last_error") or ""
+            doc.transcript_recovery_status = (
+                "Unavailable after recovery checks" if doc.transcript_recovery_attempts >= config.max_attempts
+                else "API error: " + error[:90] if error else "Waiting for Vobiz"
             )
-            callback_result = emit_synthetic_transcript_callback(doc.name, transcript, summary)
-            return {
-                "status": "success",
-                "source": "vobiz_transcript_pull",
-                "call_log": doc.name,
-                "transcript_chars": len(transcript),
-                "callback": callback_result,
-            }
+            if error:
+                create_error("Vobiz Transcript Recovery", error, source="recording_transcription",
+                    task=doc.task, company=doc.company, payload={"call_log": doc.name})
+            doc.save(ignore_permissions=True)
+            frappe.db.commit()
+            return {"status": "skipped", "reason": result.get("reason"), "call_log": call_log}
+        except Exception as exc:
+            frappe.db.rollback()
+            frappe.db.set_value("AI Call Log", call_log, "transcript_recovery_status", "API/processing error: " + str(exc)[:90])
+            create_error("Vobiz Transcript Recovery", str(exc), source="recording_transcription",
+                task=doc.task, company=doc.company, payload={"call_log": call_log}, exc=exc)
+            frappe.db.commit()
+            return {"status": "failed", "call_log": call_log, "error": str(exc)}
 
-        if not _ai_recording_transcription_enabled():
-            return {
-                "status": "skipped",
-                "reason": vobiz_result.get("reason") or "vobiz_transcript_not_ready",
-                "source": "vobiz_transcript_pull",
-                "call_log": doc.name,
-            }
 
-        if not config.api_key:
-            return {"status": "skipped", "reason": "recording_transcription_api_key_missing", "call_log": doc.name}
-
-        audio_bytes, mime_type = fetch_call_recording_audio(doc, max_audio_mb=config.max_audio_mb)
-        transcript = str(transcribe_recording_audio(audio_bytes, mime_type=mime_type, config=config) or "").strip()
-        if not transcript:
-            return {"status": "skipped", "reason": "empty_transcript", "call_log": doc.name}
-
-        summary = transcript[:1000]
-        payload = {
-            "event": "transcription.completed",
-            "source": "ai_recording_transcription_fallback",
-            "provider": config.provider,
-            "model": config.model,
-            "call_log": doc.name,
-            "task": doc.get("task"),
-            "company": doc.get("company"),
-            "CallUUID": doc.get("call_uuid"),
-            "SIPCallID": doc.get("sip_call_id"),
-            "transcript_chars": len(transcript),
-            "summary": summary,
-        }
-
-        _save_transcript(doc, transcript, summary, payload)
-        record_provider_event(
-            provider=config.provider,
-            operation="recording_transcription_fallback",
-            status="Succeeded",
-            company=doc.get("company"),
-            agent=doc.get("agent"),
-            task=doc.get("task"),
-            request={"call_log": doc.name, "model": config.model, "recording_url_present": True},
-            response={"transcript_chars": len(transcript), "summary": summary},
-        )
-        callback_result = emit_synthetic_transcript_callback(doc.name, transcript, summary)
-        return {
-            "status": "success",
-            "call_log": doc.name,
-            "transcript_chars": len(transcript),
-            "callback": callback_result,
-        }
-    except RecordingTranscriptionSkipped as exc:
-        _save_transcription_skip_state(
-            doc.name,
-            {
-                "reason": exc.reason,
-                "message": exc.message,
-                "recording_url_present": bool(recording_url),
-            },
-        )
-        record_provider_event(
-            provider=config.provider,
-            operation="recording_transcription_fallback",
-            status="Skipped",
-            company=doc.get("company"),
-            agent=doc.get("agent"),
-            task=doc.get("task"),
-            request={"call_log": doc.name, "model": config.model, "recording_url_present": True},
-            response={"reason": exc.reason, "message": exc.message},
-        )
-        return {
-            "status": "skipped",
-            "call_log": doc.name,
-            "reason": exc.reason,
-            "message": exc.message,
-        }
-    except Exception as exc:
-        create_error(
-            "Recording Transcription Fallback",
-            str(exc),
-            source="recording_transcription",
-            task=doc.get("task"),
-            agent=doc.get("agent"),
-            company=doc.get("company"),
-            payload={"call_log": doc.name, "recording_url_present": bool(recording_url)},
-            exc=exc,
-        )
-        record_provider_event(
-            provider=config.provider,
-            operation="recording_transcription_fallback",
-            status="Failed",
-            company=doc.get("company"),
-            agent=doc.get("agent"),
-            task=doc.get("task"),
-            request={"call_log": doc.name, "model": config.model, "recording_url_present": True},
-            response={"error": str(exc)[:500]},
-            error=str(exc)[:500],
-        )
-        return {"status": "failed", "call_log": doc.name, "error": str(exc)}
+def recovery_wait_reason(doc, config, now):
+    if doc.get("transcript"):
+        return "transcript_already_present"
+    if not (doc.get("recording_url") or doc.get("external_recording_url")):
+        return "recording_missing"
+    if not doc.get("call_end_received_at") or not doc.get("recording_received_at"):
+        return "waiting_for_call_end_and_recording"
+    if not _vobiz_transcript_call_ids(doc):
+        return "missing_vobiz_call_id"
+    if int(doc.get("transcript_recovery_attempts") or 0) >= config.max_attempts:
+        return "recovery_checks_exhausted"
+    baseline = max(frappe.utils.get_datetime(doc.call_end_received_at), frappe.utils.get_datetime(doc.recording_received_at))
+    due = frappe.utils.add_to_date(baseline, minutes=config.wait_minutes)
+    if doc.get("transcript_recovery_next_at"):
+        due = max(due, frappe.utils.get_datetime(doc.transcript_recovery_next_at))
+    return "grace_or_retry_wait" if now < due else None
 
 
 def enqueue_call_log_recording_transcript(call_log: str | None) -> dict:
@@ -489,6 +418,9 @@ def _vobiz_transcript_call_ids(doc) -> list[str]:
     seen = set()
     for value in candidates:
         text = str(value or "").strip()
+        from confluence_ai.services.call_identity import is_internal_call_id
+        if is_internal_call_id(text):
+            continue
         if not text or text in seen:
             continue
         seen.add(text)
@@ -572,7 +504,7 @@ def get_recording_transcription_config() -> RecordingTranscriptionConfig:
     timeout = int(_settings_value(settings, "recording_transcription_timeout_seconds") or 60)
     lookback_minutes = int(_settings_value(settings, "recording_transcription_lookback_minutes") or DEFAULT_LOOKBACK_MINUTES)
     limit = int(_settings_value(settings, "recording_transcription_limit") or DEFAULT_LIMIT)
-    wait_minutes = int(_settings_value(settings, "recording_transcription_wait_minutes") or DEFAULT_WAIT_MINUTES)
+    wait_minutes = int(_settings_value(settings, "transcript_recovery_grace_minutes") or DEFAULT_WAIT_MINUTES)
     max_audio_mb = int(_settings_value(settings, "recording_transcription_max_audio_mb") or DEFAULT_MAX_AUDIO_MB)
 
     if provider == "OpenAI":
@@ -611,7 +543,7 @@ def get_recording_transcription_config() -> RecordingTranscriptionConfig:
     else:
         api_key = ""
 
-    enabled = _settings_value(settings, "enable_recording_transcription_fallback")
+    enabled = _settings_value(settings, "enable_vobiz_transcript_recovery")
     if enabled in (None, ""):
         enabled = 1
 
@@ -625,7 +557,9 @@ def get_recording_transcription_config() -> RecordingTranscriptionConfig:
         timeout=max(timeout, 10),
         lookback_minutes=max(lookback_minutes, 5),
         limit=max(1, min(limit, 200)),
-        wait_minutes=max(wait_minutes, 0),
+        wait_minutes=max(wait_minutes, 1),
+        retry_minutes=max(1, int(settings.get("transcript_recovery_retry_minutes") or 5)),
+        max_attempts=max(1, min(10, int(settings.get("transcript_recovery_max_checks") or 3))),
         max_audio_mb=max(1, min(max_audio_mb, 100)),
     )
 

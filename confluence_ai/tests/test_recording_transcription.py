@@ -49,177 +49,30 @@ class TestRecordingTranscription(unittest.TestCase):
         self.assertEqual(parts[1]["inline_data"]["mime_type"], "audio/wav")
         self.assertTrue(parts[1]["inline_data"]["data"])
 
-    def test_successful_fallback_saves_transcript_and_queues_disposition(self):
-        class FakeDoc:
-            name = "call-unit"
-            transcript = ""
-            transcript_summary = ""
-            recording_url = "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/call-unit.wav"
-            external_recording_url = recording_url
-            task = "task-unit"
-            company = "globifit"
-            agent = "agent-unit"
-            call_uuid = "call-unit"
-            sip_call_id = "sip-unit"
-            trunk_id = "trunk-unit"
-            flags = SimpleNamespace()
+    def test_missing_call_end_prevents_recovery(self):
+        from confluence_ai.services.recording_transcription import recovery_wait_reason
+        import frappe
+        doc = frappe._dict(recording_url="x", sip_call_id="provider")
+        self.assertEqual(recovery_wait_reason(doc, _config(), frappe.utils.now_datetime()), "waiting_for_call_end_and_recording")
 
-            def get(self, fieldname):
-                return getattr(self, fieldname, None)
+    def test_recovery_budget_is_bounded(self):
+        from confluence_ai.services.recording_transcription import recovery_wait_reason
+        import frappe
+        now = frappe.utils.now_datetime()
+        doc = frappe._dict(recording_url="x", sip_call_id="provider", call_end_received_at=now,
+            recording_received_at=now, transcript_recovery_attempts=3)
+        self.assertEqual(recovery_wait_reason(doc, _config(), now), "recovery_checks_exhausted")
 
-            def save(self, ignore_permissions=False):
-                self.saved = True
-
-        doc = FakeDoc()
-        saved_values = {}
-
-        def set_value(doctype, name, values, update_modified=True):
-            saved_values.update(values)
-            for fieldname, value in values.items():
-                setattr(doc, fieldname, value)
-
-        fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(return_value=True), commit=Mock(), set_value=Mock(side_effect=set_value)),
-            get_doc=Mock(return_value=doc),
-            get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
-        )
-
-        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
-            patch(
-                "confluence_ai.services.recording_transcription.fetch_vobiz_transcript_for_call_log",
-                Mock(return_value={"status": "skipped", "reason": "vobiz_transcript_not_ready"}),
-            ), \
-            patch("confluence_ai.services.recording_transcription._ai_recording_transcription_enabled", Mock(return_value=True)), \
-            patch("confluence_ai.services.recording_transcription.fetch_call_recording_audio", Mock(return_value=(b"audio", "audio/wav"))), \
-            patch("confluence_ai.services.recording_transcription.transcribe_recording_audio", Mock(return_value="[AGENT]: Namaste\n[CUSTOMER]: Hello")), \
-            patch("confluence_ai.services.recording_transcription.emit_synthetic_transcript_callback", Mock(return_value={"status": "success"})) as replay, \
-            patch("confluence_ai.services.recording_transcription.record_provider_event", Mock()):
-            result = recording_transcription.process_call_log_recording_transcript("call-unit", config=_config())
-
-        self.assertEqual(result["status"], "success")
-        self.assertIn("[AGENT]: Namaste", doc.transcript)
-        self.assertEqual(doc.transcript_summary, doc.transcript[:1000])
-        self.assertIn("transcript_payload_json", saved_values)
-        replay.assert_called_once()
-
-    def test_vobiz_transcript_pull_is_used_before_ai_transcription(self):
-        class FakeDoc:
-            name = "call-unit"
-            transcript = ""
-            transcript_summary = ""
-            recording_url = "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/call-unit.wav"
-            external_recording_url = recording_url
-            task = "task-unit"
-            company = "globifit"
-            agent = "agent-unit"
-            call_uuid = "call-unit"
-            sip_call_id = "sip-unit"
-            trunk_id = "trunk-unit"
-
-            def get(self, fieldname):
-                return getattr(self, fieldname, None)
-
-        doc = FakeDoc()
-        saved_values = {}
-
-        def set_value(doctype, name, values, update_modified=True):
-            saved_values.update(values)
-            for fieldname, value in values.items():
-                setattr(doc, fieldname, value)
-
-        fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(return_value=True), commit=Mock(), set_value=Mock(side_effect=set_value)),
-            get_doc=Mock(return_value=doc),
-            get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
-        )
-        download = Mock()
-        transcribe = Mock()
-
-        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
-            patch(
-                "confluence_ai.services.recording_transcription.fetch_vobiz_transcript_for_call_log",
-                Mock(
-                    return_value={
-                        "status": "success",
-                        "transcript": "[AGENT]: Namaste\n[CUSTOMER]: Hello",
-                        "summary": "Vobiz summary",
-                        "transcription_id": "trn-unit",
-                        "searched_call_ids": ["call-unit"],
-                    }
-                ),
-            ), \
-            patch("confluence_ai.services.recording_transcription.fetch_call_recording_audio", download), \
-            patch("confluence_ai.services.recording_transcription.transcribe_recording_audio", transcribe), \
-            patch("confluence_ai.services.recording_transcription.emit_synthetic_transcript_callback", Mock(return_value={"status": "success"})), \
-            patch("confluence_ai.services.recording_transcription.record_provider_event", Mock()):
-            result = recording_transcription.process_call_log_recording_transcript("call-unit", config=_config(api_key=""))
-
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["source"], "vobiz_transcript_pull")
-        self.assertIn("[AGENT]: Namaste", doc.transcript)
-        self.assertEqual(doc.transcript_summary, "Vobiz summary")
-        self.assertIn("vobiz_transcript_pull", saved_values["transcript_payload_json"])
-        download.assert_not_called()
-        transcribe.assert_not_called()
-
-    def test_missing_vobiz_transcript_skips_without_ai_by_default(self):
-        class FakeDoc:
-            name = "call-unit"
-            transcript = ""
-            transcript_summary = ""
-            recording_url = "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/call-unit.wav"
-            external_recording_url = recording_url
-            task = "task-unit"
-            company = "globifit"
-            agent = "agent-unit"
-            call_uuid = "call-unit"
-            sip_call_id = "sip-unit"
-            trunk_id = "trunk-unit"
-
-            def get(self, fieldname):
-                return getattr(self, fieldname, None)
-
-        fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(return_value=True)),
-            get_doc=Mock(return_value=FakeDoc()),
-            get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
-        )
-        transcribe = Mock()
-
-        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe), \
-            patch(
-                "confluence_ai.services.recording_transcription.fetch_vobiz_transcript_for_call_log",
-                Mock(return_value={"status": "skipped", "reason": "vobiz_transcript_not_ready"}),
-            ), \
-            patch("confluence_ai.services.recording_transcription._ai_recording_transcription_enabled", Mock(return_value=False)), \
-            patch("confluence_ai.services.recording_transcription.transcribe_recording_audio", transcribe):
-            result = recording_transcription.process_call_log_recording_transcript("call-unit", config=_config(api_key=""))
-
-        self.assertEqual(result["status"], "skipped")
-        self.assertEqual(result["source"], "vobiz_transcript_pull")
-        self.assertEqual(result["reason"], "vobiz_transcript_not_ready")
-        transcribe.assert_not_called()
+    def test_internal_room_id_is_not_sent_to_vobiz(self):
+        import frappe
+        doc = frappe._dict(call_uuid="agent-army-task-test", sip_call_id="SCL_internal")
+        self.assertEqual(recording_transcription._vobiz_transcript_call_ids(doc), [])
 
     def test_process_skips_when_transcript_already_present(self):
-        class FakeDoc:
-            name = "call-unit"
-            transcript = "already there"
-            transcript_summary = ""
-
-            def get(self, fieldname):
-                return getattr(self, fieldname, None)
-
-        fake_frappe = SimpleNamespace(
-            db=SimpleNamespace(exists=Mock(return_value=True)),
-            get_doc=Mock(return_value=FakeDoc()),
-            get_meta=Mock(return_value=SimpleNamespace(has_field=Mock(return_value=True))),
-        )
-
-        with patch("confluence_ai.services.recording_transcription.frappe", fake_frappe):
-            result = recording_transcription.process_call_log_recording_transcript("call-unit", config=_config())
-
-        self.assertEqual(result["status"], "skipped")
-        self.assertEqual(result["reason"], "transcript_already_present")
+        from confluence_ai.services.recording_transcription import recovery_wait_reason
+        import frappe
+        doc = frappe._dict(transcript="already received")
+        self.assertEqual(recovery_wait_reason(doc, _config(), frappe.utils.now_datetime()), "transcript_already_present")
 
     def test_openai_compatible_config_reuses_existing_summary_key(self):
         class FakeMeta:

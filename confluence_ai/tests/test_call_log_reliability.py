@@ -67,9 +67,9 @@ class TestCallLogReliability(unittest.TestCase):
         self.assertEqual(recording_transcription._select_vobiz_transcription([wrong, correct], "wanted-call"), correct)
 
     def test_unknown_call_id_does_not_match_another_call_by_phone(self):
-        with patch.object(vobiz.frappe.db, "exists", return_value=None), patch.object(vobiz, "_find_existing_call_log_by_phone_window") as nearby:
+        with patch("confluence_ai.services.call_registry.company_for", return_value="unit"), patch.object(vobiz.frappe.db, "exists", return_value=None), patch("confluence_ai.services.call_registry.find_call", return_value=None) as exact:
             self.assertIsNone(vobiz._find_existing_call_log({"call_uuid": "new-call", "To": "9999999999", "From": "8888888888"}))
-            nearby.assert_not_called()
+            exact.assert_called_once()
 
     def test_recording_download_uses_vobiz_media_credentials(self):
         response = Mock(status_code=200, content=b"RIFF-audio")
@@ -89,11 +89,11 @@ class TestCallLogReliability(unittest.TestCase):
         for call in query.call_args_list:
             self.assertNotIn("status", call.kwargs.get("filters", {}))
 
-    def test_initial_callback_can_still_resolve_pending_task(self):
+    def test_initial_callback_without_identity_mapping_stays_pending(self):
         payload = {"TrunkID": "trunk-unit", "CallUUID": "new-call", "event": "CallInitiated"}
         with patch.object(vobiz, "_candidate_livekit_trunk_ids", return_value=["trunk-unit"]), patch.object(vobiz, "_customer_phone_from_payload", return_value="+919999999999"), patch.object(vobiz.frappe, "get_all", return_value=[]), patch.object(vobiz, "_find_repeat_followup_task_by_phone_and_trunk", return_value=("task-unit", "attempt-unit")) as fallback:
-            self.assertEqual(vobiz.find_task_and_attempt(payload), ("task-unit", "attempt-unit"))
-        fallback.assert_called_once_with(["trunk-unit"], "9999999999")
+            self.assertEqual(vobiz.find_task_and_attempt(payload), (None, None))
+        fallback.assert_not_called()
 
     def test_recording_download_does_not_send_secrets_to_other_host(self):
         with patch.object(vobiz.requests, "get") as request:
@@ -136,6 +136,6 @@ class TestCallLogReliability(unittest.TestCase):
         task = SimpleNamespace(name="task-unit", context_json="{}", call_uuid=None, external_record_id="CRM-LEAD-1")
         doc = Mock(name="call-unit")
         fake = SimpleNamespace(db=SimpleNamespace(exists=Mock(return_value=True)), new_doc=Mock(return_value=doc))
-        with patch.object(livekit, "frappe", fake), patch.object(livekit, "_livekit_call_log_name", return_value=None), patch.object(livekit, "_apply_livekit_call_log_payload") as apply:
+        with patch.object(livekit, "frappe", fake), patch("confluence_ai.services.call_registry.resolve_call", return_value=doc), patch("confluence_ai.services.call_registry.register_call"), patch("confluence_ai.services.call_registry.apply_event_state"), patch.object(livekit, "_apply_livekit_call_log_payload") as apply:
             livekit._upsert_livekit_call_log({"room_name": "agent-army-task-unit"}, task)
-        self.assertEqual(apply.call_args.kwargs["call_uuid"], "agent-army-task-unit")
+        self.assertIsNone(apply.call_args.kwargs["call_uuid"])

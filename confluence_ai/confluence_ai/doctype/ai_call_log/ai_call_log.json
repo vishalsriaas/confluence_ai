@@ -5,6 +5,16 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "call_reference",
+  "initiate_event_status",
+  "hangup_event_status",
+  "recording_event_status",
+  "transcript_event_status",
+  "recording_received_at",
+  "call_end_received_at",
+  "transcript_recovery_next_at",
+  "transcript_recovery_attempts",
+  "transcript_recovery_status",
   "company",
   "status",
   "provider",
@@ -50,6 +60,16 @@
   "livekit_diagnostic_timeline_json"
  ],
  "fields": [
+{"fieldname":"call_reference","fieldtype":"Data","label":"Call Reference","unique":1,"read_only":1},
+{"fieldname":"initiate_event_status","fieldtype":"Select","label":"Initiate Event","options":"Not Received\nPending Matching\nApplied\nFailed","default":"Not Received","read_only":1},
+{"fieldname":"hangup_event_status","fieldtype":"Select","label":"Hangup Event","options":"Not Received\nPending Matching\nApplied\nFailed","default":"Not Received","read_only":1},
+{"fieldname":"recording_event_status","fieldtype":"Select","label":"Recording Event","options":"Not Received\nPending Matching\nApplied\nFailed","default":"Not Received","read_only":1},
+{"fieldname":"transcript_event_status","fieldtype":"Select","label":"Transcript Event","options":"Not Received\nPending Matching\nApplied\nFailed","default":"Not Received","read_only":1},
+{"fieldname":"recording_received_at","fieldtype":"Datetime","label":"recording received at","read_only":1},
+{"fieldname":"call_end_received_at","fieldtype":"Datetime","label":"call end received at","read_only":1},
+{"fieldname":"transcript_recovery_next_at","fieldtype":"Datetime","label":"transcript recovery next at","read_only":1},
+{"fieldname":"transcript_recovery_attempts","fieldtype":"Int","label":"Transcript Recovery Checks","read_only":1,"default":"0"},
+{"fieldname":"transcript_recovery_status","fieldtype":"Data","label":"Transcript Recovery Status","read_only":1},
   {
    "fieldname": "company",
    "fieldtype": "Link",

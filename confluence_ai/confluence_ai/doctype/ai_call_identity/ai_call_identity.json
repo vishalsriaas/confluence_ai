@@ -1,0 +1,15 @@
+{
+ "doctype": "DocType",
+ "name": "AI Call Identity",
+ "module": "Confluence AI",
+ "engine": "InnoDB",
+ "field_order": ["company", "identity_kind", "identity_value", "call_log"],
+ "fields": [
+  {"fieldname": "company", "fieldtype": "Link", "options": "AI Company", "label": "Company", "reqd": 1},
+  {"fieldname": "identity_kind", "fieldtype": "Data", "label": "Identity Kind", "reqd": 1},
+  {"fieldname": "identity_value", "fieldtype": "Data", "label": "Identity Value", "reqd": 1},
+  {"fieldname": "call_log", "fieldtype": "Link", "options": "AI Call Log", "label": "Call Log", "reqd": 1}
+ ],
+ "permissions": [{"role": "System Manager", "read": 1}],
+ "indexes": [["call_log"], ["company"]]
+}

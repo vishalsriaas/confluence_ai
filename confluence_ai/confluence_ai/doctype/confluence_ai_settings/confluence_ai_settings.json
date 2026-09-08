@@ -4,6 +4,11 @@
  "custom": 0,
  "doctype": "DocType",
  "field_order": [
+  "transcript_recovery_section",
+  "enable_vobiz_transcript_recovery",
+  "transcript_recovery_grace_minutes",
+  "transcript_recovery_retry_minutes",
+  "transcript_recovery_max_checks",
   "queues_section",
   "ingest_queue",
   "dispatch_queue",
@@ -65,6 +70,11 @@
   "embedding_timeout_seconds"
  ],
  "fields": [
+  {"fieldname":"transcript_recovery_section","fieldtype":"Section Break","label":"Vobiz Transcript Recovery"},
+  {"fieldname":"enable_vobiz_transcript_recovery","fieldtype":"Check","label":"Enable Vobiz Transcript Recovery","default":"1"},
+  {"fieldname":"transcript_recovery_grace_minutes","fieldtype":"Int","label":"Grace Period (Minutes)","default":"5","description":"After both call end and recording receipt. No audio re-transcription."},
+  {"fieldname":"transcript_recovery_retry_minutes","fieldtype":"Int","label":"Recovery Retry Interval (Minutes)","default":"5"},
+  {"fieldname":"transcript_recovery_max_checks","fieldtype":"Int","label":"Maximum Recovery Checks","default":"3"},
   {
    "fieldname": "queues_section",
    "fieldtype": "Section Break",

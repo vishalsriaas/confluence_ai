@@ -152,26 +152,10 @@ class TestVobizTranscript(unittest.TestCase):
         self.assertEqual(vobiz._phone_suffix("+91 98730 90386"), "9873090386")
         self.assertIsNone(vobiz._phone_suffix(None))
 
-    def test_recording_backfill_matches_existing_call_log_by_phone_and_time(self):
-        payload = {
-            "company": "globifit",
-            "Direction": "Inbound",
-            "from_number": "00919035019329",
-            "to_number": "00919262175574",
-            "started_at": "2026-09-03 15:40:16.925828+05:30",
-        }
-        fake_frappe = SimpleNamespace(
-            utils=SimpleNamespace(add_to_date=Mock(side_effect=["start", "end"])),
-            db=SimpleNamespace(sql=Mock(return_value=[SimpleNamespace(name="call-existing")])),
-        )
-
-        with patch("confluence_ai.services.vobiz.frappe", fake_frappe):
-            result = vobiz._find_existing_call_log_by_phone_window(payload)
-
-        self.assertEqual(result, "call-existing")
-        params = fake_frappe.db.sql.call_args.args[1]
-        self.assertEqual(params["suffix_like"], "%9035019329")
-        self.assertEqual(params["company"], "globifit")
+    def test_recording_backfill_does_not_match_by_phone_and_time(self):
+        payload = {"company": "globifit", "From": "00919035019329", "started_at": "2026-09-03 15:40:16"}
+        with patch("confluence_ai.services.call_registry.company_for", return_value="globifit"):
+            self.assertIsNone(vobiz._find_existing_call_log(payload))
 
     def test_recording_backfill_clears_missing_transcript_fallback_disposition(self):
         class FakeCallLog:
@@ -318,7 +302,10 @@ class TestVobizTranscript(unittest.TestCase):
         }
 
         with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
-            patch("confluence_ai.services.vobiz._candidate_channel_accounts", Mock(return_value=[])):
+            patch("confluence_ai.services.vobiz._candidate_channel_accounts", Mock(return_value=[])), \
+            patch("confluence_ai.services.call_registry.resolve_call", return_value=existing_doc), \
+            patch("confluence_ai.services.call_registry.register_call"), \
+            patch("confluence_ai.services.call_registry.apply_event_state"):
             result = vobiz.upsert_call_log(payload, task=task, attempt=attempt)
 
         self.assertEqual(result, "call-existing")
@@ -343,6 +330,6 @@ class TestVobizTranscript(unittest.TestCase):
             patch("confluence_ai.services.vobiz.record_provider_event", provider_event):
             result = vobiz.handle_callback({"event": "recording.completed", "company": "globifit"})
 
-        self.assertEqual(result["status"], "logged_without_task")
+        self.assertEqual(result["status"], "pending_matching")
         self.assertEqual(result["call_log"], "call-unit")
         provider_event.assert_called_once()

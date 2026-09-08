@@ -491,9 +491,11 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
     api_key = account.get_password("api_key")
     api_secret = account.get_password("api_secret")
 
-    room_name = f"agent-army-{task.name}"
+    room_name = payload.get("room_name") or f"agent-army-{task.name}"
 
     metadata = build_voice_metadata(task.name, payload)
+    metadata["context"]["attempt"] = payload.get("attempt")
+    metadata["attempt"] = payload.get("attempt")
     if operation == "outbound_call":
         metadata["context"]["direction"] = "Outbound"
     metadata_str = json.dumps(metadata)
@@ -726,19 +728,20 @@ def handle_callback(payload: dict) -> dict:
             title="LiveKit callback match failed",
             message=f"Could not find matching AI Task or AI Task Attempt for payload: {json.dumps(payload, default=str)}",
         )
-        return {"status": "error", "message": "No matching task or attempt found"}
+        return {"status": "pending_matching", "message": "No exact call attempt found"}
 
     # 2. Get the documents
-    task = frappe.get_doc("AI Task", task_name)
+    task = frappe.get_doc("AI Task", task_name, for_update=True)
+    previous_task_status = task.status
+    payload = {**payload, "attempt": attempt_name}
     if payload.get("identity_source") == "sip.callIDFull":
         from confluence_ai.services.call_identity import bind_provider_identity
 
         bound_call = bind_provider_identity(task, payload)
-        frappe.db.commit()
         task.reload()
         if payload.get("event") == "call_identity":
             return {"status": "success", "task": task.name, "call_log": bound_call}
-    attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
+    attempt = frappe.get_doc("AI Task Attempt", attempt_name, for_update=True) if attempt_name else None
     if not attempt:
         latest_attempts = frappe.get_all(
             "AI Task Attempt",
@@ -747,7 +750,13 @@ def handle_callback(payload: dict) -> dict:
             limit=1,
         )
         if latest_attempts:
-            attempt = frappe.get_doc("AI Task Attempt", latest_attempts[0].name)
+            attempt = frappe.get_doc("AI Task Attempt", latest_attempts[0].name, for_update=True)
+
+    previous_attempt_status = attempt.status if attempt else None
+    latest = frappe.get_all("AI Task Attempt", filters={"task": task.name}, order_by="creation desc", pluck="name", limit=1)
+    if attempt and latest and latest[0] != attempt.name:
+        name = _upsert_livekit_call_log(payload, task, attempt)
+        return {"status": "success", "call_log": name, "task": task.name, "attempt": attempt.name, "reason": "historical_attempt"}
 
     # 3. Determine the type of event and process accordingly
     event_type = payload.get("event") or payload.get("event_type") or "status_update"
@@ -780,6 +789,8 @@ def handle_callback(payload: dict) -> dict:
             )
 
     call_log = _upsert_livekit_call_log(payload, task, attempt, diagnostics_enabled=diagnostics_enabled)
+    if not call_log:
+        return {"status": "pending_matching", "task": task.name, "reason": "call_log_not_resolved"}
 
     # Update statuses
     if event_type_lower in {"room_started", "participant_joined", "initiated"}:
@@ -812,25 +823,17 @@ def handle_callback(payload: dict) -> dict:
                 from confluence_ai.services.utils import now
                 attempt.ended_at = now()
 
-        # Update duration if available
-        duration = payload.get("duration") or payload.get("duration_ms") or payload.get("Duration")
-        if duration is not None:
-            try:
-                val = float(duration)
-                if "ms" in str(duration).lower() or val > 5000:
-                    duration_ms = int(val)
-                    duration_sec = int(val / 1000)
-                else:
-                    duration_sec = int(val)
-                    duration_ms = int(val * 1000)
-                
+        from confluence_ai.services.call_registry import duration_seconds
+        try:
+            seconds = duration_seconds(payload)
+            if seconds is not None:
                 if attempt:
-                    attempt.duration_ms = duration_ms
-                    attempt.duration = duration_sec
-                task_result["duration_ms"] = duration_ms
-                task.duration = duration_sec
-            except (ValueError, TypeError):
-                pass
+                    attempt.duration_ms = int(seconds * 1000)
+                    attempt.duration = int(seconds)
+                task_result["duration_ms"] = int(seconds * 1000)
+                task.duration = int(seconds)
+        except (ValueError, TypeError):
+            pass
 
         # Update transcript if available
         transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
@@ -864,6 +867,10 @@ def handle_callback(payload: dict) -> dict:
             attempt.call_uuid = call_uuid
 
     # Save updates
+    if previous_task_status in {"Completed", "Failed", "Cancelled"} and task.status == "Running":
+        task.status = previous_task_status
+    if attempt and previous_attempt_status in {"Succeeded", "Failed", "Cancelled"} and attempt.status == "Started":
+        attempt.status = previous_attempt_status
     task.result_json = as_json(task_result)
     task.save(ignore_permissions=True)
 
@@ -871,7 +878,6 @@ def handle_callback(payload: dict) -> dict:
         attempt.response_json = as_json(attempt_response)
         attempt.save(ignore_permissions=True)
 
-    frappe.db.commit()
     disposition_result = _enqueue_call_disposition_if_ready(call_log, event_type_lower)
     order_confirmation_result = _handle_order_confirmation_callback(task, payload, event_type_lower)
     repeat_followup_result = _handle_repeat_followup_callback(task, payload, event_type_lower)
@@ -1057,7 +1063,7 @@ def _apply_livekit_call_log_payload(
 
     doc.provider = "LiveKit"
     doc.event_type = livekit_event
-    doc.direction = payload.get("direction") or context.get("direction") or doc.direction or "Inbound"
+    doc.direction = payload.get("direction") or context.get("direction") or doc.direction
     doc.agent = task.assigned_agent or task.target_agent or doc.agent
     doc.task = task.name
     doc.company = task.company or doc.company
@@ -1067,33 +1073,20 @@ def _apply_livekit_call_log_payload(
         doc.attempt = attempt.name
         doc.company = doc.company or attempt.company
     doc.customer_name = context.get("customer_name") or context.get("patient_name") or doc.customer_name
+    outbound = str(doc.direction).lower() == "outbound"
     doc.customer_phone = call_phone(
-        payload.get("caller_phone")
-        or payload.get("from")
-        or context.get("customer_phone")
-        or context.get("phone")
-        or doc.customer_phone, doc.customer_phone
-    )
-    doc.from_number = (
-        payload.get("from")
-        or payload.get("caller_phone")
-        or context.get("customer_phone")
-        or context.get("phone")
-        or doc.from_number
-    )
-    doc.to_number = (
-        payload.get("to")
-        or payload.get("called_number")
-        or context.get("called_number")
-        or context.get("inbound_phone_number")
-        or context.get("outbound_phone_number")
-        or doc.to_number
-    )
-    doc.from_number = call_phone(doc.from_number)
-    doc.to_number = call_phone(doc.to_number)
+        payload.get("caller_phone") or (payload.get("to") if outbound else payload.get("from"))
+        or context.get("customer_phone") or context.get("phone") or doc.customer_phone, doc.customer_phone)
+    doc.from_number = call_phone(
+        payload.get("from") or (context.get("outbound_phone_number") if outbound else
+        payload.get("caller_phone") or context.get("customer_phone") or context.get("phone")) or doc.from_number)
+    doc.to_number = call_phone(
+        payload.get("to") or (doc.customer_phone if outbound else
+        payload.get("called_number") or context.get("called_number") or context.get("inbound_phone_number"))
+        or doc.to_number)
     if not doc.call_uuid or (is_internal_call_id(doc.call_uuid) and call_uuid and not is_internal_call_id(call_uuid)):
         doc.call_uuid = call_uuid
-    candidate_sip = payload.get("sip_call_id") or payload.get("room_name") or payload.get("room")
+    candidate_sip = payload.get("sip_call_id")
     if not doc.sip_call_id or (is_internal_call_id(doc.sip_call_id) and candidate_sip and not is_internal_call_id(candidate_sip)):
         doc.sip_call_id = candidate_sip
     doc.trunk_id = payload.get("trunk_id") or context.get("trunk_id") or task.trunk_id or doc.trunk_id
@@ -1131,13 +1124,13 @@ def _apply_livekit_call_log_payload(
         doc.started_at = payload.get("started_at") or doc.started_at
         doc.ended_at = payload.get("ended_at") or doc.ended_at or now()
 
-    duration = payload.get("duration_sec") or payload.get("duration") or payload.get("duration_ms")
-    if duration is not None:
-        try:
-            value = float(duration)
-            doc.duration_sec = int(value / 1000) if value > 5000 else int(value)
-        except (TypeError, ValueError):
-            pass
+    from confluence_ai.services.call_registry import duration_seconds
+    try:
+        seconds = duration_seconds(payload)
+        if seconds is not None:
+            doc.duration_sec = int(seconds)
+    except (ValueError, TypeError):
+        pass
 
     transcript = payload.get("transcript") or payload.get("text") or payload.get("transcript_text")
     if transcript:
@@ -1161,17 +1154,15 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
         context = parse_json_object(task.context_json)
         livekit_event = payload.get("event") or payload.get("event_type") or payload.get("status") or "status_update"
         event_type_lower = str(livekit_event or "").lower()
-        call_uuid = (
-            payload.get("call_uuid")
-            or payload.get("CallUUID")
-            or task.call_uuid
-            or payload.get("room_name")
-            or payload.get("room")
-        )
+        call_uuid = payload.get("CallUUID") or payload.get("call_uuid")
+        if is_internal_call_id(call_uuid):
+            call_uuid = None
 
         for save_attempt in range(3):
-            existing = _livekit_call_log_name(payload, task, call_uuid)
-            doc = frappe.get_doc("AI Call Log", existing, for_update=True) if existing else frappe.new_doc("AI Call Log")
+            from confluence_ai.services.call_registry import resolve_call, register_call, apply_event_state
+            doc = resolve_call(payload, task, attempt)
+            if doc is None:
+                return None
             _apply_livekit_call_log_payload(
                 doc,
                 payload,
@@ -1184,7 +1175,9 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
                 call_uuid=call_uuid,
             )
             try:
+                apply_event_state(doc, payload)
                 doc.save(ignore_permissions=True)
+                register_call(doc, payload)
                 return doc.name
             except TimestampMismatchError:
                 if hasattr(frappe, "clear_messages"):
@@ -1193,7 +1186,7 @@ def _upsert_livekit_call_log(payload: dict, task, attempt=None, diagnostics_enab
                     raise
     except Exception as exc:
         create_error("LiveKit Call Log", str(exc), source="livekit", task=task.name, exc=exc)
-    return None
+        raise
 
 
 def _enqueue_call_disposition_if_ready(call_log: str | None, event_type_lower: str) -> dict | None:

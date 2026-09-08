@@ -57,8 +57,9 @@ class TestLiveKit(unittest.TestCase):
         get_doc = Mock(side_effect=[first_doc, second_doc])
 
         with patch("confluence_ai.services.livekit.frappe.db", fake_db), \
-            patch("confluence_ai.services.livekit._livekit_call_log_name", Mock(return_value="call-unit")), \
-            patch("confluence_ai.services.livekit.frappe.get_doc", get_doc), \
+            patch("confluence_ai.services.call_registry.resolve_call", get_doc), \
+            patch("confluence_ai.services.call_registry.register_call"), \
+            patch("confluence_ai.services.call_registry.apply_event_state"), \
             patch("confluence_ai.services.livekit.create_error") as create_error, \
             patch("confluence_ai.services.livekit.frappe.clear_messages", Mock()):
             _upsert_livekit_call_log(

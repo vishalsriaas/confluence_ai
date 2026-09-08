@@ -27,12 +27,41 @@ def call_phone(value, existing=None):
 
 
 def bind_provider_identity(task, payload: dict) -> str | None:
+    from confluence_ai.services.call_registry import resolve_call, register_call
+    provider_id = str(payload.get("sip_call_id") or "").strip()
+    if payload.get("identity_source") not in {"sip.callIDFull", "vobiz.SIPCallID"} or not provider_id or is_internal_call_id(provider_id):
+        return None
+    doc = resolve_call(payload, task)
+    if not doc:
+        return None
+    if doc.sip_call_id and not is_internal_call_id(doc.sip_call_id) and doc.sip_call_id != provider_id:
+        frappe.throw("Attempt is already linked to another provider identity.")
+    doc.sip_call_id = provider_id
+    if is_internal_call_id(doc.call_uuid):
+        doc.call_uuid = None
+    doc.direction = payload.get("direction") or doc.direction
+    doc.save(ignore_permissions=True)
+    register_call(doc, payload)
+    return doc.name
+
+
+def merge_legacy_provider_identity(task, payload: dict) -> str | None:
+    """Explicit audited repair only. Never called by normal webhook processing."""
     provider_id = str(payload.get("sip_call_id") or "").strip()
     if payload.get("identity_source") not in {"sip.callIDFull", "vobiz.SIPCallID"} or not provider_id or is_internal_call_id(provider_id):
         return None
     frappe.db.get_value("AI Company", task.company, "name", for_update=True)
     frappe.db.get_value("AI Task", task.name, "name", for_update=True)
-    canonical = frappe.db.get_value("AI Call Log", {"task": task.name}, "name", for_update=True)
+    from confluence_ai.services.call_registry import exact_attempt
+    attempt = exact_attempt(task, payload)
+    if not attempt:
+        frappe.throw("Exact attempt required for legacy repair.")
+    canonical = frappe.db.get_value("AI Call Log", {"attempt": attempt.name}, "name", for_update=True)
+    if not canonical:
+        candidates = frappe.get_all("AI Call Log", filters={"task": task.name, "attempt": ["is", "not set"]}, pluck="name", limit=2)
+        if len(candidates) > 1:
+            frappe.throw("Multiple legacy rows require explicit review.")
+        canonical = candidates[0] if candidates else None
     rows = frappe.db.sql(
         """select name from `tabAI Call Log`
         where company=%s and (sip_call_id=%s or call_uuid=%s)
@@ -51,9 +80,7 @@ def bind_provider_identity(task, payload: dict) -> str | None:
     target.task = task.name
     target.company = task.company
     target.agent = task.assigned_agent or task.target_agent
-    if not target.attempt:
-        attempts = frappe.get_all("AI Task Attempt", filters={"task": task.name}, order_by="creation desc", limit=1, pluck="name")
-        target.attempt = attempts[0] if attempts else None
+    target.attempt = attempt.name
     target.sip_call_id = provider_id
     if not target.call_uuid or is_internal_call_id(target.call_uuid):
         target.call_uuid = provider_id
@@ -75,6 +102,7 @@ def bind_provider_identity(task, payload: dict) -> str | None:
             merged_uuid = source.call_uuid
         for field in fields:
             provider_payload = source.provider == "Vobiz" and field in {
+                "from_number", "to_number", "started_at", "ended_at", "duration_sec",
                 "initiated_payload_json", "status_payload_json", "recording_payload_json", "transcript_payload_json",
             }
             if source.get(field) not in (None, "", "{}") and (provider_payload or target.get(field) in (None, "", "{}")):

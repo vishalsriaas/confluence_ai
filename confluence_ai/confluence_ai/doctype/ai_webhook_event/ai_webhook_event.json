@@ -4,6 +4,8 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "event_key",
+  "identity_keys_json",
   "company",
   "status",
   "direction",
@@ -17,6 +19,8 @@
   "error_message"
  ],
  "fields": [
+  {"fieldname":"event_key","fieldtype":"Data","label":"Event Key","unique":1,"read_only":1},
+  {"fieldname":"identity_keys_json","fieldtype":"Code","options":"JSON","label":"Call Identity Keys","read_only":1},
   {
    "fieldname": "company",
    "fieldtype": "Link",
@@ -31,7 +35,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Queued\nProcessed\nFailed\nIgnored"
+   "options": "Queued\nPending Matching\nProcessed\nFailed\nIgnored"
   },
   {
    "default": "Inbound",

@@ -68,6 +68,10 @@ def execute_task(task_name: str) -> dict:
     try:
         payload = parse_json_object(task.context_json, "Task Context JSON")
         payload = _prepare_voice_start_context(task, payload)
+        if task.channel == "Voice":
+            from confluence_ai.services.call_registry import reserve_call
+            payload.update(reserve_call(task, attempt, payload))
+            frappe.db.commit()
         if task.channel == "Voice" and attempt.request_json != task.context_json:
             attempt.request_json = task.context_json
             attempt.save(ignore_permissions=True)
@@ -79,6 +83,7 @@ def execute_task(task_name: str) -> dict:
 
         if task.channel == "Voice":
             _apply_voice_dispatch_result(task, attempt, result)
+            _register_voice_dispatch_identity(task, attempt, result)
             task.save(ignore_permissions=True)
             attempt.save(ignore_permissions=True)
         else:
@@ -135,6 +140,18 @@ def _apply_voice_dispatch_result(task, attempt, result: dict) -> None:
         task.call_uuid = task.call_uuid or result["sip_call_id"]
         attempt.call_uuid = attempt.call_uuid or result["sip_call_id"]
     attempt.external_id = attempt.external_id or result.get("sip_call_sid") or result.get("room_sid")
+
+
+def _register_voice_dispatch_identity(task, attempt, result):
+    if not result.get("sip_call_id"):
+        return
+    from confluence_ai.services.call_identity import bind_provider_identity
+    name = bind_provider_identity(task, {"sip_call_id": result["sip_call_id"],
+        "identity_source": "sip.callIDFull", "attempt": attempt.name,
+        "room_name": result.get("room_name"), "direction": "Outbound"})
+    if name:
+        frappe.enqueue("confluence_ai.api.webhook.replay_pending_receipts",
+            call_log=name, enqueue_after_commit=True)
 
 
 def _run_channel(task, payload: dict) -> dict:

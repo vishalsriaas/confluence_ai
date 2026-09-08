@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import frappe
+import hashlib
+import json
 
 from confluence_ai.services import livekit, whatsapp_bridge, vobiz
 from confluence_ai.services import event_router
@@ -130,22 +132,88 @@ def _is_order_confirmation_payload(payload: dict) -> bool:
 
 
 def _process_telephony_receipt(source: str, payload: dict, handler) -> dict:
-    event = _record_inbound(source, payload)
-    # Persist receipt before processing: a later exception must not erase evidence.
-    frappe.db.commit()
+    event_key = hashlib.sha256(json.dumps([source, payload], sort_keys=True, default=str).encode()).hexdigest()
+    with frappe.cache.lock("call-receipt:" + event_key, timeout=180, blocking_timeout=10):
+        event = frappe.db.get_value("AI Webhook Event", {"event_key": event_key}, "name")
+        if not event:
+            event = _record_inbound(source, payload)
+            frappe.db.set_value("AI Webhook Event", event, "event_key", event_key)
+            frappe.db.commit()
+        elif frappe.db.get_value("AI Webhook Event", event, "status") == "Processed":
+            return {"status": "duplicate", "webhook_event": event}
+        try:
+            from confluence_ai.services.call_registry import aliases, company_for, identity_key
+            task_name = payload.get("task") or payload.get("task_name")
+            task = frappe.get_doc("AI Task", task_name) if task_name and frappe.db.exists("AI Task", task_name) else None
+            company = company_for(payload, task)
+            keys = [identity_key(company, kind, value) for kind, value in aliases(payload)] if company else []
+            frappe.db.set_value("AI Webhook Event", event, {
+                "event_key": event_key, "company": company, "identity_keys_json": as_json(keys),
+            })
+            frappe.db.commit()
+            received = frappe.db.get_value("AI Webhook Event", event, "creation")
+            result = handler({**payload, "_received_at": str(received)})
+            if result.get("status") == "pending_matching":
+                from confluence_ai.services.call_registry import record_receipt_state
+                record_receipt_state(payload, company, "Pending Matching")
+            _mark_webhook_processed(event, result)
+            frappe.db.commit()
+        except Exception as exc:
+            frappe.db.rollback()
+            frappe.db.set_value("AI Webhook Event", event, {
+                "status": "Failed", "error_message": str(exc)[:500],
+                "response_json": as_json({"error": str(exc)}),
+            })
+            try:
+                from confluence_ai.services.call_registry import record_receipt_state
+                record_receipt_state(payload, frappe.db.get_value("AI Webhook Event", event, "company"), "Failed")
+            except Exception:
+                frappe.db.rollback()
+                frappe.db.set_value("AI Webhook Event", event, {
+                    "status": "Failed", "error_message": str(exc)[:500],
+                    "response_json": as_json({"error": str(exc)}),
+                })
+            from confluence_ai.services.utils import create_error
+            create_error("Call Webhook Processing", str(exc), source=source,
+                task=payload.get("task"), payload={"webhook_event": event}, exc=exc)
+            frappe.db.commit()
+            raise
+    if result.get("call_log") and not getattr(frappe.flags, "replaying_call_receipts", False):
+        replay_pending_receipts(result["call_log"])
+    elif result.get("status") == "pending_matching" and not getattr(frappe.flags, "retrying_call_identity", False):
+        # The identity transaction may have committed while this receipt was waiting.
+        from confluence_ai.services.call_registry import find_call
+        matched = find_call(payload, company)
+        if matched and frappe.db.get_value("AI Call Log", matched, "attempt"):
+            frappe.flags.retrying_call_identity = True
+            try:
+                return _process_telephony_receipt(source, payload, handler)
+            finally:
+                frappe.flags.retrying_call_identity = False
+    return result
+
+
+def replay_pending_receipts(call_log):
+    """Triggered by an identity-bearing event; no additional polling job."""
+    keys = set(frappe.get_all("AI Call Identity", filters={"call_log": call_log}, pluck="name"))
+    company = frappe.db.get_value("AI Call Log", call_log, "company")
+    if not keys or not company:
+        return
+    rows = frappe.get_all("AI Webhook Event", filters={"company": company, "status": "Pending Matching"},
+        fields=["name", "source", "payload_json", "identity_keys_json"], order_by="creation asc")
+    frappe.flags.replaying_call_receipts = True
     try:
-        result = handler(payload)
-        _mark_webhook_processed(event, result)
-        frappe.db.commit()
-        return result
-    except Exception as exc:
-        frappe.db.rollback()
-        frappe.db.set_value("AI Webhook Event", event, {
-            "status": "Failed", "error_message": str(exc)[:500],
-            "response_json": as_json({"error": str(exc)}),
-        })
-        frappe.db.commit()
-        raise
+        for row in rows:
+            if not keys.intersection(json.loads(row.identity_keys_json or "[]")):
+                continue
+            handler = vobiz.handle_callback if row.source == "vobiz" else livekit.handle_callback
+            try:
+                _process_telephony_receipt(row.source, json.loads(row.payload_json), handler)
+            except Exception:
+                # The failed receipt is durable; do not lose the other pending events.
+                frappe.log_error(title="Call receipt replay failed", message=frappe.get_traceback())
+    finally:
+        frappe.flags.replaying_call_receipts = False
 
 
 def _record_inbound(source: str, payload: dict) -> str:
@@ -170,6 +238,10 @@ def _record_inbound(source: str, payload: dict) -> str:
 
 def _mark_webhook_processed(webhook_event: str, result: dict) -> None:
     values = {"status": "Processed", "response_json": as_json(result)}
+    if result.get("status") == "pending_matching":
+        values["status"] = "Pending Matching"
+    elif result.get("status") in {"error", "failed"}:
+        values["status"] = "Failed"
     if isinstance(result, dict):
         if result.get("task") and frappe.db.exists("AI Task", result.get("task")):
             values["task"] = result.get("task")
