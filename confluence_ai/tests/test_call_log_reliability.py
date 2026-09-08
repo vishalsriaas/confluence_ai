@@ -12,9 +12,12 @@ from confluence_ai.services import call_disposition, executor, livekit, recordin
 
 class TestCallLogReliability(unittest.TestCase):
     def test_outbound_identity_uses_provider_id_not_livekit_sid(self):
-        participant = SimpleNamespace(attributes={"sip.callID": "SCL_internal", "sip.callIDFull": "provider-full-id"})
+        participant = SimpleNamespace(identity="sip-unit", sid="PA_unit", attributes={"sip.callID": "SCL_internal", "sip.callIDFull": "provider-full-id"})
         room = SimpleNamespace(get_participant=AsyncMock(return_value=participant))
-        value = asyncio.run(livekit._outbound_provider_call_id(SimpleNamespace(room=room), "room-unit", "sip-unit"))
+        value = asyncio.run(livekit._outbound_provider_call_id(
+            SimpleNamespace(room=room), "room-unit", "sip-unit",
+            participant_sid="PA_unit", sip_call_sid="SCL_internal", diagnostics={},
+        ))
         self.assertEqual(value, "provider-full-id")
         request = room.get_participant.call_args.args[0]
         self.assertEqual(request.room, "room-unit")
@@ -22,7 +25,13 @@ class TestCallLogReliability(unittest.TestCase):
 
     def test_departed_participant_does_not_fail_successful_dispatch(self):
         room = SimpleNamespace(get_participant=AsyncMock(side_effect=RuntimeError("not found")))
-        self.assertIsNone(asyncio.run(livekit._outbound_provider_call_id(SimpleNamespace(room=room), "room-unit", "sip-unit")))
+        diagnostics = {}
+        with patch.object(livekit.asyncio, "sleep", AsyncMock()):
+            self.assertIsNone(asyncio.run(livekit._outbound_provider_call_id(
+                SimpleNamespace(room=room), "room-unit", "sip-unit",
+                participant_sid="PA_unit", sip_call_sid="SCL_internal", diagnostics=diagnostics,
+            )))
+        self.assertEqual(diagnostics, {"checks": 5, "reason": "lookup_RuntimeError"})
 
     def test_dispatch_result_persists_provider_identity(self):
         task = frappe._dict(status="Queued", result_json="{}", call_uuid=None)

@@ -308,16 +308,41 @@ def start_voice_task(task_name: str, payload: dict) -> dict:
     return asyncio.run(_start_voice_task_async(task_name, payload))
 
 
-async def _outbound_provider_call_id(lkapi, room_name: str, identity: str) -> str | None:
-    try:
-        participant = await asyncio.wait_for(
-            lkapi.room.get_participant(proto_room.RoomParticipantIdentity(room=room_name, identity=identity)),
-            timeout=3,
-        )
-        return participant.attributes.get("sip.callIDFull") or None
-    except Exception:
-        # An unanswered/disconnected participant may already have left the room.
-        return None
+async def _outbound_provider_call_id(
+    lkapi, room_name: str, identity: str, *, participant_sid: str,
+    sip_call_sid: str, diagnostics: dict,
+) -> str | None:
+    # The SIP participant may not be visible immediately after create returns.
+    # Bound this lookup; it must never redial, guess by phone, or fail the voice task.
+    for index in range(5):
+        diagnostics["checks"] = index + 1
+        try:
+            participant = await asyncio.wait_for(
+                lkapi.room.get_participant(proto_room.RoomParticipantIdentity(room=room_name, identity=identity)),
+                timeout=2,
+            )
+            attrs = participant.attributes
+            if (
+                participant.identity != identity
+                or (participant_sid and participant.sid != participant_sid)
+                or (attrs.get("sip.callID") and attrs["sip.callID"] != sip_call_sid)
+            ):
+                diagnostics["reason"] = "participant_identity_mismatch"
+                return None
+            provider_id = str(attrs.get("sip.callIDFull") or "").strip()
+            if provider_id and not is_internal_call_id(provider_id):
+                diagnostics["reason"] = "captured"
+                return provider_id
+            diagnostics["reason"] = "provider_call_id_missing"
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            diagnostics["reason"] = "lookup_" + str(code or type(exc).__name__)
+            # Do not retry bad credentials/requests, or expose SDK error payloads.
+            if code in {"unauthenticated", "permission_denied", "invalid_argument"}:
+                return None
+        if index < 4:
+            await asyncio.sleep(1)
+    return None
 
 
 def _normalize_phone(value: object) -> str | None:
@@ -568,10 +593,23 @@ async def _start_voice_task_async(task_name: str, payload: dict) -> dict:
         result_payload["dispatch_id"] = dispatch_info.id
         result_payload["livekit_agent_name"] = livekit_agent_name
         if operation == "outbound_call":
-            provider_call_id = await _outbound_provider_call_id(lkapi, room_name, result_payload["participant_identity"])
+            identity_diagnostics = {}
+            provider_call_id = await _outbound_provider_call_id(
+                lkapi, room_name, result_payload["participant_identity"],
+                participant_sid=sip_info.participant_id,
+                sip_call_sid=sip_info.sip_call_id, diagnostics=identity_diagnostics,
+            )
             if provider_call_id:
                 result_payload["sip_call_id"] = provider_call_id
             result_payload["call_identity_status"] = "captured" if provider_call_id else "unavailable"
+            result_payload["call_identity_lookup"] = identity_diagnostics
+            if not provider_call_id:
+                create_error(
+                    "Call Identity", "Provider SIP ID was not captured: " + identity_diagnostics["reason"],
+                    source="livekit_connector", task=task.name, agent=agent_name,
+                    payload={"attempt": payload.get("attempt"), "room_name": room_name,
+                             "sip_call_sid": sip_info.sip_call_id, **identity_diagnostics},
+                )
 
         record_provider_event(
             provider=account.provider_type or "LiveKit",

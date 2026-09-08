@@ -91,6 +91,31 @@ class TestCallRegistry(unittest.TestCase):
         self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 1)
         self.assertEqual(frappe.db.count("AI Webhook Event", {"company": self.company, "status": "Pending Matching"}), 0)
 
+    def test_backend_dispatch_identity_matches_callbacks_without_worker_identity_event(self):
+        from confluence_ai.services.executor import _register_voice_dispatch_identity
+        reserved = self.reserve()
+        for event in ("initiated", "hangup", "recording", "transcript"):
+            webhook._process_telephony_receipt("vobiz", self.payload(event), vobiz.handle_callback)
+        with patch("frappe.enqueue") as enqueue:
+            _register_voice_dispatch_identity(self.task, self.attempt, {
+                "sip_call_id": self.payload("hangup")["SIPCallID"], "room_name": reserved["room_name"],
+            })
+        enqueue.assert_called_once()
+        name = enqueue.call_args.kwargs["call_log"]
+        self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+        frappe.db.commit()
+        webhook.replay_pending_receipts(name)
+        result = webhook._process_telephony_receipt("livekit", {
+            "task": self.task.name, "room_name": reserved["room_name"],
+            "event": "call_ended", "status": "completed",
+        }, livekit.handle_callback)
+        self.assertEqual(result["call_log"], name)
+        doc = frappe.get_doc("AI Call Log", name)
+        self.assertTrue(doc.transcript)
+        self.assertTrue(doc.recording_url)
+        self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 1)
+        self.assertEqual(frappe.db.count("AI Webhook Event", {"company": self.company, "status": "Pending Matching"}), 0)
+
     def test_all_24_event_orders_with_duplicate_receipts(self):
         for index, order in enumerate(permutations(("initiated", "hangup", "recording", "transcript"))):
             attempt = self.attempt if index == 0 else self.new_attempt()

@@ -123,11 +123,11 @@ duplicate receipts, concurrent callbacks, delayed identity, legacy repair,
 same-number separate attempts, cross-company rejection, recovery timing/limits,
 late transcript arrival, and adjacent follow-up/disposition behavior.
 
-Worker verification:
+Worker syntax verification (identity-reporting changes were reverted):
 
 ```sh
 cd "/home/confluence frappe 15"
-.venv-livekit-local/bin/python -m unittest discover -s tests -p test_provider_call_identity.py
+.venv-livekit-local/bin/python -m py_compile good-agent.py
 ```
 
 This is not a live SIP/provider delivery test or proof that every product feature
@@ -139,9 +139,9 @@ No cloud deployment or live historical merge was performed in this change.
 
 1. Back up the live database before migration. Deploy Confluence with the new
    AI Call Identity DocType, Call Log/Webhook fields, settings, and initializer patch.
-2. Deploy the reviewed LiveKit worker identity-reporting code. Do not deploy an
-   older worker that omits sip.callIDFull. Review other pre-existing local worker
-   changes separately rather than assuming they belong to this change.
+2. Keep the voice worker unchanged. Confluence's outbound connector reads
+   sip.callIDFull from the exact SIP participant after agent dispatch. Inbound
+   resolution reads it from the existing participant attributes payload.
 3. Verify provider/room/attempt aliases on one controlled inbound and outbound call.
 4. Verify the four event states and grace-period behavior on that same Call Log.
 5. Only then freeze. Do not mark production verified based only on local tests.
@@ -175,12 +175,53 @@ Source backup before these corrections:
 `C:/Users/Admin/Desktop/Agent-handshake-livkit/backups/call-recovery-fix-20260908-152114`.
 
 Cloud status was checked again: worker `LoBp3omnpkkx`, deployed
-2026-08-26T08:33:26Z, still running. The tested local identity-reporting worker
-must also be deployed; deploying only Confluence will not supply missing SIP
-identities. Neither deployment was performed in this correction. Existing
+2026-08-26T08:33:26Z, still running. The subsequent backend-only correction below
+supersedes the earlier worker deployment requirement. Neither deployment was
+performed in this correction. Existing
 historical rows without exact linkage still require a verified provider bridge;
 they are never merged by phone. Calls outside the configured recovery lookback
 are not bulk-modified by this correction.
+
+## Backend-Only Identity Capture (2026-09-08)
+
+The local worker's identity helper, attribute-change listener, identity callbacks
+and shutdown identity payload were reverted at the user's request. Existing
+voice, prompt and WhatsApp greeting behavior was preserved. The four historical
+worker identity tests above no longer apply; their removed helper is not deployed.
+
+The existing Confluence outbound connector previously read participant metadata
+only once and silently returned None on every exception. It now makes at most
+five reads, each with a two-second timeout and one-second gaps (at most fourteen
+seconds of lookup waits). This happens AFTER agent dispatch, not before greeting.
+It creates no new scheduler, redial or background identity loop.
+
+The lookup checks the exact room, participant identity, participant SID and SIP
+session ID returned by call creation. Internal SCL IDs are never stored as Vobiz
+identities. A replacement participant or different SIP leg is rejected.
+Authentication/permission/configuration errors stop immediately. An unsuccessful
+lookup leaves a diagnostic reason in the dispatch result and one AI Error Log;
+it does not mark an already dispatched call failed or guess by phone/time.
+
+The executor's existing identity registration and after-commit receipt replay
+then attach Vobiz callbacks to the reserved call. No new worker callback is needed.
+This still depends on the provider's full SIP ID being available from LiveKit's
+server API; removing agent code does not remove that correlation requirement.
+Historical rooms that have ended without captured IDs require verified bridge
+evidence, not this startup lookup. Missing Vobiz delivery is a separate issue.
+
+Tests cover delayed metadata, transient errors, timeout, bounded exhaustion,
+authentication failure, wrong participants/legs, dispatch before lookup, and
+pending Vobiz events joined to one log with an ID-free worker end callback.
+
+Backups: `backups/worker-revert-20260908-164907/good-agent.py` and
+`backups/backend-identity-20260908/` in the Windows workspace.
+
+Verification: 169 backend tests passed, zero failures/errors/skips (43.851s).
+Worker and changed Python files compile; git diff --check passes. Tests used an
+isolated temporary Redis on port 16379, shut down afterward. External HTTP and
+queued side effects were blocked. No voice worker, scheduler, customer call or
+cloud deployment was started for this verification. A post-deployment controlled
+call is still required to verify actual provider delivery and identity capture.
 
 ## Rollback
 
