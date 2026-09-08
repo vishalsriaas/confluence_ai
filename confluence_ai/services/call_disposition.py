@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
@@ -73,6 +75,28 @@ class DispositionConfig:
     update_mcp_tool_name: str
 
 
+def _serialized_disposition(fn):
+    @wraps(fn)
+    def run(call_log, *args, **kwargs):
+        if not call_log or frappe.flags.get("disposition_locked_call") == call_log:
+            return fn(call_log, *args, **kwargs)
+        with frappe.cache.lock("call-disposition:" + call_log, timeout=600, blocking_timeout=30):
+            previous = frappe.flags.get("disposition_locked_call")
+            frappe.flags.disposition_locked_call = call_log
+            try:
+                # Jobs may have waited for another job; do not retain its old DB snapshot.
+                frappe.db.commit()
+                result = fn(call_log, *args, **kwargs)
+                frappe.db.commit()
+                return result
+            except Exception:
+                frappe.db.rollback()
+                raise
+            finally:
+                frappe.flags.disposition_locked_call = previous
+    return run
+
+
 def enqueue_call_disposition(call_log: str | None) -> dict:
     if not call_log:
         return {"status": "skipped", "reason": "missing_call_log"}
@@ -83,10 +107,12 @@ def enqueue_call_disposition(call_log: str | None) -> dict:
         "confluence_ai.services.call_disposition.process_call_log",
         queue=get_queue_name("llm_queue", "agent_llm"),
         call_log=call_log,
+        enqueue_after_commit=True,
     )
     return {"status": "queued", "call_log": call_log}
 
 
+@_serialized_disposition
 def process_call_log(call_log: str, force: bool = False) -> dict:
     if not call_log or not frappe.db.exists("AI Call Log", call_log):
         return {"status": "skipped", "reason": "missing_call_log"}
@@ -120,7 +146,9 @@ def process_call_log(call_log: str, force: bool = False) -> dict:
         else:
             decision = classify_transcript(doc, transcript, config)
 
-        _save_disposition(doc, decision)
+        if not _save_disposition(doc, decision):
+            _enqueue_changed_call(doc)
+            return {"status": "queued", "reason": "call_changed_during_classification", "call_log": doc.name}
         update_result = update_crm_lead_status(doc, decision, config)
         _save_update_state(doc, update_result.get("erp_status_update_status") or "Skipped", update_result)
         return {"status": "success", "call_log": doc.name, "decision": decision, "erp_update": update_result}
@@ -191,6 +219,7 @@ def process_stale_missing_transcript_dispositions(
     return {"status": "success", "processed_count": len(processed), "skipped_count": skipped, "processed": processed}
 
 
+@_serialized_disposition
 def process_missing_transcript_fallback(call_log: str, force: bool = False) -> dict:
     if not call_log or not frappe.db.exists("AI Call Log", call_log):
         return {"status": "skipped", "reason": "missing_call_log"}
@@ -227,7 +256,9 @@ def process_missing_transcript_fallback(call_log: str, force: bool = False) -> d
             return {"status": "skipped", "reason": "disabled", "call_log": doc.name}
 
         decision = _missing_transcript_fallback_decision(doc)
-        _save_disposition(doc, decision)
+        if not _save_disposition(doc, decision):
+            _enqueue_changed_call(doc)
+            return {"status": "queued", "reason": "call_changed_during_classification", "call_log": doc.name}
         update_result = update_crm_lead_status(doc, decision, config)
         _save_update_state(doc, update_result.get("erp_status_update_status") or "Skipped", update_result)
         return {"status": "success", "call_log": doc.name, "decision": decision, "erp_update": update_result}
@@ -246,6 +277,7 @@ def process_missing_transcript_fallback(call_log: str, force: bool = False) -> d
         return {"status": "failed", "call_log": doc.name, "error": str(exc)}
 
 
+@_serialized_disposition
 def sync_saved_disposition_to_erp(call_log: str) -> dict:
     if not call_log or not frappe.db.exists("AI Call Log", call_log):
         return {"status": "skipped", "reason": "missing_call_log"}
@@ -292,6 +324,7 @@ def enqueue_saved_disposition_sync(call_log: str | None) -> dict:
         "confluence_ai.services.call_disposition.sync_saved_disposition_to_erp",
         queue=get_queue_name("llm_queue", "agent_llm"),
         call_log=call_log,
+        enqueue_after_commit=True,
     )
     return {"status": "queued", "call_log": call_log}
 
@@ -855,23 +888,55 @@ def _get_doc_value(doc_or_row, fieldname: str) -> Any:
     return getattr(doc_or_row, fieldname, None)
 
 
-def _save_disposition(doc, decision: dict) -> None:
-    doc.flags.for_update = True
-    doc.reload()
-    doc.ai_disposition = decision.get("ai_disposition")
-    doc.ai_disposition_reason = decision.get("ai_disposition_reason")
-    doc.ai_disposition_confidence = decision.get("ai_disposition_confidence")
-    doc.ai_disposition_summary = decision.get("ai_disposition_summary")
-    doc.erp_status_update_status = "Pending"
-    doc.flags.ignore_ai_disposition_auto_sync = True
-    doc.save(ignore_permissions=True)
-    frappe.db.commit()
+def _retry_call_log_write(write):
+    # Retry DB writes only, never repeat a paid classification or an ERP request.
+    for attempt in range(3):
+        try:
+            return write()
+        except frappe.QueryDeadlockError:
+            frappe.db.rollback()
+            if attempt == 2:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+def _enqueue_changed_call(doc):
+    if doc.flags.get("disposition_was_edited"):
+        enqueue_saved_disposition_sync(doc.name)
+    else:
+        enqueue_call_disposition(doc.name)
+
+
+def _save_disposition(doc, decision: dict) -> bool:
+    original = (doc.get("transcript"), doc.get("transcript_summary"), doc.get("ai_disposition"))
+
+    def write():
+        frappe.db.get_value("AI Call Log", doc.name, "name", for_update=True)
+        doc.flags.for_update = True
+        doc.reload()
+        current = (doc.get("transcript"), doc.get("transcript_summary"), doc.get("ai_disposition"))
+        if current != original:
+            doc.flags.disposition_was_edited = current[2] != original[2]
+            return False
+        doc.ai_disposition = decision.get("ai_disposition")
+        doc.ai_disposition_reason = decision.get("ai_disposition_reason")
+        doc.ai_disposition_confidence = decision.get("ai_disposition_confidence")
+        doc.ai_disposition_summary = decision.get("ai_disposition_summary")
+        doc.erp_status_update_status = "Pending"
+        doc.flags.ignore_ai_disposition_auto_sync = True
+        doc.save(ignore_permissions=True)
+        frappe.db.commit()
+        return True
+
+    return _retry_call_log_write(write)
 
 
 def _save_update_state(doc, status: str, response: dict) -> None:
-    try:
+    def write():
+        frappe.db.get_value("AI Call Log", doc.name, "name", for_update=True)
         current = frappe.get_doc("AI Call Log", doc.name, for_update=True)
         if response.get("reason") == "waiting_for_transcript" and current.get("transcript"):
+            enqueue_call_disposition(doc.name)
             return
         if current.get("ai_disposition") != doc.get("ai_disposition"):
             return
@@ -879,7 +944,11 @@ def _save_update_state(doc, status: str, response: dict) -> None:
         current.erp_status_update_response = as_json(response)
         current.save(ignore_permissions=True)
         frappe.db.commit()
+
+    try:
+        _retry_call_log_write(write)
     except Exception as exc:
+        frappe.db.rollback()
         create_error(
             "AI Call Disposition Save",
             str(exc),

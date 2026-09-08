@@ -30,7 +30,7 @@ def handle_vobiz_inbound_call(payload: dict) -> dict:
     call_uuid = _payload_call_uuid(payload)
     if not call_uuid or is_internal_call_id(call_uuid):
         return {"status": "pending_identity", "reason": "provider_call_id_required"}
-    lock_key = "inbound-task:" + hashlib.sha256(call_uuid.encode()).hexdigest()
+    lock_key = "inbound-task:" + hashlib.sha256(f"{selection.get('company')}:{call_uuid}".encode()).hexdigest()
     # Keep the reservation across helper commits; unrelated calls use different locks.
     with frappe.cache.lock(lock_key, timeout=120, blocking_timeout=30):
         try:
@@ -290,6 +290,9 @@ def _create_task_from_livekit_resolve_payload(payload: dict) -> dict:
         "TrunkID": trunk_id,
         "Domain": domain,
         "source": "livekit_inbound_resolver",
+        "room_name": payload.get("room_name") or payload.get("room"),
+        "channel_account": payload.get("channel_account"),
+        "ai_agent": payload.get("ai_agent") or payload.get("agent"),
     }
     synthesized = {key: value for key, value in synthesized.items() if value not in (None, "", [], {})}
     return handle_vobiz_inbound_call(synthesized)

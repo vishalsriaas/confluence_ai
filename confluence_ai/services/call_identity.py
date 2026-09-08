@@ -2,6 +2,7 @@
 
 import frappe
 import re
+import json
 from frappe.model.rename_doc import rename_doc
 
 
@@ -26,6 +27,87 @@ def call_phone(value, existing=None):
     return digits
 
 
+def repair_bridged_call_logs(source_name: str, target_name: str, dry_run: bool = True) -> dict:
+    """Explicit repair of the old two-inbound-task bug, backed by provider evidence."""
+    if source_name == target_name:
+        frappe.throw("Select two different call logs.")
+    docs = {name: frappe.get_doc("AI Call Log", name) for name in (source_name, target_name)}
+    source, target = docs[source_name], docs[target_name]
+    if not source.company or source.company != target.company:
+        frappe.throw("Bridge repair cannot cross companies.")
+    for doc in docs.values():
+        if doc.status not in {"Completed", "Failed", "Rejected", "No Answer", "Busy", "Cancelled"}:
+            frappe.throw("Wait until both call records are terminal before repair.")
+        if not doc.task or frappe.db.get_value("AI Task", doc.task, "external_record_type") != "Vobiz Inbound Call":
+            frappe.throw("This repair is only for duplicate inbound call legs, not separate outbound attempts.")
+        if frappe.db.get_value("AI Task", doc.task, "status") not in {"Completed", "Failed", "Cancelled"}:
+            frappe.throw("Wait until both tasks are terminal before repair.")
+    from confluence_ai.services.call_registry import register_call
+    target_ids = {target.sip_call_id, target.call_uuid}
+    target_ids.update(frappe.get_all("AI Call Identity", filters={"call_log": target.name,
+        "identity_kind": ["in", ["sip", "uuid"]]}, pluck="identity_value"))
+    evidence = None
+    for field in ("status_payload_json", "transcript_payload_json", "recording_payload_json"):
+        payload = json.loads(source.get(field) or "{}")
+        bridge = payload.get("BridgeUUID") or payload.get("bridge_uuid")
+        if bridge and not is_internal_call_id(bridge) and bridge in target_ids:
+            evidence = payload
+            break
+    if not evidence:
+        frappe.throw("No explicit Vobiz BridgeUUID links these records; phone matching is not allowed.")
+    target_task = frappe.get_doc("AI Task", target.task)
+    startup = json.loads(target_task.vobiz_initiated_payload or "{}")
+    if startup.get("source") != "livekit_inbound_resolver":
+        frappe.throw("Target must be the original LiveKit inbound resolver task.")
+    source_start = json.loads(source.initiated_payload_json or "{}")
+    if not source_start.get("From") or not startup.get("From") or call_phone(source_start.get("From")) != call_phone(startup.get("From")):
+        frappe.throw("Bridge caller evidence disagrees; manual review required.")
+    report = {"status": "verified", "source": source.name, "canonical": target.name,
+              "bridge_uuid": evidence.get("BridgeUUID") or evidence.get("bridge_uuid"), "dry_run": dry_run}
+    if dry_run:
+        return report
+
+    # Match callback lock ordering. Repair does not delete or reschedule either task.
+    for name in sorted({doc.task for doc in docs.values()}):
+        frappe.db.get_value("AI Task", name, "name", for_update=True)
+    for name in sorted({doc.attempt for doc in docs.values()} - {None, ""}):
+        frappe.db.get_value("AI Task Attempt", name, "name", for_update=True)
+    for name in sorted(docs):
+        frappe.db.get_value("AI Call Log", name, "name", for_update=True)
+        current = frappe.get_doc("AI Call Log", name, for_update=True)
+        if current.modified != docs[name].modified:
+            frappe.throw("Call changed during repair; review again before applying.")
+    frappe.get_doc({"doctype": "AI Webhook Event", "company": target.company, "task": target.task,
+        "source": "call_bridge_repair", "event_type": "call_log_merged", "status": "Processed",
+        "payload_json": frappe.as_json({"source": source.as_dict(), "target": target.as_dict()}),
+        "response_json": frappe.as_json(report)}).insert(ignore_permissions=True)
+    fields = ("initiated_payload_json", "status_payload_json", "recording_payload_json", "transcript_payload_json",
+        "recording_url", "external_recording_url", "transcript", "transcript_summary", "sentiment",
+        "recording_received_at", "call_end_received_at", "started_at", "ended_at", "duration_sec")
+    for field in fields:
+        if source.get(field) not in (None, "", "{}"):
+            target.set(field, source.get(field))
+    for kind in ("initiate", "hangup", "recording", "transcript"):
+        if source.get(kind + "_event_status") == "Applied":
+            target.set(kind + "_event_status", "Applied")
+    target.flags.ignore_ai_disposition_auto_sync = True
+    target.erp_status_update_status = "Pending"
+    target.save(ignore_permissions=True)
+    rename_doc("AI Call Log", source.name, target.name, merge=True, force=True,
+        ignore_permissions=True, show_alert=False, rebuild_search=False)
+    # rename_doc updates Link references, including identity aliases and attachments.
+    target.reload()
+    register_call(target, evidence)
+    values = {key: target.get(key) for key in ("transcript", "recording_url") if target.get(key)}
+    if values:
+        frappe.db.set_value("AI Task", target.task, values)
+        if target.attempt:
+            frappe.db.set_value("AI Task Attempt", target.attempt, values)
+    from confluence_ai.services.call_disposition import enqueue_call_disposition
+    enqueue_call_disposition(target.name)
+    return {**report, "status": "repaired"}
+
+
 def bind_provider_identity(task, payload: dict) -> str | None:
     from confluence_ai.services.call_registry import resolve_call, register_call
     provider_id = str(payload.get("sip_call_id") or "").strip()
@@ -35,8 +117,14 @@ def bind_provider_identity(task, payload: dict) -> str | None:
     if not doc:
         return None
     if doc.sip_call_id and not is_internal_call_id(doc.sip_call_id) and doc.sip_call_id != provider_id:
-        frappe.throw("Attempt is already linked to another provider identity.")
-    doc.sip_call_id = provider_id
+        from confluence_ai.services.call_registry import find_call
+        bridge = payload.get("BridgeUUID") or payload.get("bridge_uuid")
+        if not bridge or find_call({"sip_call_id": bridge, "call_uuid": bridge}, doc.company) != doc.name:
+            # The other leg may already have been registered by a prior bridge event.
+            if find_call({"sip_call_id": provider_id}, doc.company) != doc.name:
+                frappe.throw("Attempt is already linked to another provider identity.")
+    else:
+        doc.sip_call_id = provider_id
     if is_internal_call_id(doc.call_uuid):
         doc.call_uuid = None
     doc.direction = payload.get("direction") or doc.direction

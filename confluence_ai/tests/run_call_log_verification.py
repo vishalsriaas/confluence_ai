@@ -11,6 +11,7 @@ MODULES = (
     "test_vobiz", "test_recording_transcription", "test_inbound_startup", "test_executor",
     "test_call_disposition", "test_fresh_followup_deduplication", "test_fresh_followup",
     "test_repeat_followup",
+    "test_bridge_disposition_flow",
 )
 
 

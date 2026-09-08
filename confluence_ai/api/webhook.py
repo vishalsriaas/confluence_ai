@@ -203,15 +203,27 @@ def replay_pending_receipts(call_log):
         fields=["name", "source", "payload_json", "identity_keys_json"], order_by="creation asc")
     frappe.flags.replaying_call_receipts = True
     try:
-        for row in rows:
-            if not keys.intersection(json.loads(row.identity_keys_json or "[]")):
-                continue
-            handler = vobiz.handle_callback if row.source == "vobiz" else livekit.handle_callback
-            try:
-                _process_telephony_receipt(row.source, json.loads(row.payload_json), handler)
-            except Exception:
-                # The failed receipt is durable; do not lose the other pending events.
-                frappe.log_error(title="Call receipt replay failed", message=frappe.get_traceback())
+        from confluence_ai.services.call_registry import aliases, identity_key
+        remaining = list(rows)
+        while remaining:
+            deferred = []
+            for row in remaining:
+                payload = json.loads(row.payload_json)
+                receipt_keys = {identity_key(company, kind, value) for kind, value in aliases(payload)}
+                if not keys.intersection(receipt_keys):
+                    deferred.append(row)
+                    continue
+                handler = vobiz.handle_callback if row.source == "vobiz" else livekit.handle_callback
+                try:
+                    _process_telephony_receipt(row.source, payload, handler)
+                except Exception:
+                    # The failed receipt is durable; do not lose other pending events.
+                    frappe.log_error(title="Call receipt replay failed", message=frappe.get_traceback())
+            updated = set(frappe.get_all("AI Call Identity", filters={"call_log": call_log}, pluck="name"))
+            if updated == keys:
+                break
+            # A bridge event can unlock earlier customer-leg receipts in this same batch.
+            keys, remaining = updated, deferred
     finally:
         frappe.flags.replaying_call_receipts = False
 

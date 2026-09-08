@@ -4,7 +4,7 @@ import frappe
 
 from confluence_ai.services.auth import require_access
 from confluence_ai.services.inbound_sales import resolve_latest_inbound_metadata
-from confluence_ai.services.utils import as_json, get_request_json
+from confluence_ai.services.utils import as_json, get_request_json, get_queue_name
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -48,6 +48,14 @@ def resolve_call() -> dict:
         task_name = result.get("task") if isinstance(result, dict) else None
         if task_name and frappe.db.exists("AI Task", task_name):
             values["task"] = task_name
+            values["company"] = frappe.db.get_value("AI Task", task_name, "company")
         frappe.db.set_value("AI Webhook Event", webhook_event, values)
+
+    if result.get("task"):
+        call_log = frappe.db.get_value("AI Call Log", {"task": result["task"]}, "name")
+        if call_log:
+            # Replay is event-driven and off the voice startup response path.
+            frappe.enqueue("confluence_ai.api.webhook.replay_pending_receipts",
+                call_log=call_log, queue=get_queue_name("io_queue", "short"), enqueue_after_commit=True)
 
     return result

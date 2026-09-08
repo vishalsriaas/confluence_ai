@@ -6,6 +6,60 @@ One actual call/attempt has one canonical AI Call Log. Phone numbers are display
 data, not call identities. This change does not modify sales prompts, MCP tools,
 voice settings, or customer retry/follow-up schedules.
 
+## September 8 Follow-up Correction
+
+Live records call-101013 and call-101019 demonstrated a gap in the original tests:
+the Vobiz customer-leg SIP ID, hangup UUID and LiveKit SIP leg were different.
+The provider's explicit BridgeUUID related these legs, but both startup paths
+created tasks. Disposition was also queued before the webhook transaction
+committed, so its worker could read an empty transcript and exit.
+
+Corrections:
+
+- Only the LiveKit inbound resolver creates inbound tasks/attempts. Vobiz
+  initiation is durably retained as Pending Matching until an exact identity or
+  bridge relation is available. It does not create a second customer-leg task.
+- BridgeUUID/bridge_uuid explicitly registers the linked SIP/UUID aliases in
+  the same company. Missing/ambiguous identities are never inferred from phone.
+- A resolver event queues pending receipt replay after commit, off the startup
+  response path. Replay revisits earlier receipts unlocked by a later bridge.
+- Callbacks without Direction retain the known call direction/customer number.
+- Both AI disposition and manual disposition sync enqueue after commit. Jobs
+  for a single call serialize; transient deadlocks retry database writes only,
+  not paid classification or ERP HTTP requests. A concurrent manual edit is not
+  overwritten by an in-flight AI classification.
+- Late transcripts for historical attempts still enqueue disposition without
+  advancing the latest attempt or follow-up workflow.
+
+Pre-edit archive: /home/confluence frappe 15/call-identity-disposition-backup-20260908.zip
+Live evidence snapshots: C:/Users/Admin/Desktop/Agent-handshake-livkit/backups/bridge-disposition-20260908
+
+Additional tests exercise distinct customer/SIP/hangup IDs in all 24 event
+orders, duplicate delivery, receipts before the room exists, a separate database
+connection consuming disposition after commit, concurrent disposition workers,
+deadlock injection, manual edits, and audited legacy bridge repair. Only model
+and ERP boundaries are stubbed in the disposition integration scenarios.
+
+Existing duplicates require explicit repair after deployment, not a phone-based
+bulk merge. POST confluence_ai.api.call_log.repair_bridge_duplicate with
+source_call_log, target_call_log and dry_run=1 first. Only apply dry_run=0 after
+the preview is verified. Requires System Manager and write permission on both
+records, terminal calls/tasks, matching company/caller evidence, and explicit
+Vobiz BridgeUUID pointing to the LiveKit resolver record. The repair stores both
+original records in an audit event, preserves task history and transfers Link
+references. Disposition is queued after the repaired record commits.
+
+No live records or cloud deployments are changed by the local regression suite.
+Calls that never reach the LiveKit resolver remain visible as unmatched webhook
+receipts; the system does not fabricate an AI task without an identified room.
+
+Final local verification for this correction: 155 tests passed, zero failures,
+errors or skips (47.363 seconds). Full Python compileall and git diff --check
+passed. No real customer calls, paid model requests or ERP writes were made by
+these tests. LiveKit status was checked read-only: universal_agent was Running
+on LoBp3omnpkkx, deployed 2026-08-26T08:33:26Z. This correction does not deploy
+the previously pending local worker identity changes or modify worker source.
+
 ## Data Flow
 
 1. Before outbound dialing, reserve a unique call reference for the exact attempt.

@@ -17,8 +17,9 @@ def identity_key(company, kind, value):
 def aliases(payload):
     result = set()
     for kind, keys in (
-        ("sip", ("SIPCallID", "sip_call_id")),
-        ("uuid", ("CallUUID", "call_uuid")),
+        # Vobiz explicitly relates its customer leg to the SIP leg seen by LiveKit.
+        ("sip", ("SIPCallID", "sip_call_id", "BridgeUUID", "bridge_uuid")),
+        ("uuid", ("CallUUID", "call_uuid", "BridgeUUID", "bridge_uuid")),
         ("room", ("room_name", "room")),
         ("attempt", ("attempt", "attempt_id")),
     ):

@@ -580,29 +580,9 @@ def _vobiz_media_url_exists(recording_url: str, headers: dict[str, str]) -> bool
 
 
 def handle_callback(payload: dict) -> dict:
-    from confluence_ai.services.inbound_sales import handle_vobiz_inbound_call
-
-    # Inbound call starts must create their own task keyed by CallUUID before
-    # generic phone/trunk matching runs. Otherwise a fresh inbound call from the
-    # same caller can attach to an older still-running task.
-    inbound_result = handle_vobiz_inbound_call(payload)
-    if inbound_result.get("status") in {"routed", "duplicate"} and inbound_result.get("task"):
-        task = frappe.get_doc("AI Task", inbound_result["task"])
-        _bind_vobiz_identity(task, payload)
-        attempts = frappe.get_all(
-            "AI Task Attempt",
-            filters={"task": task.name},
-            order_by="creation desc",
-            limit=1,
-            pluck="name",
-        )
-        attempt = frappe.get_doc("AI Task Attempt", attempts[0]) if attempts else None
-        call_log = upsert_call_log(payload, task=task, attempt=attempt)
-        _enqueue_call_disposition_if_ready(call_log, payload.get("event") or payload.get("event_type") or payload.get("Event") or "status_update")
-        inbound_result["call_log"] = call_log
-        return inbound_result
-
-    # 1. Match the webhook payload to a task and/or attempt
+    # LiveKit's inbound resolver owns task creation. A Vobiz customer-leg ID
+    # is not the LiveKit SIP-leg ID: retain unmatched receipts until the bridge
+    # relation arrives instead of creating another task for the customer leg.
     task_name, attempt_name = find_task_and_attempt(payload)
 
     if not task_name:
@@ -647,6 +627,7 @@ def handle_callback(payload: dict) -> dict:
     latest = frappe.get_all("AI Task Attempt", filters={"task": task.name}, order_by="creation desc", pluck="name", limit=1)
     if latest and latest[0] != attempt.name:
         call_log = upsert_call_log(payload, task, attempt)
+        _enqueue_call_disposition_if_ready(call_log, payload.get("event") or payload.get("Event") or payload.get("event_type"))
         return {"status": "success", "call_log": call_log, "task": task.name, "attempt": attempt.name, "reason": "historical_attempt"}
 
     previous_task_status = task.status
@@ -822,6 +803,7 @@ def _bind_vobiz_identity(task, payload):
             "sip_call_id": provider_id, "identity_source": "vobiz.SIPCallID",
             "attempt": payload.get("attempt"),
             "CallUUID": payload.get("CallUUID") or payload.get("call_uuid"),
+            "bridge_uuid": payload.get("BridgeUUID") or payload.get("bridge_uuid"),
             "direction": str(payload.get("Direction") or payload.get("direction") or "").title() or None,
         })
         task.reload()
@@ -1323,11 +1305,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
 
     doc.provider = "Vobiz"
     doc.event_type = event_type
-    doc.direction = payload.get("Direction") or payload.get("direction") or doc.direction
+    doc.direction = str(payload.get("Direction") or payload.get("direction") or doc.direction or "").title()
     doc.from_number = payload.get("From") or payload.get("from") or payload.get("from_number") or doc.from_number
     doc.to_number = payload.get("To") or payload.get("to") or payload.get("to_number") or doc.to_number
-    doc.customer_phone = _customer_phone_from_payload(payload, doc.customer_phone)
-    if not doc.call_uuid or is_internal_call_id(doc.call_uuid) or (
+    if not doc.call_uuid or is_internal_call_id(doc.call_uuid) or doc.call_uuid == (payload.get("BridgeUUID") or payload.get("bridge_uuid")) or (
         sip_call_id and doc.sip_call_id == sip_call_id and doc.call_uuid == sip_call_id
     ):
         doc.call_uuid = call_uuid or doc.call_uuid
@@ -1364,7 +1345,10 @@ def upsert_call_log(payload: dict, task=None, attempt=None) -> str | None:
     if not doc.company and doc.agent:
         doc.company = frappe.db.get_value("AI Agent", doc.agent, "company") or doc.company
 
-    doc.customer_phone = call_phone(_customer_phone_from_payload(payload), doc.customer_phone)
+    # Transcript/recording callbacks often omit Direction. Never replace the
+    # caller with our own business number merely because that field is absent.
+    phone_payload = {**payload, "direction": doc.direction}
+    doc.customer_phone = call_phone(_customer_phone_from_payload(phone_payload, doc.customer_phone), doc.customer_phone)
     doc.from_number = call_phone(doc.from_number)
     doc.to_number = call_phone(doc.to_number)
 
