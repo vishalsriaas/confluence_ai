@@ -153,7 +153,9 @@ def apply_event_state(doc, payload):
     category = event_category(event)
     if category:
         doc.set(category + "_event_status", "Applied")
-    if category == "recording" and not doc.recording_received_at:
+    if not doc.recording_received_at and (category == "recording" or (
+        doc.get("recording_url") or doc.get("external_recording_url")
+    )):
         doc.recording_received_at = payload.get("_received_at") or frappe.utils.now_datetime()
     if category == "hangup" and not doc.call_end_received_at:
         doc.call_end_received_at = payload.get("_received_at") or frappe.utils.now_datetime()

@@ -152,6 +152,36 @@ provider identity, preserves raw source data in an audit event, and updates Link
 references through Frappe. Ambiguous historical rows require review; there is no
 blind bulk merge or destructive migration.
 
+## Legacy Recovery Correction (2026-09-08)
+
+- Completed legacy calls with a recording and exact provider identity no longer
+  require receipt timestamps introduced after those calls were created. Their
+  last modification is a conservative initial grace baseline, not a fabricated
+  provider callback timestamp. Subsequent checks respect the configured retry
+  time and maximum count. Active calls without end evidence still wait.
+- When an existing recording is first observed by the event handler, its receipt
+  timestamp is initialized once. Later callbacks do not reset it.
+- A transcript attached by exact identity to a historical call without a Task
+  now queues disposition and marks the receipt processed. It does not create a
+  Task, place a call, or guess a match from the phone number.
+- Recovery still fetches Vobiz's existing transcript only. No audio-to-AI
+  transcription is invoked by this flow.
+
+Verification: 159 backend tests passed (zero failures/errors/skips), 4 worker
+identity tests passed, syntax checks and git diff --check passed. HTTP and queued
+external side effects were blocked in the backend regression run.
+
+Source backup before these corrections:
+`C:/Users/Admin/Desktop/Agent-handshake-livkit/backups/call-recovery-fix-20260908-152114`.
+
+Cloud status was checked again: worker `LoBp3omnpkkx`, deployed
+2026-08-26T08:33:26Z, still running. The tested local identity-reporting worker
+must also be deployed; deploying only Confluence will not supply missing SIP
+identities. Neither deployment was performed in this correction. Existing
+historical rows without exact linkage still require a verified provider bridge;
+they are never merged by phone. Calls outside the configured recovery lookback
+are not bulk-modified by this correction.
+
 ## Rollback
 
 Use a maintenance window; stop new dispatches and let active calls finish.

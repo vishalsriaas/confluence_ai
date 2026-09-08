@@ -10,7 +10,9 @@ import frappe
 
 from confluence_ai.api import webhook
 from confluence_ai.services import call_registry as registry, livekit, vobiz
-from confluence_ai.services.recording_transcription import recovery_wait_reason, process_call_log_recording_transcript
+from confluence_ai.services.recording_transcription import (
+    recovery_wait_reason, process_call_log_recording_transcript, process_missing_recording_transcripts,
+)
 
 
 class TestCallRegistry(unittest.TestCase):
@@ -163,6 +165,77 @@ class TestCallRegistry(unittest.TestCase):
         self.assertEqual(registry.duration_seconds({"duration_ms": 31}), .031)
         self.assertEqual(registry.duration_seconds({"duration": 6000}), 6000)
         self.assertEqual(registry.duration_seconds({"duration_sec": 0, "duration_ms": 30000}), 0)
+
+    def test_legacy_recovery_waits_without_inventing_receipt_times(self):
+        now = frappe.utils.now_datetime()
+        cfg = SimpleNamespace(wait_minutes=5, retry_minutes=2, max_attempts=3)
+        doc = frappe._dict(recording_url="x", sip_call_id="provider-id", status="Completed",
+            modified=frappe.utils.add_to_date(now, minutes=-4))
+        self.assertEqual(recovery_wait_reason(doc, cfg, now), "grace_or_retry_wait")
+        doc.modified = frappe.utils.add_to_date(now, minutes=-6)
+        self.assertIsNone(recovery_wait_reason(doc, cfg, now))
+        self.assertIsNone(doc.recording_received_at)
+        self.assertIsNone(doc.call_end_received_at)
+        doc.status = "In Progress"
+        self.assertEqual(recovery_wait_reason(doc, cfg, now), "waiting_for_call_end_and_recording")
+        doc.status = "Completed"
+        doc.transcript_recovery_attempts = 1
+        doc.modified = now
+        doc.transcript_recovery_next_at = frappe.utils.add_to_date(now, minutes=2)
+        self.assertEqual(recovery_wait_reason(doc, cfg, now), "grace_or_retry_wait")
+        self.assertIsNone(recovery_wait_reason(doc, cfg, frappe.utils.add_to_date(now, minutes=2)))
+        doc.transcript_recovery_attempts = 3
+        self.assertEqual(recovery_wait_reason(doc, cfg, now), "recovery_checks_exhausted")
+
+    def test_recording_observed_outside_recording_event_sets_receipt_once(self):
+        doc = frappe.new_doc("AI Call Log")
+        doc.recording_url = "https://media.invalid/known.wav"
+        registry.apply_event_state(doc, {"event": "call_ended", "_received_at": "2026-09-08 10:00:00"})
+        self.assertEqual(doc.recording_received_at, "2026-09-08 10:00:00")
+        self.assertEqual(doc.call_end_received_at, "2026-09-08 10:00:00")
+        registry.apply_event_state(doc, {"event": "recording.completed", "_received_at": "2026-09-08 10:01:00"})
+        self.assertEqual(doc.recording_received_at, "2026-09-08 10:00:00")
+
+    def test_legacy_transcript_without_task_queues_disposition_once(self):
+        payload = self.payload("transcript")
+        doc = frappe.get_doc({"doctype": "AI Call Log", "company": self.company,
+            "call_uuid": payload["CallUUID"], "sip_call_id": payload["SIPCallID"], "status": "Completed"}).insert(ignore_permissions=True)
+        result = webhook._process_telephony_receipt("vobiz", payload, vobiz.handle_callback)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["call_log"], doc.name)
+        vobiz._enqueue_call_disposition_if_ready.assert_called_once_with(doc.name, "transcript")
+        self.assertEqual(webhook._process_telephony_receipt("vobiz", payload, vobiz.handle_callback)["status"], "duplicate")
+        self.assertEqual(vobiz._enqueue_call_disposition_if_ready.call_count, 1)
+        self.assertEqual(frappe.db.count("AI Call Log", {"company": self.company}), 1)
+        self.assertEqual(frappe.db.count("AI Task", {"company": self.company}), 1)
+
+    def test_scheduler_fetches_legacy_recording_via_same_callback(self):
+        payload = self.payload("recording")
+        doc = frappe.get_doc({"doctype": "AI Call Log", "company": self.company,
+            "call_uuid": payload["CallUUID"], "sip_call_id": payload["SIPCallID"],
+            "status": "Completed", "recording_url": payload["recording_url"]}).insert(ignore_permissions=True)
+        past = frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-6)
+        frappe.db.set_value("AI Call Log", doc.name, "modified", past, update_modified=False)
+        cfg = SimpleNamespace(enabled=True, wait_minutes=5, retry_minutes=5, max_attempts=3,
+            lookback_minutes=30, limit=200)
+        def process_fixture(name, **kwargs):
+            if name != doc.name:
+                return {"status": "skipped", "reason": "outside_test_fixture"}
+            return process_call_log_recording_transcript(name, **kwargs)
+        with patch("confluence_ai.services.recording_transcription.get_recording_transcription_config", return_value=cfg), \
+             patch("confluence_ai.services.recording_transcription.process_call_log_recording_transcript", side_effect=process_fixture), \
+             patch("confluence_ai.services.recording_transcription.fetch_vobiz_transcript_for_call_log",
+                   return_value={"status": "success", "transcript": "[CUSTOMER]: Verified legacy text"}) as fetch, \
+             patch("confluence_ai.services.recording_transcription.transcribe_recording_audio", side_effect=AssertionError("No AI audio transcription")):
+            result = process_missing_recording_transcripts()
+        matched = [row for row in result["processed"] if row.get("call_log") == doc.name]
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["status"], "success")
+        self.assertTrue(fetch.called)
+        doc.reload()
+        self.assertEqual(doc.transcript, "[CUSTOMER]: Verified legacy text")
+        self.assertEqual(doc.transcript_recovery_status, "Recovered")
+        self.assertEqual(doc.transcript_recovery_attempts, 1)
 
     def test_utc_event_time_is_saved_in_site_timezone(self):
         from datetime import datetime

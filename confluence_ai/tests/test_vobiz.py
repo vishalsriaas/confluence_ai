@@ -326,10 +326,10 @@ class TestVobizTranscript(unittest.TestCase):
         with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
             patch("confluence_ai.services.inbound_sales.handle_vobiz_inbound_call", Mock(return_value={"status": "ignored"})), \
             patch("confluence_ai.services.vobiz.find_task_and_attempt", Mock(return_value=(None, None))), \
-            patch("confluence_ai.services.vobiz.upsert_call_log", Mock(return_value="call-unit")), \
+            patch("confluence_ai.services.vobiz.upsert_call_log", Mock(return_value=None)), \
             patch("confluence_ai.services.vobiz.record_provider_event", provider_event):
             result = vobiz.handle_callback({"event": "recording.completed", "company": "globifit"})
 
         self.assertEqual(result["status"], "pending_matching")
-        self.assertEqual(result["call_log"], "call-unit")
+        self.assertIsNone(result["call_log"])
         provider_event.assert_called_once()

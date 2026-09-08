@@ -65,8 +65,9 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
         from `tabAI Call Log`
         where creation >= %(cutoff)s
           and coalesce(transcript_recovery_attempts, 0) < %(max_attempts)s
-          and call_end_received_at is not null
-          and recording_received_at <= %(wait_cutoff)s
+          and (call_end_received_at is not null or ended_at is not null or status = 'Completed')
+          and (coalesce(transcript_recovery_attempts, 0) > 0
+               or coalesce(recording_received_at, modified) <= %(wait_cutoff)s)
           and (transcript_recovery_next_at is null or transcript_recovery_next_at <= NOW())
           and coalesce(transcript, '') = ''
           and coalesce(nullif(recording_url, ''), nullif(external_recording_url, ''), '') != ''
@@ -152,14 +153,23 @@ def recovery_wait_reason(doc, config, now):
         return "transcript_already_present"
     if not (doc.get("recording_url") or doc.get("external_recording_url")):
         return "recording_missing"
-    if not doc.get("call_end_received_at") or not doc.get("recording_received_at"):
+    if not (doc.get("call_end_received_at") or doc.get("ended_at") or doc.get("status") == "Completed"):
         return "waiting_for_call_end_and_recording"
     if not _vobiz_transcript_call_ids(doc):
         return "missing_vobiz_call_id"
     if int(doc.get("transcript_recovery_attempts") or 0) >= config.max_attempts:
         return "recovery_checks_exhausted"
-    baseline = max(frappe.utils.get_datetime(doc.call_end_received_at), frappe.utils.get_datetime(doc.recording_received_at))
+    # Legacy rows predate receipt timestamps. Wait from their last update rather
+    # than inventing a callback time or silently excluding existing recordings.
+    legacy = not doc.get("call_end_received_at") or not doc.get("recording_received_at")
+    end_seen = doc.get("call_end_received_at") or doc.get("ended_at") or doc.get("modified")
+    recording_seen = doc.get("recording_received_at") or doc.get("modified")
+    if not end_seen or not recording_seen:
+        return "waiting_for_call_end_and_recording"
+    baseline = max(frappe.utils.get_datetime(end_seen), frappe.utils.get_datetime(recording_seen))
     due = frappe.utils.add_to_date(baseline, minutes=config.wait_minutes)
+    if legacy and int(doc.get("transcript_recovery_attempts") or 0) > 0 and doc.get("transcript_recovery_next_at"):
+        due = frappe.utils.get_datetime(doc.transcript_recovery_next_at)
     if doc.get("transcript_recovery_next_at"):
         due = max(due, frappe.utils.get_datetime(doc.transcript_recovery_next_at))
     return "grace_or_retry_wait" if now < due else None

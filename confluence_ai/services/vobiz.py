@@ -594,6 +594,14 @@ def handle_callback(payload: dict) -> dict:
             task = frappe.get_doc("AI Task", task_name)
             attempt = frappe.get_doc("AI Task Attempt", attempt_name) if attempt_name else None
             call_log = upsert_call_log(payload, task=task, attempt=attempt)
+        elif call_log:
+            # Exact provider identity can resolve a historical call without a
+            # task. Its transcript/disposition must not wait for a nonexistent task.
+            disposition = _enqueue_call_disposition_if_ready(
+                call_log, payload.get("event") or payload.get("Event") or payload.get("event_type")
+            )
+            return {"status": "success", "call_log": call_log,
+                "reason": "legacy_call_without_task", "ai_disposition": disposition}
         else:
             record_provider_event(
                 provider="Vobiz",
