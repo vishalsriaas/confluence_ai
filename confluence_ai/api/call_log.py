@@ -151,6 +151,7 @@ def transcribe_missing_recordings(
 @frappe.whitelist()
 def recording_audio(call_log: str):
     doc = frappe.get_doc("AI Call Log", call_log)
+    doc.check_permission("read")
     url = doc.external_recording_url or doc.recording_url
     if not url:
         frappe.throw("No recording URL found for this call log.")
