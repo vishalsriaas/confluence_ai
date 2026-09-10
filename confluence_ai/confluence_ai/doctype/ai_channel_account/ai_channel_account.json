@@ -51,7 +51,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Channel Type",
-   "options": "WhatsApp\nLiveKit\nLLM\nMCP\nAPI",
+   "options": "WhatsApp\nVobiz\nLiveKit\nLLM\nMCP\nAPI",
    "reqd": 1
   },
   {

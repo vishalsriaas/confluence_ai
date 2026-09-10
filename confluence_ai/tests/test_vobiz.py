@@ -10,6 +10,105 @@ from confluence_ai.services import vobiz
 from confluence_ai.services.vobiz import normalize_vobiz_ai_transcript_labels
 
 
+class TestVobizOutboundStart(unittest.TestCase):
+    def _docs(self, endpoint_paths_json='{"answer_url":"https://example.com/vobiz/answer?task={task}&attempt={attempt}"}'):
+        task = SimpleNamespace(
+            name="task-unit",
+            company="globifit",
+            assigned_agent="agent-unit",
+            target_agent=None,
+            channel="Voice",
+            external_record_type=None,
+        )
+        agent = SimpleNamespace(name="agent-unit", allowed_channel_account="channel-unit")
+        attempt = SimpleNamespace(name="attempt-unit", task="task-unit", company="globifit")
+
+        class Account(SimpleNamespace):
+            def get(self, fieldname):
+                return getattr(self, fieldname, None)
+
+            def get_password(self, fieldname, raise_exception=False):
+                return getattr(self, fieldname, "")
+
+        account = Account(
+            name="channel-unit",
+            company="globifit",
+            vobiz_auth_id="MA_TEST",
+            vobiz_auth_token="secret",
+            default_from="+919262175574",
+            trunk_id="TRUNK_TEST",
+            endpoint_paths_json=endpoint_paths_json,
+        )
+        return task, agent, account, attempt
+
+    def test_start_voice_task_calls_vobiz_call_api(self):
+        task, agent, account, attempt = self._docs()
+
+        class FakeResponse:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"api_id": "api-unit", "request_uuid": "vobiz-call-unit"}
+
+        def get_doc(doctype, name):
+            return {
+                "AI Task": task,
+                "AI Agent": agent,
+                "AI Channel Account": account,
+                "AI Task Attempt": attempt,
+            }[doctype]
+
+        fake_frappe = SimpleNamespace(
+            get_doc=Mock(side_effect=get_doc),
+            db=SimpleNamespace(exists=Mock(return_value=True), get_value=Mock(return_value="globifit")),
+        )
+        post = Mock(return_value=FakeResponse())
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz.requests.post", post), \
+            patch("confluence_ai.services.vobiz.upsert_call_log", Mock(return_value="call-unit")) as upsert, \
+            patch("confluence_ai.services.vobiz.record_provider_event"):
+            result = vobiz.start_voice_task("task-unit", {"phone": "+919873090386", "attempt": "attempt-unit"})
+
+        self.assertEqual(result["provider"], "Vobiz")
+        self.assertEqual(result["sip_call_id"], "vobiz-call-unit")
+        self.assertEqual(result["call_log"], "call-unit")
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], "https://api.vobiz.ai/api/v1/Account/MA_TEST/Call/")
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Auth-ID"], "MA_TEST")
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Auth-Token"], "secret")
+        self.assertEqual(post.call_args.kwargs["json"]["from"], "+919262175574")
+        self.assertEqual(post.call_args.kwargs["json"]["to"], "+919873090386")
+        self.assertEqual(post.call_args.kwargs["json"]["answer_url"], "https://example.com/vobiz/answer?task=task-unit&attempt=attempt-unit")
+        upsert.assert_called_once()
+
+    def test_start_voice_task_requires_vobiz_answer_url(self):
+        task, agent, account, attempt = self._docs(endpoint_paths_json="{}")
+
+        def get_doc(doctype, name):
+            return {
+                "AI Task": task,
+                "AI Agent": agent,
+                "AI Channel Account": account,
+                "AI Task Attempt": attempt,
+            }[doctype]
+
+        fake_frappe = SimpleNamespace(
+            get_doc=Mock(side_effect=get_doc),
+            db=SimpleNamespace(exists=Mock(return_value=True)),
+        )
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz.requests.post") as post:
+            with self.assertRaisesRegex(ValueError, "answer_url"):
+                vobiz.start_voice_task("task-unit", {"phone": "+919873090386", "attempt": "attempt-unit"})
+
+        post.assert_not_called()
+
+
 class TestVobizTranscript(unittest.TestCase):
     def test_normalizes_reversed_ai_call_labels(self):
         transcript = (

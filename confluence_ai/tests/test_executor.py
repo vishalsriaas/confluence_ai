@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import frappe
 
+from confluence_ai.services import executor
 from confluence_ai.services.executor import _prepare_voice_start_context
 
 
@@ -51,3 +52,13 @@ class TestExecutorVoiceStartContext(unittest.TestCase):
         self.assertEqual(result, {"phone": "+919873090386"})
         enrich.assert_not_called()
         task.save.assert_not_called()
+
+    def test_voice_task_dispatches_through_vobiz(self):
+        task = SimpleNamespace(name="task-unit", channel="Voice")
+        payload = {"phone": "+919873090386"}
+
+        with patch.object(executor.vobiz, "start_voice_task", Mock(return_value={"provider": "Vobiz"})) as start:
+            result = executor._run_channel(task, payload)
+
+        self.assertEqual(result, {"provider": "Vobiz"})
+        start.assert_called_once_with("task-unit", payload)

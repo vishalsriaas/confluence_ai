@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import frappe
 
-from confluence_ai.services import livekit, llm, mcp, whatsapp_bridge
+from confluence_ai.services import llm, mcp, vobiz, whatsapp_bridge
 from confluence_ai.services.callbacks import post_batch_callback
 from confluence_ai.services.dispatcher import refresh_batch_counts
 from confluence_ai.services.utils import as_json, create_error, now, parse_json_object
@@ -139,15 +139,16 @@ def _apply_voice_dispatch_result(task, attempt, result: dict) -> None:
     if result.get("sip_call_id"):
         task.call_uuid = task.call_uuid or result["sip_call_id"]
         attempt.call_uuid = attempt.call_uuid or result["sip_call_id"]
-    attempt.external_id = attempt.external_id or result.get("sip_call_sid") or result.get("room_sid")
+    attempt.external_id = attempt.external_id or result.get("vobiz_request_uuid") or result.get("request_uuid") or result.get("sip_call_sid") or result.get("room_sid")
 
 
 def _register_voice_dispatch_identity(task, attempt, result):
     if not result.get("sip_call_id"):
         return
     from confluence_ai.services.call_identity import bind_provider_identity
+    identity_source = "vobiz.SIPCallID" if result.get("provider") == "Vobiz" else "sip.callIDFull"
     name = bind_provider_identity(task, {"sip_call_id": result["sip_call_id"],
-        "identity_source": "sip.callIDFull", "attempt": attempt.name,
+        "identity_source": identity_source, "attempt": attempt.name,
         "room_name": result.get("room_name"), "direction": "Outbound"})
     if name:
         frappe.enqueue("confluence_ai.api.webhook.replay_pending_receipts",
@@ -158,7 +159,7 @@ def _run_channel(task, payload: dict) -> dict:
     if task.channel == "WhatsApp":
         return whatsapp_bridge.send_message(task.name, payload)
     if task.channel == "Voice":
-        return livekit.start_voice_task(task.name, payload)
+        return vobiz.start_voice_task(task.name, payload)
     if task.channel == "LLM":
         return llm.run_llm_task(task.name, payload)
     if task.channel == "MCP":

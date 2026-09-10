@@ -17,6 +17,263 @@ VOBIZ_TRANSCRIPT_EVENTS = {"transcript", "call_transcript", "transcript_ready", 
 VOBIZ_RECORDING_EVENTS = {"recording", "call_recording", "recording_ready", "recording.completed"}
 VOBIZ_RECORDING_BACKFILL_DEFAULT_LOOKBACK_MINUTES = 360
 VOBIZ_RECORDING_BACKFILL_DEFAULT_LIMIT = 1000
+VOBIZ_API_BASE_URL = "https://api.vobiz.ai"
+VOBIZ_CALL_API_TIMEOUT_SECONDS = 30
+
+
+def start_voice_task(task_name: str, payload: dict) -> dict:
+    """Start an outbound voice call directly through Vobiz."""
+    payload = payload or {}
+    task = frappe.get_doc("AI Task", task_name)
+    agent_name = task.assigned_agent or task.target_agent
+    agent = frappe.get_doc("AI Agent", agent_name) if agent_name else None
+    account_name = _vobiz_account_name_for_voice(agent, payload)
+    if not account_name:
+        return {"status": "skipped", "reason": "no_vobiz_account"}
+
+    account = frappe.get_doc("AI Channel Account", account_name)
+    endpoints = parse_json_object(_doc_get(account, "endpoint_paths_json"), "Endpoint Paths JSON") or {}
+    context = {
+        **(payload or {}),
+        "task": task.name,
+        "task_name": task.name,
+        "attempt": payload.get("attempt"),
+        "company": getattr(task, "company", None),
+        "agent": agent_name,
+    }
+
+    auth_id = _first_text(_doc_get(account, "vobiz_auth_id"), endpoints.get("vobiz_auth_id"))
+    auth_token = _first_text(_get_password(account, "vobiz_auth_token"), endpoints.get("vobiz_auth_token"))
+    if not auth_id or not auth_token:
+        raise ValueError("Missing Vobiz credentials. Configure vobiz_auth_id and vobiz_auth_token on the AI Channel Account.")
+
+    from_number = call_phone(_first_text(
+        payload.get("outbound_phone_number"),
+        endpoints.get("outbound_phone_number"),
+        _doc_get(account, "default_from"),
+        endpoints.get("vobiz_phone_number"),
+        endpoints.get("phone_number"),
+        payload.get("from"),
+    ))
+    to_number = call_phone(_first_text(payload.get("phone"), payload.get("to"), payload.get("customer_phone"), payload.get("phone_number")))
+    if not from_number:
+        raise ValueError("Missing outbound Vobiz caller number. Configure default_from or endpoint_paths_json.outbound_phone_number.")
+    if not to_number:
+        raise ValueError("Missing customer phone number for direct Vobiz call.")
+
+    answer_url = _render_vobiz_template(_first_text(
+        payload.get("answer_url"),
+        payload.get("vobiz_answer_url"),
+        endpoints.get("answer_url"),
+        endpoints.get("vobiz_answer_url"),
+        endpoints.get("voice_answer_url"),
+    ), context)
+    if not answer_url:
+        raise ValueError("Missing Vobiz answer_url. Configure endpoint_paths_json.answer_url for the direct Vobiz voice flow.")
+
+    body = {
+        "from": from_number,
+        "to": to_number,
+        "answer_url": answer_url,
+        "answer_method": _first_text(payload.get("answer_method"), endpoints.get("answer_method")) or "POST",
+    }
+    _add_optional_vobiz_call_urls(body, payload, endpoints, context)
+    _add_optional_vobiz_call_values(body, payload, endpoints)
+
+    base_url = _first_text(endpoints.get("vobiz_api_base_url"), endpoints.get("api_base_url")) or VOBIZ_API_BASE_URL
+    url = base_url.rstrip("/") + f"/api/v1/Account/{quote(auth_id, safe='')}/Call/"
+    headers = {"X-Auth-ID": auth_id, "X-Auth-Token": auth_token, "Accept": "application/json", "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(url, headers=headers, json=body, timeout=int(endpoints.get("vobiz_call_timeout_seconds") or VOBIZ_CALL_API_TIMEOUT_SECONDS))
+        response.raise_for_status()
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = {"raw_response": getattr(response, "text", "")}
+        call_id = _vobiz_dispatch_call_id(response_payload)
+        call_log = _upsert_vobiz_outbound_dispatch_call_log(
+            task, payload, account, endpoints, response_payload, call_id, from_number, to_number
+        )
+        result_payload = {
+            "provider": "Vobiz",
+            "status": "initiated",
+            "call_log": call_log,
+            "api_id": response_payload.get("api_id") if isinstance(response_payload, dict) else None,
+            "request_uuid": response_payload.get("request_uuid") if isinstance(response_payload, dict) else None,
+            "vobiz_request_uuid": response_payload.get("request_uuid") if isinstance(response_payload, dict) else None,
+            "sip_call_id": call_id,
+            "call_uuid": call_id,
+            "from": from_number,
+            "to": to_number,
+            "channel_account": account.name,
+            "response": response_payload,
+        }
+        record_provider_event(
+            provider="Vobiz",
+            operation="outbound_call",
+            status="Succeeded",
+            company=getattr(task, "company", None),
+            agent=agent_name,
+            task=task.name,
+            request={"channel_account": account.name, "body": body},
+            response=result_payload,
+            external_id=call_id,
+        )
+        if task.channel == "Voice" and getattr(task, "external_record_type", None) == "AI Repeat Follow Up Workflow":
+            try:
+                from confluence_ai.services import repeat_followup
+
+                repeat_followup.mark_voice_started(task.name, result_payload)
+            except Exception as exc:
+                from confluence_ai.services.utils import create_error
+
+                create_error("Repeat Follow Up Voice Start", str(exc), source="vobiz", task=task.name, agent=agent_name, exc=exc)
+        return result_payload
+    except Exception as exc:
+        record_provider_event(
+            provider="Vobiz",
+            operation="outbound_call",
+            status="Failed",
+            company=getattr(task, "company", None),
+            agent=agent_name,
+            task=task.name,
+            request={"channel_account": account.name, "body": body},
+            error=str(exc),
+        )
+        from confluence_ai.services.utils import create_error
+
+        create_error("Vobiz Outbound Call", str(exc), source="vobiz", task=task.name, agent=agent_name, exc=exc)
+        raise
+
+
+def _vobiz_account_name_for_voice(agent, payload: dict) -> str | None:
+    return _first_text(
+        payload.get("vobiz_channel_account"),
+        payload.get("voice_channel_account"),
+        getattr(agent, "allowed_channel_account", None),
+        payload.get("livekit_channel_account_fallback"),
+    )
+
+
+def _add_optional_vobiz_call_urls(body: dict, payload: dict, endpoints: dict, context: dict) -> None:
+    for url_key, method_key in (
+        ("ring_url", "ring_method"),
+        ("hangup_url", "hangup_method"),
+        ("fallback_url", "fallback_method"),
+        ("machine_detection_url", "machine_detection_method"),
+    ):
+        value = _render_vobiz_template(_first_text(payload.get(url_key), endpoints.get(url_key)), context)
+        if value:
+            body[url_key] = value
+            body[method_key] = _first_text(payload.get(method_key), endpoints.get(method_key)) or "POST"
+
+
+def _add_optional_vobiz_call_values(body: dict, payload: dict, endpoints: dict) -> None:
+    for key in (
+        "caller_name",
+        "time_limit",
+        "hangup_on_ring",
+        "machine_detection",
+        "machine_detection_time",
+    ):
+        value = payload.get(key)
+        if value in (None, ""):
+            value = endpoints.get(key)
+        if value not in (None, ""):
+            body[key] = value
+
+
+def _upsert_vobiz_outbound_dispatch_call_log(
+    task,
+    payload: dict,
+    account,
+    endpoints: dict,
+    response_payload: dict,
+    call_id: str | None,
+    from_number: str,
+    to_number: str,
+) -> str | None:
+    if not call_id:
+        return None
+    attempt = None
+    attempt_name = payload.get("attempt")
+    if attempt_name and frappe.db.exists("AI Task Attempt", attempt_name):
+        attempt = frappe.get_doc("AI Task Attempt", attempt_name)
+    event_payload = {
+        "event": "CallInitiated",
+        "Event": "CallInitiated",
+        "CallStatus": "initiated",
+        "status": "initiated",
+        "Direction": "Outbound",
+        "CallUUID": call_id,
+        "call_uuid": call_id,
+        "SIPCallID": call_id,
+        "sip_call_id": call_id,
+        "RequestID": response_payload.get("request_uuid") or call_id,
+        "request_id": response_payload.get("request_uuid") or call_id,
+        "api_id": response_payload.get("api_id"),
+        "From": from_number,
+        "To": to_number,
+        "from_number": from_number,
+        "to_number": to_number,
+        "channel_account": account.name,
+        "company": getattr(task, "company", None),
+        "task": task.name,
+        "task_name": task.name,
+        "attempt": attempt_name,
+        "TrunkID": _doc_get(account, "trunk_id"),
+        "trunk_id": _doc_get(account, "trunk_id"),
+        "Domain": endpoints.get("sip_uri") or endpoints.get("inbound_domain"),
+        "domain": endpoints.get("sip_uri") or endpoints.get("inbound_domain"),
+        "vobiz_outbound_dispatch": 1,
+        "vobiz_api_response": response_payload,
+    }
+    return upsert_call_log(event_payload, task=task, attempt=attempt)
+
+
+def _vobiz_dispatch_call_id(response_payload: dict) -> str | None:
+    if not isinstance(response_payload, dict):
+        return None
+    for key in ("request_uuid", "request_id", "RequestID", "CallUUID", "call_uuid", "api_id"):
+        value = response_payload.get(key)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def _render_vobiz_template(value: object, context: dict) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "{{" in text:
+        try:
+            text = frappe.render_template(text, context)
+        except Exception:
+            pass
+    if "{" in text and "}" in text:
+        try:
+            text = text.format(**context)
+        except Exception:
+            pass
+    return text.strip()
+
+
+def _first_text(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _doc_get(doc, fieldname: str, default=None):
+    if not doc:
+        return default
+    try:
+        return doc.get(fieldname)
+    except Exception:
+        return getattr(doc, fieldname, default)
 
 
 def process_missing_recording_callbacks(minutes: int | None = None, limit: int | None = None) -> dict:
@@ -560,7 +817,7 @@ def _vobiz_recording_channels() -> list:
         return channels
     rows = frappe.get_all(
         "AI Channel Account",
-        filters={"enabled": 1, "channel_type": "LiveKit"},
+        filters={"enabled": 1},
         fields=["name"],
         limit_page_length=500,
     )
@@ -1771,7 +2028,7 @@ def test_vobiz_callback():
     # 1. Create a dummy channel account
     channel_acct = frappe.new_doc("AI Channel Account")
     channel_acct.account_name = "Test Voice Channel 999"
-    channel_acct.channel_type = "LiveKit"
+    channel_acct.channel_type = "Vobiz"
     channel_acct.trunk_id = "test-trunk-999"
     channel_acct.insert(ignore_permissions=True)
     channel_acct_name = channel_acct.name

@@ -4,7 +4,7 @@ import frappe
 import hashlib
 import json
 
-from confluence_ai.services import livekit, whatsapp_bridge, vobiz
+from confluence_ai.services import whatsapp_bridge, vobiz
 from confluence_ai.services import event_router
 from confluence_ai.services import order_confirmation
 from confluence_ai.services.auth import require_access
@@ -29,9 +29,7 @@ def receive_whatsapp() -> dict:
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def receive_livekit() -> dict:
-    require_access("webhook")
-    payload = get_request_json()
-    return _process_telephony_receipt("livekit", payload, livekit.handle_callback)
+    return {"status": "disabled", "reason": "voice_flow_is_vobiz_only"}
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -220,7 +218,9 @@ def replay_pending_receipts(call_log):
                 if not keys.intersection(receipt_keys):
                     deferred.append(row)
                     continue
-                handler = vobiz.handle_callback if row.source == "vobiz" else livekit.handle_callback
+                if row.source != "vobiz":
+                    continue
+                handler = vobiz.handle_callback
                 try:
                     _process_telephony_receipt(row.source, payload, handler)
                 except Exception:
