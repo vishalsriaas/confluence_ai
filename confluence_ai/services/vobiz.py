@@ -5,6 +5,7 @@ import re
 import frappe
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -67,53 +68,33 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
     if not auth_id or not auth_token:
         return {"processed": [], "skipped": 0}
 
-    recordings = _fetch_vobiz_recording_list(auth_id, auth_token, limit=limit, cutoff=cutoff)
+    return _recover_recent_vobiz_media_for_channel(channel, cutoff=cutoff, limit=limit)
+
+
+def _recover_recent_vobiz_media_for_channel(channel, *, cutoff, limit: int) -> dict:
+    auth_id = str(channel.get("vobiz_auth_id") or "").strip()
+    auth_token = _get_password(channel, "vobiz_auth_token")
+    if not auth_id or not auth_token:
+        return {"processed": [], "skipped": 0, "pending": 0}
+
+    rows = _recent_call_logs_needing_vobiz_media(channel, cutoff=cutoff, limit=limit)
     processed: list[dict] = []
     skipped = 0
     pending = 0
 
-    for recording in recordings:
-        recording_dt = _parse_vobiz_datetime(recording.get("add_time"))
-        if recording_dt and recording_dt < cutoff:
-            skipped += 1
-            continue
-        if _recording_duration_sec(recording) <= 0:
-            skipped += 1
-            continue
-
-        call_uuid = str(recording.get("call_uuid") or recording.get("recording_id") or "").strip()
-        if not call_uuid:
-            skipped += 1
-            continue
-
-        payload = _vobiz_recording_api_payload(recording, channel, auth_id)
-        existing = frappe.db.exists("AI Call Log", {"call_uuid": call_uuid})
-        if not existing:
-            existing = _find_existing_call_log(payload)
-        if existing:
-            existing_doc = frappe.get_doc("AI Call Log", existing)
-            if existing_doc.get("recording_url") or existing_doc.get("external_recording_url"):
-                skipped += 1
-                continue
-
-        from confluence_ai.api.webhook import _process_telephony_receipt
-        result = _process_telephony_receipt("vobiz", payload, handle_callback)
-        call_log = result.get("call_log")
+    for row in rows:
+        result = recover_vobiz_media_for_call_log(row.name, channel=channel)
         if result.get("status") == "pending_matching":
             pending += 1
-        elif result.get("status") == "success" and call_log:
-            doc = frappe.get_doc("AI Call Log", call_log)
-            if doc.get("recording_url") or doc.get("external_recording_url"):
-                processed.append({"call_log": call_log, "call_uuid": call_uuid, "channel": channel.name})
-            else:
-                skipped += 1
+        elif result.get("status") == "success":
+            processed.append(result)
         else:
             skipped += 1
 
     if processed:
         record_provider_event(
             provider="Vobiz",
-            operation="recording_backfill",
+            operation="media_recovery",
             status="Succeeded",
             company=channel.get("company"),
             request={"channel": channel.name, "lookback_limit": limit},
@@ -123,6 +104,321 @@ def _backfill_recent_vobiz_recordings_for_channel(channel, *, cutoff, limit: int
 
     frappe.db.commit()
     return {"processed": processed, "skipped": skipped, "pending": pending}
+
+
+def recover_vobiz_media_for_call_log(call_log: str, *, channel=None) -> dict:
+    """Recover Vobiz recording/transcript for one call log using exact provider IDs only."""
+    if not call_log or not frappe.db.exists("AI Call Log", call_log):
+        return {"status": "skipped", "reason": "missing_call_log", "call_log": call_log}
+
+    doc = frappe.get_doc("AI Call Log", call_log)
+    if (doc.get("recording_url") or doc.get("external_recording_url")) and doc.get("transcript"):
+        return {"status": "skipped", "reason": "media_already_present", "call_log": doc.name}
+
+    task = frappe.get_doc("AI Task", doc.task) if doc.get("task") and frappe.db.exists("AI Task", doc.task) else None
+    attempt = frappe.get_doc("AI Task Attempt", doc.attempt) if doc.get("attempt") and frappe.db.exists("AI Task Attempt", doc.attempt) else None
+    candidates = _vobiz_media_call_ids(doc, attempt=attempt)
+    if not candidates:
+        return {"status": "skipped", "reason": "missing_vobiz_call_id", "call_log": doc.name}
+
+    auth_candidates = _vobiz_media_recovery_auth_candidates(doc, task=task, channel=channel)
+    if not auth_candidates:
+        return {"status": "skipped", "reason": "missing_vobiz_auth", "call_log": doc.name, "searched_call_ids": candidates}
+
+    errors: list[str] = []
+    recording_result = {"status": "skipped", "reason": "recording_already_present"}
+    transcript_result = {"status": "skipped", "reason": "transcript_already_present"}
+
+    if not (doc.get("recording_url") or doc.get("external_recording_url")):
+        recording_result = _recover_recording_for_call_log(doc, candidates, auth_candidates)
+        if recording_result.get("status") == "success":
+            doc.reload()
+        elif recording_result.get("error"):
+            errors.append(recording_result["error"])
+
+    if not doc.get("transcript"):
+        doc.reload()
+        transcript_result = _recover_transcript_for_call_log(doc, candidates, auth_candidates)
+        if transcript_result.get("status") == "success":
+            doc.reload()
+        elif transcript_result.get("error"):
+            errors.append(transcript_result["error"])
+
+    changed = recording_result.get("status") == "success" or transcript_result.get("status") == "success"
+    if not changed:
+        return {
+            "status": "skipped",
+            "reason": "vobiz_media_not_ready",
+            "call_log": doc.name,
+            "searched_call_ids": candidates,
+            "recording": recording_result,
+            "transcript": transcript_result,
+            "errors": errors,
+        }
+
+    return {
+        "status": "success",
+        "call_log": doc.name,
+        "recording_updated": recording_result.get("status") == "success",
+        "transcript_updated": transcript_result.get("status") == "success",
+        "searched_call_ids": candidates,
+        "errors": errors,
+    }
+
+
+def _recover_recording_for_call_log(doc, candidates: list[str], auth_candidates: list[dict[str, str]]) -> dict:
+    last_error = ""
+    for auth in auth_candidates:
+        auth_id = auth.get("X-Auth-ID")
+        if not auth_id:
+            continue
+        channel = auth.get("_channel")
+        if not channel:
+            channel = _vobiz_channel_for_auth(auth_id)
+        if not channel:
+            continue
+        for call_id in candidates:
+            try:
+                recording = _fetch_vobiz_recording_by_id(auth_id, auth.get("X-Auth-Token"), call_id)
+            except Exception as exc:
+                last_error = f"{call_id}: {exc}"
+                continue
+            if not recording or not recording.get("recording_url") or _recording_duration_sec(recording) <= 0:
+                continue
+            payload = _vobiz_recording_api_payload(recording, channel, auth_id)
+            payload.update({
+                "source": "vobiz_direct_media_recovery",
+                "task": doc.get("task"),
+                "task_name": doc.get("task"),
+                "attempt": doc.get("attempt"),
+                "call_log": doc.name,
+                "SIPCallID": recording.get("recording_id") or call_id,
+                "sip_call_id": recording.get("recording_id") or call_id,
+            })
+            result = _emit_vobiz_media_callback(payload)
+            if result.get("status") == "success":
+                return {"status": "success", "call_id": call_id, "callback": result}
+            if result.get("status") == "pending_matching":
+                return {"status": "pending_matching", "call_id": call_id, "callback": result}
+    return {"status": "skipped", "reason": "vobiz_recording_not_ready", "error": last_error}
+
+
+def _recover_transcript_for_call_log(doc, candidates: list[str], auth_candidates: list[dict[str, str]]) -> dict:
+    recording_url = doc.get("external_recording_url") or doc.get("recording_url")
+    last_error = ""
+    for auth in auth_candidates:
+        auth_id = auth.get("X-Auth-ID")
+        if not auth_id:
+            continue
+        for call_id in candidates:
+            try:
+                row = _fetch_vobiz_transcription_by_id(auth_id, auth.get("X-Auth-Token"), call_id)
+            except Exception as exc:
+                last_error = f"{call_id}: {exc}"
+                continue
+            if not row:
+                continue
+            payload = _vobiz_transcription_api_payload(row, call_id, doc, recording_url, auth_id)
+            result = _emit_vobiz_media_callback(payload)
+            if result.get("status") == "success":
+                return {"status": "success", "call_id": call_id, "callback": result}
+            if result.get("status") == "pending_matching":
+                return {"status": "pending_matching", "call_id": call_id, "callback": result}
+    return {"status": "skipped", "reason": "vobiz_transcript_not_ready", "error": last_error}
+
+
+def _emit_vobiz_media_callback(payload: dict) -> dict:
+    from confluence_ai.api.webhook import _process_telephony_receipt
+
+    return _process_telephony_receipt("vobiz", payload, handle_callback)
+
+
+def _fetch_vobiz_recording_by_id(auth_id: str, auth_token: str, call_id: str) -> dict | None:
+    url = f"https://api.vobiz.ai/api/v1/Account/{quote(str(auth_id), safe='')}/Recording/{quote(str(call_id), safe='')}/"
+    response = requests.get(
+        url,
+        headers={"X-Auth-ID": auth_id, "X-Auth-Token": auth_token, "Accept": "application/json"},
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    data = response.json()
+    return data if isinstance(data, dict) else None
+
+
+def _fetch_vobiz_transcription_by_id(auth_id: str, auth_token: str, call_id: str) -> dict | None:
+    url = f"https://api.vobiz.ai/api/v1/Account/{quote(str(auth_id), safe='')}/Transcriptions/"
+    response = requests.get(
+        url,
+        headers={"X-Auth-ID": auth_id, "X-Auth-Token": auth_token, "Accept": "application/json"},
+        params={"call_uuid": call_id, "limit": 5},
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    data = response.json()
+    rows = data.get("objects") or data.get("data") or data.get("results") if isinstance(data, dict) else data
+    if isinstance(rows, dict):
+        rows = [rows]
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        row_call_id = str(row.get("call_uuid") or row.get("transcription_id") or row.get("id") or "").strip()
+        transcript = str(row.get("transcription_text") or row.get("transcript") or row.get("text") or "").strip()
+        if row_call_id == str(call_id).strip() and transcript:
+            return row
+    return None
+
+
+def _vobiz_transcription_api_payload(row: dict, call_id: str, doc, recording_url: str | None, auth_id: str) -> dict:
+    transcript = str(row.get("transcription_text") or row.get("transcript") or row.get("text") or "").strip()
+    return {
+        "event": "transcription.completed",
+        "Event": "transcription.completed",
+        "source": "recording_transcription_fallback",
+        "transcript_labels_normalized": True,
+        "account_id": auth_id,
+        "AccountId": auth_id,
+        "company": doc.get("company"),
+        "task": doc.get("task"),
+        "task_name": doc.get("task"),
+        "attempt": doc.get("attempt"),
+        "call_log": doc.name,
+        "CallUUID": call_id,
+        "call_uuid": call_id,
+        "SIPCallID": doc.get("sip_call_id") or call_id,
+        "sip_call_id": doc.get("sip_call_id") or call_id,
+        "transcription_id": row.get("transcription_id") or row.get("id") or call_id,
+        "transcription_text": transcript,
+        "transcript": transcript,
+        "summary": row.get("summary") or transcript[:1000],
+        "sentiment": row.get("sentiment"),
+        "recording_url": recording_url,
+        "url": recording_url,
+        "transcription_duration": row.get("transcription_duration") or row.get("recording_duration"),
+    }
+
+
+def _vobiz_media_call_ids(doc, *, attempt=None) -> list[str]:
+    values = [
+        doc.get("sip_call_id"),
+        _recording_id_from_url(doc.get("recording_url") or doc.get("external_recording_url")),
+        doc.get("call_uuid"),
+    ]
+    for fieldname in ("status_payload_json", "recording_payload_json", "transcript_payload_json", "last_payload_json"):
+        payload = _parse_json_object(doc.get(fieldname))
+        values.extend([
+            payload.get("SIPCallID"),
+            payload.get("sip_call_id"),
+            payload.get("recording_id"),
+            payload.get("transcription_id"),
+            payload.get("CallUUID"),
+            payload.get("call_uuid"),
+        ])
+    if attempt:
+        values.extend([attempt.get("external_id"), attempt.get("call_uuid")])
+        response = _parse_json_object(attempt.get("response_json"))
+        values.extend([
+            response.get("sip_call_id"),
+            response.get("SIPCallID"),
+            response.get("vobiz_call_uuid"),
+            response.get("call_uuid"),
+            response.get("external_id"),
+        ])
+
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in result or is_internal_call_id(text):
+            continue
+        result.append(text)
+    return result
+
+
+def _recording_id_from_url(recording_url: str | None) -> str:
+    if not recording_url:
+        return ""
+    tail = str(recording_url).split("?")[0].rstrip("/").split("/")[-1]
+    if tail.lower().endswith(".wav"):
+        tail = tail[:-4]
+    return tail.strip()
+
+
+def _vobiz_media_recovery_auth_candidates(doc, *, task=None, channel=None) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    if not channel:
+        channel = _vobiz_channel_for_call_log(doc)
+    if channel:
+        auth_id = str(channel.get("vobiz_auth_id") or "").strip()
+        auth_token = _get_password(channel, "vobiz_auth_token")
+        if auth_id and auth_token:
+            candidates.append({"X-Auth-ID": auth_id, "X-Auth-Token": auth_token, "_channel": channel})
+
+    recording_url = doc.get("external_recording_url") or doc.get("recording_url")
+    account_id = _vobiz_account_id({}, recording_url)
+    for headers in _vobiz_media_auth_candidates({}, task=task, account_id=account_id):
+        candidates.append(headers)
+
+    unique: list[dict[str, str]] = []
+    seen = set()
+    for headers in candidates:
+        key = (headers.get("X-Auth-ID"), headers.get("X-Auth-Token"))
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        unique.append(headers)
+    return unique
+
+
+def _vobiz_channel_for_auth(auth_id: str):
+    name = frappe.db.get_value("AI Channel Account", {"enabled": 1, "vobiz_auth_id": auth_id}, "name")
+    return frappe.get_doc("AI Channel Account", name) if name else None
+
+
+def _vobiz_channel_for_call_log(doc):
+    if doc.get("agent"):
+        name = frappe.db.get_value("AI Agent", doc.get("agent"), "allowed_channel_account")
+        if name and frappe.db.exists("AI Channel Account", name):
+            return frappe.get_doc("AI Channel Account", name)
+    return None
+
+
+def _recent_call_logs_needing_vobiz_media(channel, *, cutoff, limit: int) -> list:
+    filters = {
+        "company": channel.get("company"),
+        "creation": [">=", cutoff],
+        "status": ["in", ["Completed", "Unknown", "In Progress"]],
+    }
+    rows = frappe.get_all(
+        "AI Call Log",
+        filters=filters,
+        fields=[
+            "name", "recording_url", "external_recording_url", "transcript",
+            "sip_call_id", "call_uuid", "provider", "attempt",
+        ],
+        order_by="modified asc",
+        limit=limit,
+    )
+    recoverable = []
+    for row in rows:
+        needs_recording = not (row.get("recording_url") or row.get("external_recording_url"))
+        needs_transcript = not row.get("transcript")
+        if not needs_recording and not needs_transcript:
+            continue
+        if not (row.get("attempt") or _row_has_exact_vobiz_id(row)):
+            continue
+        recoverable.append(row)
+    return recoverable
+
+
+def _row_has_exact_vobiz_id(row) -> bool:
+    for value in (row.get("sip_call_id"), row.get("call_uuid"), _recording_id_from_url(row.get("recording_url") or row.get("external_recording_url"))):
+        text = str(value or "").strip()
+        if text and not is_internal_call_id(text):
+            return True
+    return False
 
 
 def _fetch_vobiz_recording_list(auth_id: str, auth_token: str, *, limit: int, cutoff=None) -> list[dict]:

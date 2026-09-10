@@ -93,7 +93,12 @@ def process_missing_recording_transcripts(minutes: int | None = None, limit: int
 
 
 def process_call_log_recording_transcript(call_log: str, *, force: bool = False, config=None) -> dict:
-    """Fetch only Vobiz's existing transcript, with a durable bounded retry budget."""
+    """Fetch only Vobiz's existing transcript, with a durable bounded retry budget.
+
+    ``force`` is reserved for operator-triggered recovery and only bypasses the
+    time gate; terminal states such as an existing transcript, missing recording,
+    or exhausted retry budget remain protected.
+    """
     if not call_log or not frappe.db.exists("AI Call Log", call_log):
         return {"status": "skipped", "reason": "missing_call_log"}
     config = config or get_recording_transcription_config()
@@ -103,6 +108,8 @@ def process_call_log_recording_transcript(call_log: str, *, force: bool = False,
         doc = frappe.get_doc("AI Call Log", call_log, for_update=True)
         now = frappe.utils.now_datetime()
         reason = recovery_wait_reason(doc, config, now)
+        if force and reason == "grace_or_retry_wait":
+            reason = None
         if reason:
             return {"status": "skipped", "reason": reason, "call_log": call_log}
         doc.transcript_recovery_attempts = int(doc.transcript_recovery_attempts or 0) + 1
@@ -368,7 +375,12 @@ def fetch_vobiz_transcript_for_call_log(doc) -> dict:
             row = _select_vobiz_transcription(_vobiz_transcription_rows(response), call_id)
             if not row:
                 continue
-            transcript = str(_transcript_from_payload(row) or "").strip()
+            transcript_payload = {
+                **row,
+                "source": "recording_transcription_fallback",
+                "transcript_labels_normalized": True,
+            }
+            transcript = str(_transcript_from_payload(transcript_payload) or "").strip()
             if not transcript:
                 continue
             summary = str(row.get("summary") or transcript[:1000]).strip()

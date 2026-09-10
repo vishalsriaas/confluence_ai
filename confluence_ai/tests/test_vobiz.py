@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import frappe
+
 from confluence_ai.services import vobiz
 from confluence_ai.services.vobiz import normalize_vobiz_ai_transcript_labels
 
@@ -35,6 +37,30 @@ class TestVobizTranscript(unittest.TestCase):
             "transcript": transcript,
         }
 
+        self.assertEqual(vobiz._transcript_from_payload(payload), transcript)
+
+    def test_pulled_vobiz_transcript_payload_is_not_swapped(self):
+        class FakeDoc:
+            name = "call-unit"
+
+            def get(self, fieldname):
+                return {
+                    "company": "globifit",
+                    "task": "task-unit",
+                    "attempt": "attempt-unit",
+                    "sip_call_id": "provider-sip",
+                }.get(fieldname)
+
+        transcript = "[AGENT]: Namaste\n[CUSTOMER]: Hello"
+        payload = vobiz._vobiz_transcription_api_payload(
+            {"call_uuid": "provider-sip", "transcription_id": "provider-sip", "transcription_text": transcript},
+            "provider-sip",
+            FakeDoc(),
+            "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/provider-sip.wav",
+            "MA_TEST",
+        )
+
+        self.assertTrue(payload["transcript_labels_normalized"])
         self.assertEqual(vobiz._transcript_from_payload(payload), transcript)
 
     def test_builds_expected_recording_url_from_transcript_payload(self):
@@ -152,10 +178,104 @@ class TestVobizTranscript(unittest.TestCase):
         self.assertEqual(vobiz._phone_suffix("+91 98730 90386"), "9873090386")
         self.assertIsNone(vobiz._phone_suffix(None))
 
+    def test_media_call_ids_skip_livekit_internal_ids(self):
+        doc = frappe._dict(
+            sip_call_id="SCL_internal",
+            call_uuid="agent-army-task-unit",
+            recording_url="https://media.vobiz.ai/v1/Account/MA_TEST/Recording/provider-recording.wav",
+            status_payload_json='{"SIPCallID":"provider-status"}',
+        )
+        attempt = frappe._dict(external_id="provider-attempt", call_uuid="SCL_attempt", response_json='{"vobiz_call_uuid":"provider-response"}')
+
+        self.assertEqual(
+            vobiz._vobiz_media_call_ids(doc, attempt=attempt),
+            ["provider-recording", "provider-status", "provider-attempt", "provider-response"],
+        )
+
     def test_recording_backfill_does_not_match_by_phone_and_time(self):
         payload = {"company": "globifit", "From": "00919035019329", "started_at": "2026-09-03 15:40:16"}
         with patch("confluence_ai.services.call_registry.company_for", return_value="globifit"):
             self.assertIsNone(vobiz._find_existing_call_log(payload))
+
+    def test_fetch_vobiz_transcription_uses_exact_id(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "objects": [
+                        {"call_uuid": "other-call", "transcription_text": "Wrong"},
+                        {"call_uuid": "wanted-call", "transcription_text": "Correct"},
+                    ]
+                }
+
+        with patch("confluence_ai.services.vobiz.requests.get", Mock(return_value=FakeResponse())):
+            row = vobiz._fetch_vobiz_transcription_by_id("MA_TEST", "secret", "wanted-call")
+
+        self.assertEqual(row["transcription_text"], "Correct")
+
+    def test_recover_vobiz_media_uses_direct_callback_path(self):
+        class FakeDoc:
+            name = "call-unit"
+            recording_url = None
+            external_recording_url = None
+            transcript = None
+            task = None
+            attempt = None
+
+            def get(self, fieldname):
+                return getattr(self, fieldname, None)
+
+            def reload(self):
+                return None
+
+        class FakeChannel:
+            name = "channel-unit"
+
+            def get(self, fieldname):
+                return {
+                    "vobiz_auth_id": "MA_TEST",
+                    "company": "globifit",
+                    "trunk_id": "ST_TEST",
+                    "endpoint_paths_json": "{}",
+                }.get(fieldname)
+
+        doc = FakeDoc()
+        doc.company = "globifit"
+        doc.sip_call_id = "provider-call"
+        fake_frappe = SimpleNamespace(
+            db=SimpleNamespace(exists=Mock(return_value=True)),
+            get_doc=Mock(return_value=doc),
+        )
+        callbacks = []
+
+        def emit(payload):
+            callbacks.append(payload)
+            return {"status": "success", "call_log": "call-unit"}
+
+        with patch("confluence_ai.services.vobiz.frappe", fake_frappe), \
+            patch("confluence_ai.services.vobiz._vobiz_media_recovery_auth_candidates", Mock(return_value=[{"X-Auth-ID": "MA_TEST", "X-Auth-Token": "secret", "_channel": FakeChannel()}])), \
+            patch("confluence_ai.services.vobiz._fetch_vobiz_recording_by_id", Mock(return_value={
+                "call_uuid": "provider-call",
+                "recording_id": "provider-call",
+                "recording_duration_ms": "1000",
+                "recording_url": "https://media.vobiz.ai/v1/Account/MA_TEST/Recording/provider-call.wav",
+            })), \
+            patch("confluence_ai.services.vobiz._fetch_vobiz_transcription_by_id", Mock(return_value={
+                "call_uuid": "provider-call",
+                "transcription_id": "provider-call",
+                "transcription_text": "[AGENT]: Hi",
+            })), \
+            patch("confluence_ai.services.vobiz._emit_vobiz_media_callback", Mock(side_effect=emit)):
+            result = vobiz.recover_vobiz_media_for_call_log("call-unit")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual([payload["event"] for payload in callbacks], ["recording.completed", "transcription.completed"])
+        self.assertEqual(callbacks[0]["source"], "vobiz_direct_media_recovery")
+        self.assertEqual(callbacks[1]["source"], "recording_transcription_fallback")
 
     def test_recording_backfill_clears_missing_transcript_fallback_disposition(self):
         class FakeCallLog:

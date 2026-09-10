@@ -124,6 +124,13 @@ def backfill_vobiz_recordings(minutes: int | None = None, limit: int | None = No
     return vobiz.process_missing_recording_callbacks(minutes=minutes, limit=limit)
 
 
+@frappe.whitelist()
+def recover_vobiz_media(call_log: str) -> dict:
+    from confluence_ai.services import vobiz
+
+    return vobiz.recover_vobiz_media_for_call_log(call_log)
+
+
 @frappe.whitelist(methods=["POST"])
 def repair_bridge_duplicate(source_call_log: str, target_call_log: str, dry_run: int = 1) -> dict:
     frappe.only_for("System Manager")

@@ -353,6 +353,27 @@ class TestCallRegistry(unittest.TestCase):
             process_call_log_recording_transcript(name, config=cfg)
             self.assertEqual(fetch.call_count, 1)
 
+    def test_force_recovery_bypasses_retry_wait(self):
+        self.reserve()
+        name = self.identity()["call_log"]
+        for event in ("hangup", "recording"):
+            webhook._process_telephony_receipt("vobiz", self.payload(event), vobiz.handle_callback)
+        now = frappe.utils.now_datetime()
+        future = frappe.utils.add_to_date(now, minutes=4)
+        frappe.db.set_value("AI Call Log", name, {
+            "call_end_received_at": now,
+            "recording_received_at": now,
+            "transcript_recovery_next_at": future,
+        })
+        cfg = SimpleNamespace(enabled=True, wait_minutes=5, retry_minutes=5, max_attempts=3)
+        with patch("confluence_ai.services.recording_transcription.fetch_vobiz_transcript_for_call_log",
+                   return_value={"status": "success", "transcript": "[AGENT]: Forced transcript"}) as fetch:
+            self.assertEqual(process_call_log_recording_transcript(name, config=cfg)["reason"], "grace_or_retry_wait")
+            result = process_call_log_recording_transcript(name, force=True, config=cfg)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(frappe.db.get_value("AI Call Log", name, "transcript"), "[AGENT]: Forced transcript")
+        self.assertEqual(fetch.call_count, 1)
+
     def test_concurrent_callbacks_one_record(self):
         self.reserve()
         name = self.identity()["call_log"]
